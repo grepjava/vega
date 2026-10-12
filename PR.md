@@ -24,7 +24,7 @@ From `runtime/patches` (see `runtime/README.md` for details). Each one needs a b
 | Patch | Fixes |
 |---|---|
 | 0001 | `getPreferredTaskExecutor` takes the status-record lock and does two CASes on every enqueue. The patch makes it one acquire load. **Not upstreamable as is:** on `main`, stale `AsyncTaskStealer` and direct jobs call it (`Actor.cpp`, `fromTaskExecutorPreference`) while the task may be running on another thread, so a lock-free walk of the record chain can race the task pushing and popping records. Needs a different design, e.g. a separately published preference. |
-| 0003 | Each task costs two mallocs, the task itself plus its allocator's first slab. The patch makes it one. |
+| 0003 | Each task costs two mallocs, the task itself plus its allocator's first slab. The patch makes it one. **Held back: every size tried loses somewhere** (branch `up-0003`, not pushed; measured 2026-10-12 on the box, glibc). With a 512-byte inline slab (the patch as is), spawning onto other threads gets 22–30% faster, but tasks needing 480–1,000 bytes of task memory still take a second slab and get 3–7% slower (Vega `chained_spawn`). Filling the block to 1 KiB keeps that case level but cuts the spawn gain to 8–20%. With a full 1 KiB slab inline (the size the allocator would have mallocked), cross-thread spawns are 17–30% faster, but the 1,336-byte block leaves glibc's per-thread cache and tasks created and freed on one thread get 9–11% slower (`Task.immediate`). The result depends on the malloc in use, and it can't be measured on Darwin here. An allocator-independent fix looks like 0007's per-thread task-memory pool, which is a larger proposal. |
 | 0006 | A continuation resume updates the escalation record under the status lock. The patch makes it one CAS. |
 | 0007 | Per-thread task-memory lists, handed between threads in batches of 32, so tasks freed on another thread don't take malloc's arena lock. |
 
@@ -47,6 +47,7 @@ Each fix lets Vega drop something, but only once the fix is in a **released** Sw
   | `up-0005` | #93173 |
   | `tsan-continuation-await` | #93179 |
   | `up-0004` | #93180 |
+  | `up-0003` | — (held back, see above; local only) |
 
 - **Build and test** with `~/swiftrt/upstream/up-switch.sh <branch>` (incremental rebuild), then `up-lit.sh <label>` (`test/Concurrency`). The baseline on `main` is 378 passed and 166 unsupported.
 - **TSan tests** show as UNSUPPORTED in that build, because it has no `tsan_runtime` or `libdispatch`. Check them with the Swift 6.3.3 toolchain against a 6.3.3 runtime built with the fix, as was done for #93179.
