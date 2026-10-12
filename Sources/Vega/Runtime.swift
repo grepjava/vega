@@ -26,13 +26,19 @@ public final class Runtime: Sendable {
     ///   - workers: worker threads; defaults to the number of online CPUs.
     ///   - name: thread name prefix.
     ///   - pinThreads: pin worker *i* to CPU *i*.
+    ///   - io: the I/O driver; see ``IOBackend``.
     ///   - blockingThreads: most threads ``blocking(_:)`` runs at once.
     ///   - blockingKeepAlive: how long an idle blocking thread lives.
     public init(workers: Int? = nil, name: String = "vega", pinThreads: Bool = false,
+                io: IOBackend = .automatic,
                 blockingThreads: Int = 512, blockingKeepAlive: Duration = .seconds(10)) {
         scheduler = Scheduler(workers: workers ?? Int(cv_cpu_count()), name: name, pin: pinThreads,
-                              blockingThreads: blockingThreads, blockingKeepAlive: blockingKeepAlive)
+                              io: io, blockingThreads: blockingThreads,
+                              blockingKeepAlive: blockingKeepAlive)
     }
+
+    /// The I/O driver running: `.ioUring` or `.readiness`.
+    public var ioBackend: IOBackend { scheduler.usesRings ? .ioUring : .readiness }
 
     /// The runtime as a `TaskExecutor`, for `Task(executorPreference:)`,
     /// `withTaskExecutorPreference` and `TaskGroup.addTask(executorPreference:)`.
@@ -156,6 +162,20 @@ public final class Runtime: Sendable {
 
     /// I/O driver counters since start (zeros where there is no driver).
     public var ioMetrics: IOMetrics {
+        #if os(Linux)
+        if scheduler.usesRings {
+            var m = IOMetrics()
+            for w in scheduler.workers {
+                let s = cv_uring_get_stats(w.ring)
+                m.parkedPolls &+= s.parked_turns
+                m.busyPolls &+= s.busy_turns
+                m.events &+= s.events
+                m.wakes &+= s.wakes
+                m.fullBatches &+= s.full_batches
+            }
+            return m
+        }
+        #endif
         #if os(Linux) || canImport(Darwin)
         if let d = scheduler.driver {
             let s = cv_driver_get_stats(d.raw)

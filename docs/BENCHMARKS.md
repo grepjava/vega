@@ -186,6 +186,36 @@ Requests per second, with p99 round-trip latency:
 
 **Open question.** The patched runtime is slower than stock at 64 and 256 connections and faster at 1,024. In the scheduler benchmarks it is faster everywhere. This needs a per-patch bisect.
 
+## io_uring driver (2026-10-13)
+
+The completion driver: one io_uring per worker, created with `SINGLE_ISSUER | DEFER_TASKRUN`, and chosen with `Runtime(io: .ioUring)` or `VEGA_DRIVER=uring`. It needs Linux 6.7+ for `FUTEX_WAIT`. Same echo setup as above, on kernel 7.0.
+
+Requests per second, with p99 round-trip latency (epoll, SwiftNIO and Tokio rerun the same day):
+
+| Connections | Vega, epoll | Vega, io_uring | SwiftNIO | Tokio |
+|---|---|---|---|---|
+| 64 | **308,302** (327 탎) | 308,220 (348 탎) | 226,125 (533 탎) | 268,284 (403 탎) |
+| 256 | **295,347** (1.42 ms) | 288,843 (1.54 ms) | 223,970 (2.22 ms) | 270,295 (1.60 ms) |
+| 1,024 | 222,146 (6.8 ms) | 241,321 (7.9 ms) | 206,207 (5.4 ms) | **254,966** (7.7 ms) |
+
+io_uring matches epoll at 64 connections, is 2% behind at 256, and is 9% ahead at 1,024, closing half the gap to Tokio there. The default stays epoll for now.
+
+**How it works.**
+- A task submits on the ring of the worker running it. That worker reaps the completion and resumes the task, so the task's next step runs where its data is hot.
+- Submissions are flushed, and completions reaped, when the worker runs out of local work, every 61 ticks while busy, and when it parks.
+- A parked worker blocks in its own ring with an `IORING_OP_FUTEX_WAIT` armed on its parker word. The existing `cv_unpark` futex wake therefore wakes the ring, and no wake path changed.
+- **Operations.** Reads and accepts are native. Everything else (connect, datagram batches, writes that found the socket full) waits on a one-shot `POLL_ADD`, then retries the syscall.
+- **Cancellation.**
+  - Each operation lives in a slot of the ring's slab with a generation number, until its completion is reaped.
+  - A canceller on another thread marks the slot only if the generation still matches, queues it, and wakes the owner. The owner submits `ASYNC_CANCEL`.
+  - The task always waits for the cancelled completion, so the kernel never writes into a buffer that is gone.
+
+**Two findings from tuning:**
+1. **Writes go through the syscall first.** Sending through the ring suspends the task until the completion, which is one more trip through the scheduler per request: each worker ran twice as many jobs. At 64 connections that cost 16% (263k against 312k). The socket almost always has room, so a write tries `send` directly and waits on the ring only on `EAGAIN`.
+2. **Poll first on reads.** A task reads after handling the previous request, so the socket is usually empty. A plain `IORING_OP_RECV` first tries the receive inline, fails, then arms a poll. `IORING_RECVSEND_POLL_FIRST` skips that attempt. This took 64 connections from 269k to 308k and 1,024 connections from 227k to 241k.
+
+**Next:** multishot receive with a provided-buffer ring, which arms once per connection instead of once per read, and `SEND_ZC` for large writes.
+
 ## Sync primitives (2026-10-12)
 
 8 workers, executor preference, median of 9 runs, in ns/op. Tokio's numbers come from the same benchmarks in `tokio-bench`.

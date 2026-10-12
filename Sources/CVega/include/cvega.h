@@ -311,6 +311,72 @@ int cv_udp_gso_supported(int fd);
 /// be NULL. Bytes received, or -errno.
 long cv_recv_segments(int fd, void *buf, long len, cv_sockaddr *from, int *segment);
 
+// ---- io_uring driver (Linux) ---------------------------------------------
+// The completion driver: one ring per worker (SINGLE_ISSUER, DEFER_TASKRUN),
+// used only from that worker's thread. A task submits on the ring of the
+// worker running it, and the same worker reaps the completion and resumes
+// the task. Sockets aren't registered anywhere: a cv_io only carries the fd
+// and its owners. A parked worker blocks in its ring, with a FUTEX_WAIT armed
+// on its parker, so cv_unpark wakes it with no change to the wake path.
+//
+// An operation lives in a slot of the ring's slab until its completion is
+// reaped, so a task always waits for the kernel to let go of its buffer,
+// cancelled or not. Cancelling from another thread marks the slot (if its
+// generation still matches) and queues it; the owner submits ASYNC_CANCEL.
+
+typedef struct cv_uring cv_uring;
+typedef struct cv_uring_op cv_uring_op;
+
+/// 0 if this kernel runs the uring driver (6.7+: FUTEX_WAIT, EXT_ARG,
+/// DEFER_TASKRUN), else an errno value (ENOSYS, EPERM under seccomp or
+/// io_uring_disabled, EOPNOTSUPP for a missing opcode).
+int cv_uring_probe(void);
+/// A ring for the worker parking on p, created disabled: the worker enables
+/// it from its own thread (the single issuer). NULL with errno on failure.
+cv_uring *cv_uring_new(cv_parker *p);
+/// On the owning thread, before any other call. 0 or an errno value.
+int cv_uring_enable(cv_uring *r);
+/// The worker is done: release the kernel ring now. The slots stay valid
+/// for a late canceller until cv_uring_free.
+void cv_uring_close(cv_uring *r);
+void cv_uring_free(cv_uring *r);
+
+/// Owner thread: queue an operation for continuation bits `waiter`.
+/// Returns its slot; *gen gets the generation that cv_uring_cancel checks.
+/// The result is the syscall's (>= 0) or -errno, -ECANCELED once cancelled.
+cv_uring_op *cv_uring_recv(cv_uring *r, uintptr_t waiter, int fd, void *buf, size_t len, uint64_t *gen);
+/// Result: the accepted fd (non-blocking, close-on-exec).
+cv_uring_op *cv_uring_accept(cv_uring *r, uintptr_t waiter, int fd, uint64_t *gen);
+/// One-shot readiness of direction dir (CV_IO_READ / CV_IO_WRITE). Result:
+/// the poll mask.
+cv_uring_op *cv_uring_poll_ready(cv_uring *r, uintptr_t waiter, int fd, int dir, uint64_t *gen);
+/// Any thread: cancel op if it is still generation gen and pending. Wakes
+/// the owner, which submits the cancel; the waiter is resumed as usual.
+void cv_uring_cancel(cv_uring_op *op, uint64_t gen);
+
+/// Owner thread, busy: submit what is queued and reap without waiting.
+/// Returns how many waiters to resume (cv_uring_wakes(r)[0..<n]).
+int cv_uring_poll(cv_uring *r);
+/// Owner thread, nothing to run: submit, spin up to spin_ns, then block in
+/// the ring until a completion, an unpark or timeout_ns (< 0: forever).
+/// Consumes a pending unpark, as cv_park does. Returns waiters to resume.
+int cv_uring_park(cv_uring *r, int64_t timeout_ns, int64_t spin_ns);
+typedef struct cv_uring_wake {
+    uintptr_t waiter;
+    int64_t res;
+} cv_uring_wake;
+cv_uring_wake *cv_uring_wakes(cv_uring *r);
+cv_driver_stats cv_uring_get_stats(cv_uring *r);
+
+/// A cv_io for an fd of a uring runtime (no registration). NULL on ENOMEM.
+cv_io *cv_uring_io_new(int fd);
+/// Drop one owner; the last closes the fd and frees the cv_io.
+void cv_uring_io_release(cv_io *io);
+/// cv_ios of uring runtimes alive now, process-wide (for tests).
+int cv_uring_io_count(void);
+/// TCP_NODELAY on an accepted TCP connection, as cv_tcp_accept sets it.
+void cv_tcp_accepted(int fd);
+
 // ---- Swift runtime hooks -------------------------------------------------
 typedef void (*cv_enqueue_fn)(void *job, void *ctx);
 /// Route swift_task_enqueueGlobal to fn(job, ctx) through the runtime's

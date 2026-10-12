@@ -28,9 +28,12 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     /// Threads for blocking work (`Runtime.blocking`).
     let blocking: BlockingPool
     #if os(Linux) || canImport(Darwin)
-    /// Sockets; the timer owner blocks in it while parked. nil if it can't be created.
+    /// Sockets; the timer owner blocks in it while parked. nil if it can't be
+    /// created, or when the workers have rings instead.
     let driver: IODriver?
     #endif
+    /// Whether each worker has an io_uring (the uring driver).
+    let usesRings: Bool
     let isShutdown = Atomic<Bool>(false)
     /// The time timers run on; paused in tests.
     let clock = RuntimeClock()
@@ -47,7 +50,7 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     /// past what one of them is about to do.
     let blockingInFlight = Atomic<Int>(0)
 
-    init(workers count: Int, name: String, pin: Bool,
+    init(workers count: Int, name: String, pin: Bool, io: IOBackend = .automatic,
          blockingThreads: Int = 512, blockingKeepAlive: Duration = .seconds(10)) {
         precondition(count >= 1, "a runtime needs at least one worker")
         idle = Idle(workers: count)
@@ -57,8 +60,33 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
         workers = (0..<count).map(Worker.init(index:))
         queues = .allocate(capacity: count)
         parkers = .allocate(capacity: count)
-        #if os(Linux) || canImport(Darwin)
+        #if os(Linux)
+        // All workers get a ring or none does: without one, fall back to
+        // epoll (ring memory counts against RLIMIT_MEMLOCK, and closed rings
+        // are torn down asynchronously, so runtime churn can run out).
+        var rings = URing.wanted(io) && URing.supported
+        if rings {
+            for w in workers {
+                w.ring = cv_uring_new(w.parker)
+                if w.ring == nil {
+                    rings = false
+                    break
+                }
+            }
+            if !rings {
+                for w in workers where w.ring != nil {
+                    cv_uring_free(w.ring)
+                    w.ring = nil
+                }
+            }
+        }
+        usesRings = rings
+        driver = usesRings ? nil : IODriver.make()
+        #else
+        usesRings = false
+        #if canImport(Darwin)
         driver = IODriver.make()
+        #endif
         #endif
         for (i, w) in workers.enumerated() {
             (queues + i).initialize(to: .passUnretained(w.queue))
@@ -92,10 +120,16 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
         #if os(Linux) || canImport(Darwin)
         driver?.destroy()
         #endif
+        #if os(Linux)
+        for w in workers { cv_uring_free(w.ring) }
+        #endif
     }
 
     /// Busy worker: pick up I/O readiness without blocking.
     @inline(__always) func pollIO(on worker: Worker) -> Int {
+        #if os(Linux)
+        if let ring = worker.ring { return URing.deliver(cv_uring_poll(ring), ring, on: worker, busy: true) }
+        #endif
         #if os(Linux) || canImport(Darwin)
         if let driver { return driver.poll(on: worker) }
         #endif

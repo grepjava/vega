@@ -2,6 +2,7 @@ import CVega
 import Synchronization
 import Testing
 @testable import Vega
+import VegaTest
 
 private let ms: UInt64 = 1_000_000
 
@@ -216,14 +217,16 @@ private func drain(_ w: inout Wheel, _ now: UInt64) -> [Int] {
         #expect(elapsed >= 40 && elapsed < 300, "took \(elapsed) ms")
     }
 
+    /// On paused time, so a busy machine can't stretch the gaps.
     @Test func intervalMissedTicks() {
         let rt = Runtime(workers: 1)
         defer { rt.shutdown() }
+        let clock = MockClock(pausing: rt)
         func run(_ behavior: Interval.MissedTickBehavior) -> [Int] {
             rt.block { () async -> [Int] in
                 var iv = Interval(every: .milliseconds(10), missedTickBehavior: behavior)
                 let first = try! await iv.tick()
-                spin(microseconds: 35_000) // miss three ticks
+                await clock.advance(by: .milliseconds(35)) // miss three ticks
                 var offsets: [Int] = []
                 for _ in 0..<3 {
                     let t = try! await iv.tick()
@@ -238,9 +241,7 @@ private func drain(_ w: inout Wheel, _ now: UInt64) -> [Int] {
         // Skip: one late tick, then the old schedule from after now (35 ms).
         #expect(run(.skip) == [10, 40, 50])
         // Delay: a new schedule from when the late tick completed.
-        let delayed = run(.delay)
-        #expect(delayed[0] == 10)
-        #expect(delayed[1] >= 45 && delayed[2] - delayed[1] >= 10, "\(delayed)")
+        #expect(run(.delay) == [10, 45, 55])
     }
 }
 

@@ -36,6 +36,12 @@ final class Worker: @unchecked Sendable {
     /// The scheduler's address, to recognise "this thread belongs to me" in
     /// `Scheduler.enqueue` without touching reference counts.
     var owner: UnsafeMutableRawPointer? = nil
+    #if os(Linux)
+    /// This worker's io_uring when the runtime uses the uring driver.
+    /// Created with the runtime, enabled in `run` (its single issuer is this
+    /// thread), freed by the scheduler.
+    var ring: OpaquePointer? = nil
+    #endif
 
     private var lifo: UnownedJob?
     private var lifoStreak = 0
@@ -188,13 +194,22 @@ final class Worker: @unchecked Sendable {
         cv_current_set(Unmanaged.passUnretained(self).toOpaque())
         let s = scheduler.unsafelyUnwrapped
         let executor = s.asUnownedTaskExecutor()
+        #if os(Linux)
+        if let ring {
+            let e = cv_uring_enable(ring)
+            precondition(e == 0, "vega: cannot enable io_uring (errno \(e))")
+        }
+        #endif
         while !s.isShutdown.load(ordering: .relaxed) {
-            if let job = nextJob(s) ?? steal(s) {
+            if let job = nextJob(s) ?? ringJob() ?? steal(s) {
                 runJob(job, s, executor)
             } else {
                 park(s)
             }
         }
+        #if os(Linux)
+        if let ring { cv_uring_close(ring) }
+        #endif
         cv_current_set(nil)
         Unmanaged.passUnretained(s).release() // the retain Scheduler.init took for this thread
     }
@@ -249,6 +264,33 @@ final class Worker: @unchecked Sendable {
         if let job = queue.pop() { audit("local.pop"); return job }
         audit("inject.popBatch")
         return s.inject.popBatch(into: queue, workers: s.workerCount)
+    }
+
+    /// Out of local work: submit what our tasks queued on the ring and
+    /// collect its completions before looking at other workers. The tasks
+    /// they resume are ours anyway (their I/O ran on our ring).
+    @inline(__always) private func ringJob() -> UnownedJob? {
+        #if os(Linux)
+        guard let ring, URing.deliver(cv_uring_poll(ring), ring, on: self, busy: false) > 0 else { return nil }
+        if let job = lifo {
+            lifo = nil
+            return job
+        }
+        return queue.pop()
+        #else
+        return nil
+        #endif
+    }
+
+    /// The uring driver's park: every worker sleeps in its own ring, since
+    /// only it can reap its completions. nil without a ring.
+    @inline(__always) private func parkInRing(_ timeout: Int64) -> Int? {
+        #if os(Linux)
+        guard let ring else { return nil }
+        return URing.deliver(cv_uring_park(ring, timeout, Self.spinNanos), ring, on: self, busy: false)
+        #else
+        return nil
+        #endif
     }
 
     private func steal(_ s: Scheduler) -> UnownedJob? {
@@ -327,15 +369,19 @@ final class Worker: @unchecked Sendable {
             }
 
             var fired = 0
-            #if os(Linux) || canImport(Darwin)
-            if ownsTimers, let driver = s.driver {
-                fired = driver.park(parker, timeout: timeout, on: self)
+            if let n = parkInRing(timeout) {
+                fired = n
             } else {
+                #if os(Linux) || canImport(Darwin)
+                if ownsTimers, let driver = s.driver {
+                    fired = driver.park(parker, timeout: timeout, on: self)
+                } else {
+                    cv_park_spin(parker, timeout, Self.spinNanos)
+                }
+                #else
                 cv_park_spin(parker, timeout, Self.spinNanos)
+                #endif
             }
-            #else
-            cv_park_spin(parker, timeout, Self.spinNanos)
-            #endif
 
             if ownsTimers {
                 s.timerOwner.store(-1, ordering: .sequentiallyConsistent)

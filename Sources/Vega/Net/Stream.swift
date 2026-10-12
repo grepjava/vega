@@ -8,11 +8,22 @@ import Darwin
 
 // The byte-stream operations TCP and Unix sockets (and their split halves)
 // share. The readiness backends try the syscall first and wait only on EAGAIN.
+// The uring driver submits reads and accepts on the ring (a read usually has
+// to wait anyway); writes still try the syscall first.
 extension IORegistration {
     /// Read into `buffer`'s spare capacity: bytes read, 0 at end of stream.
     @inline(__always)
     func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
         guard buffer.spareCapacity > 0 else { return 0 }
+        while let res = await URing.perform(.recv(fd, buffer.base + buffer.count, buffer.spareCapacity),
+                                            owner: owner) {
+            if res >= 0 {
+                buffer.count += Int(res)
+                await Runtime.consumeBudget()
+                return Int(res)
+            }
+            try Self.retryable(res)
+        }
         if io.pointee.read_drained != 0 {
             // The last read came up short, so the socket was empty: skip the
             // recv that would say EAGAIN and wait for the next event (Tokio
@@ -45,6 +56,10 @@ extension IORegistration {
     /// Write all of `bytes`.
     @inline(__always)
     func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError) {
+        // On every driver: the socket almost always has room, and a send
+        // through the ring would suspend the task for its completion (one
+        // more trip through the scheduler per write). EAGAIN waits on the
+        // ring's poll under the uring driver.
         var done = 0
         while done < bytes.count {
             let n = cv_send(fd, bytes.baseAddress! + done, bytes.count - done)
@@ -113,12 +128,25 @@ extension IORegistration {
     /// Accept connections with `accept` (a cv_*_accept), registering each.
     @inline(__always)
     func accept(_ accept: (Int32, UnsafeMutablePointer<Int32>) -> Int32) async throws(IOError) -> IORegistration {
+        while let res = await URing.perform(.accept(fd), owner: owner) {
+            if res >= 0 {
+                // As cv_tcp_accept; on a Unix socket it fails, harmlessly.
+                cv_tcp_accepted(Int32(res))
+                await Runtime.consumeBudget()
+                return try IORegistration(fd: Int32(res), driver: home)
+            }
+            switch Int32(-res) {
+            case ECONNABORTED, EPROTO, EINTR, EAGAIN: continue
+            case ECANCELED: throw .cancelled
+            default: throw IOError(code: Int32(-res))
+            }
+        }
         while true {
             var err: Int32 = 0
             let fd = accept(self.fd, &err)
             if fd >= 0 {
                 await Runtime.consumeBudget()
-                return try IORegistration(fd: fd, driver: IODriver(raw: driver))
+                return try IORegistration(fd: fd, driver: home)
             }
             switch err {
             case EAGAIN, EWOULDBLOCK: try await wait(CV_IO_READ)
@@ -152,6 +180,16 @@ extension IORegistration {
             case EINTR: continue
             default: throw IOError(code: err)
             }
+        }
+    }
+
+    /// A failed ring operation: return to retry (EINTR, EAGAIN), else throw.
+    @inline(__always)
+    static func retryable(_ res: Int64) throws(IOError) {
+        switch Int32(-res) {
+        case EINTR, EAGAIN: return
+        case ECANCELED: throw .cancelled
+        default: throw IOError(code: Int32(-res))
         }
     }
 

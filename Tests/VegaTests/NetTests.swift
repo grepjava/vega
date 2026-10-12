@@ -17,8 +17,11 @@ func echo(_ conn: borrowing TCPStream) async {
     }
 }
 
+/// Sockets open on the current runtime's driver (process-wide under the
+/// uring driver, which has no registry).
 func registered() throws(IOError) -> Int {
-    Int(cv_driver_registered(try IODriver.current().raw))
+    guard let raw = try IODriver.current().raw else { return Int(cv_uring_io_count()) }
+    return Int(cv_driver_registered(raw))
 }
 
 func tempSocketPath() -> String {

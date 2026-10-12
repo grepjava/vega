@@ -13,11 +13,21 @@ import Darwin
 /// (Darwin) instance, as in Tokio's multi-threaded runtime. The parked worker that owns the timers blocks in
 /// it; busy workers poll it every `Worker.timerInterval` ticks. Trivial to
 /// copy (no ARC); the scheduler frees it.
+///
+/// Under the uring driver there is no such object: `raw` is nil and `owner`
+/// names the runtime whose workers' rings serve its sockets.
 struct IODriver: @unchecked Sendable {
-    let raw: OpaquePointer
+    let raw: OpaquePointer?
+    /// The scheduler, unretained, when the runtime runs the uring driver.
+    let owner: UnsafeRawPointer?
+
+    init(raw: OpaquePointer?, owner: UnsafeRawPointer? = nil) {
+        self.raw = raw
+        self.owner = owner
+    }
 
     static func make() -> IODriver? {
-        cv_driver_new().map(IODriver.init(raw:))
+        cv_driver_new().map { IODriver(raw: $0) }
     }
 
     func destroy() { cv_driver_free(raw) }
@@ -74,28 +84,58 @@ struct IODriver: @unchecked Sendable {
 /// the owning socket deregisters it once.
 struct IORegistration: @unchecked Sendable {
     let io: UnsafeMutablePointer<cv_io>
-    let driver: OpaquePointer
+    /// The epoll driver; nil under the uring driver.
+    let driver: OpaquePointer?
+    /// Under the uring driver, the scheduler (unretained) whose workers'
+    /// rings a task off them hops to.
+    let owner: UnsafeRawPointer?
 
     init(fd: Int32, driver: IODriver) throws(IOError) {
-        var err: Int32 = 0
-        guard let io = cv_driver_register(driver.raw, fd, &err) else {
-            closeDescriptor(fd)
-            throw IOError(code: err)
+        if let raw = driver.raw {
+            var err: Int32 = 0
+            guard let io = cv_driver_register(raw, fd, &err) else {
+                closeDescriptor(fd)
+                throw IOError(code: err)
+            }
+            self.io = io
+        } else {
+            guard let io = cv_uring_io_new(fd) else {
+                closeDescriptor(fd)
+                throw IOError(code: ENOMEM)
+            }
+            self.io = io
         }
-        self.io = io
         self.driver = driver.raw
+        self.owner = driver.owner
     }
 
     var fd: Int32 { io.pointee.fd }
 
+    /// The driver this registration came from, for sockets it accepts.
+    var home: IODriver { IODriver(raw: driver, owner: owner) }
+
     /// Unregister and close the fd.
-    func close() { cv_driver_deregister(driver, io) }
+    func close() {
+        if let driver {
+            cv_driver_deregister(driver, io)
+        } else {
+            cv_uring_io_release(io)
+        }
+    }
 
     /// Wait until the driver reports `direction` ready (after a syscall said
     /// EAGAIN). Throws `.cancelled` if the task is cancelled first: only this
     /// wait is abandoned, the fd stays usable.
     @inline(__always)
     func wait(_ direction: Int32) async throws(IOError) {
+        if let res = await URing.perform(.poll(fd, direction), owner: owner) {
+            // Any mask means "try again"; errors and hang-ups show up there.
+            // A poll consumes nothing, so a cancelled task gives up even if
+            // readiness beat the cancel to the ring (as the epoll path does).
+            if res == -Int64(ECANCELED) || Task.isCancelled { throw .cancelled }
+            if res < 0 { throw IOError(code: Int32(-res)) }
+            return
+        }
         let ready = await withTaskCancellationHandler {
             await withUnsafeContinuation { (c: UnsafeContinuation<Bool, Never>) in
                 let waiter = IOWaiter.bits(c)

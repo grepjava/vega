@@ -13,7 +13,7 @@ LIBS=$HOME/.local/share/swiftly/toolchains/6.3.3/usr/lib/swift/linux
 PATCHED=$HOME/swiftrt/out/patched/libswift_Concurrency.so
 SECS=10
 CONNS="64 256 1024"
-SERVERS="vega vega-patched nio tokio"
+SERVERS="vega vega-uring vega-patched nio tokio"
 while [ $# -gt 0 ]; do
     case "$1" in
     --secs) SECS=$2; shift 2 ;;

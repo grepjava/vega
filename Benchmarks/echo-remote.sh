@@ -14,6 +14,7 @@ PORT=7000
 start() {
     case "$1" in
     vega) LD_LIBRARY_PATH=$PWD/lib exec taskset -c 0,1,4,5 ./vega-echo --port $PORT --workers 4 --stats ;;
+    vega-uring) VEGA_DRIVER=uring LD_LIBRARY_PATH=$PWD/lib exec taskset -c 0,1,4,5 ./vega-echo --port $PORT --workers 4 --stats ;;
     vega-patched) LD_LIBRARY_PATH=$PWD/lib-patched:$PWD/lib exec taskset -c 0,1,4,5 ./vega-echo --port $PORT --workers 4 --stats ;;
     nio) LD_LIBRARY_PATH=$PWD/lib exec taskset -c 0,1,4,5 ./nio-echo --port $PORT --workers 4 ;;
     tokio) exec taskset -c 0,1,4,5 ./tokio-bench/target/release/echo-server --port $PORT --workers 4 ;;

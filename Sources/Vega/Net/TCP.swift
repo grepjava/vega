@@ -133,6 +133,7 @@ extension IODriver {
     /// The driver of the runtime running the caller.
     static func current() throws(IOError) -> IODriver {
         guard let s = Worker.currentScheduler else { throw .notOnRuntime }
+        if s.usesRings { return IODriver(raw: nil, owner: UnsafeRawPointer(Unmanaged.passUnretained(s).toOpaque())) }
         guard let d = s.driver else { throw .unsupported }
         return d
     }
