@@ -50,6 +50,14 @@ final class Worker: @unchecked Sendable {
     /// the LIFO slot: a resumed yielder, or timers fired in deadline order
     /// (through the LIFO slot a batch of them would run newest first).
     private var toBack = false
+    /// While set, jobs scheduled here go to the inject queue: a busy worker's
+    /// I/O poll, so its batch doesn't push older queued jobs out of turn.
+    private var toInject = false
+    /// The jobs scheduled while `toInject`, pushed in one locked batch.
+    private let injectBuffer = UnsafeMutablePointer<UnownedJob>.allocate(capacity: Worker.injectBufferCapacity)
+    private var injectCount = 0
+    /// Two per I/O event (read and write), for a full driver batch.
+    static let injectBufferCapacity = 2048
     /// Cooperative budget left for the running task (`Runtime.consumeBudget`).
     var budget: Int32 = 0
     /// Tokio's per-poll budget.
@@ -65,7 +73,10 @@ final class Worker: @unchecked Sendable {
         rng = UInt32(truncatingIfNeeded: index &* 0x9E37_79B9) | 1
     }
 
-    deinit { cv_parker_free(parker) }
+    deinit {
+        cv_parker_free(parker)
+        injectBuffer.deallocate()
+    }
 
     /// The worker running on this thread, unretained.
     @inline(__always) static var current: Unmanaged<Worker>? {
@@ -90,7 +101,11 @@ final class Worker: @unchecked Sendable {
         JobAudit.note(job, toBack || Self.identity(job) == running ? "->back" : (lifo == nil ? "->lifo" : "->lifo(displace)"))
         if let p = lifo { JobAudit.note(p, "displaced->queue") }
         #endif
-        if toBack || Self.identity(job) == running {
+        if toInject {
+            if injectCount == Self.injectBufferCapacity { flushInject(s) }
+            (injectBuffer + injectCount).initialize(to: job)
+            injectCount += 1
+        } else if toBack || Self.identity(job) == running {
             // Task.yield (or any self-reschedule): go to the back, let others run.
             queue.push(job, overflow: s.inject)
             s.notifyParked()
@@ -116,6 +131,33 @@ final class Worker: @unchecked Sendable {
         toBack = true
         defer { toBack = false }
         return body()
+    }
+
+    /// Run `body` (which schedules jobs here) with jobs going to the inject
+    /// queue, then wake a sleeper for them.
+    ///
+    /// For an I/O batch picked up by a busy worker: on the local queue it
+    /// would overflow, and overflow sends the *oldest* half to the inject
+    /// queue, where it is served once every 31 ticks while newer wakes keep
+    /// refilling the local queues. Under load (1,024 echo connections) that
+    /// starved some connections for tens of milliseconds. Through the inject
+    /// queue every woken task waits in one FIFO, which workers drain in fair
+    /// shares as soon as their local queues empty.
+    @inline(__always) func viaInject<R>(_ s: Scheduler, _ body: () -> R) -> R {
+        toInject = true
+        defer {
+            toInject = false
+            flushInject(s)
+            s.notifyParked()
+        }
+        return body()
+    }
+
+    private func flushInject(_ s: Scheduler) {
+        guard injectCount > 0 else { return }
+        let buf = injectBuffer
+        s.inject.pushBatch(UInt32(injectCount - 1)) { buf[Int($0)] }
+        injectCount = 0
     }
 
     /// Park a yielding task's continuation until the running job returns.
@@ -182,7 +224,10 @@ final class Worker: @unchecked Sendable {
 
     private func nextJob(_ s: Scheduler) -> UnownedJob? {
         tick &+= 1
-        if tick % Self.timerInterval == 0 { _ = s.fireDueTimers(on: self) }
+        if tick % Self.timerInterval == 0 {
+            _ = s.fireDueTimers(on: self)
+            _ = s.pollIO(on: self)
+        }
 
         if let job = lifo {
             lifo = nil
@@ -195,7 +240,12 @@ final class Worker: @unchecked Sendable {
         }
         lifoStreak = 0
 
-        if tick % Self.injectInterval == 0, let job = s.inject.pop() { audit("inject.pop"); return job }
+        // A fair share, not one job: busy workers' I/O polls feed the inject
+        // queue, and one job per interval would let it grow without bound.
+        if tick % Self.injectInterval == 0, let job = s.inject.popBatch(into: queue, workers: s.workerCount) {
+            audit("inject.popBatch(interval)")
+            return job
+        }
         if let job = queue.pop() { audit("local.pop"); return job }
         audit("inject.popBatch")
         return s.inject.popBatch(into: queue, workers: s.workerCount)
@@ -242,7 +292,8 @@ final class Worker: @unchecked Sendable {
                 reclaim(s)
                 return
             }
-            // One parked worker owns the timers and sleeps only until the next deadline.
+            // One parked worker owns the timers and the I/O driver: it sleeps
+            // in the driver, only until the next deadline.
             let ownsTimers = s.timerOwner.compareExchange(expected: -1, desired: index,
                                                           ordering: .sequentiallyConsistent).exchanged
             var timeout: Int64 = -1
@@ -255,12 +306,20 @@ final class Worker: @unchecked Sendable {
                 timeout = s.timers.timeout(now: cv_now_ns())
             }
 
-            cv_park_spin(parker, timeout, Self.spinNanos)
-
             var fired = 0
+            #if os(Linux)
+            if ownsTimers, let driver = s.driver {
+                fired = driver.park(parker, timeout: timeout, on: self)
+            } else {
+                cv_park_spin(parker, timeout, Self.spinNanos)
+            }
+            #else
+            cv_park_spin(parker, timeout, Self.spinNanos)
+            #endif
+
             if ownsTimers {
                 s.timerOwner.store(-1, ordering: .sequentiallyConsistent)
-                fired = s.fireDueTimers(on: self)
+                fired += s.fireDueTimers(on: self)
             }
             if !s.idle.isParked(index) {
                 // Woken by workerToNotify: it already counted us as searching.

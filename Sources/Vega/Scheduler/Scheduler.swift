@@ -21,6 +21,10 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     let inject = InjectQueue()
     let idle: Idle
     let timers = TimerQueue()
+    #if os(Linux)
+    /// Sockets; the timer owner blocks in it while parked. nil if it can't be created.
+    let driver: IODriver?
+    #endif
     let isShutdown = Atomic<Bool>(false)
 
     /// Written fields below, away from the read-mostly ones above.
@@ -39,9 +43,15 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
         workers = (0..<count).map(Worker.init(index:))
         queues = .allocate(capacity: count)
         parkers = .allocate(capacity: count)
+        #if os(Linux)
+        driver = IODriver.make()
+        #endif
         for (i, w) in workers.enumerated() {
             (queues + i).initialize(to: .passUnretained(w.queue))
             (parkers + i).initialize(to: w.parker)
+            #if os(Linux)
+            if let driver { cv_parker_attach_driver(w.parker, driver.raw) }
+            #endif
         }
         let me = Unmanaged.passUnretained(self).toOpaque()
         for w in workers {
@@ -65,6 +75,17 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     deinit {
         queues.deallocate()
         parkers.deallocate()
+        #if os(Linux)
+        driver?.destroy()
+        #endif
+    }
+
+    /// Busy worker: pick up I/O readiness without blocking.
+    @inline(__always) func pollIO(on worker: Worker) -> Int {
+        #if os(Linux)
+        if let driver { return driver.poll(on: worker) }
+        #endif
+        return 0
     }
 
     func enqueue(_ job: consuming ExecutorJob) {

@@ -133,8 +133,55 @@ Static, patched, ns/op; each value is the range over three rounds.
 
 | Bench | Before 0007 | With 0007 | Tokio |
 |---|---|---|---|
-| spawn_discard | 1,740�1,850 | **1,222�1,273** | 474 |
-| chained_spawn | 1,168�1,220 | **973�1,158** | 921 |
-| spawn_many | 1,481�1,845 | 1,515�1,694 | 474 |
+| spawn_discard | 1,740–1,850 | **1,222–1,273** | 474 |
+| chained_spawn | 1,168–1,220 | **973–1,158** | 921 |
+| spawn_many | 1,481–1,845 | 1,515–1,694 | 474 |
 
-**Why spawn_many didn't move.** Its regular task group keeps every finished child alive until the parent collects the result, so all 100k tasks, about 100 MB, are live at once. No allocator can recycle those, and the spawning thread's time goes to fresh memory: page faults and `_int_malloc`. Tokio's equivalent bench drops each task as it finishes. The like-for-like comparison is spawn_discard, whose children are freed on completion: about 2.6� Tokio.
+**Why spawn_many didn't move.** Its regular task group keeps every finished child alive until the parent collects the result, so all 100k tasks, about 100 MB, are live at once. No allocator can recycle those, and the spawning thread's time goes to fresh memory: page faults and `_int_malloc`. Tokio's equivalent bench drops each task as it finishes. The like-for-like comparison is spawn_discard, whose children are freed on completion: about 2.6× Tokio.
+
+## Phase 2, first slice (2026-10-12): epoll driver, TCP echo
+
+The first I/O driver: one edge-triggered epoll instance per runtime (Tokio's shape), `TCPListener` and `TCPStream`, and per-operation cancellation. Benchmarked as a TCP echo server against SwiftNIO and Tokio.
+
+**Setup.** Each server runs 4 workers on physical cores 0–1 (CPUs 0, 1, 4, 5). The same closed-loop client (`tokio-bench`'s `echo-load`, 4 threads) runs on cores 2–3 and drives all of them. Each connection sends 64 bytes, waits for the echo, and repeats. Each run is 10 s after a 2 s warm-up. All servers use the stock Swift 6.3.3 runtime unless marked patched. Run with `Benchmarks/echo-on-box.sh`.
+
+- **Vega:** `vega-echo`, one task per connection, 4 KiB `IOBuffer`.
+- **SwiftNIO:** `nio-echo`, a classic `ChannelInboundHandler` that writes each read and flushes on `channelReadComplete`, with NIO 2.x `MultiThreadedEventLoopGroup`. This is NIO's fastest path.
+- **Tokio:** `echo-server`, `tokio::spawn` per connection, 4 KiB buffer.
+
+Requests per second, with p99 round-trip latency:
+
+| Connections | Vega | Vega, patched runtime | SwiftNIO | Tokio |
+|---|---|---|---|---|
+| 64 | **299,011** (337 µs) | 272,180 (395 µs) | 220,604 (538 µs) | 267,724 (404 µs) |
+| 256 | **296,824** (1.39 ms) | 271,104 (1.59 ms) | 224,107 (2.21 ms) | 271,914 (1.59 ms) |
+| 1,024 | 227,451 (6.9 ms) | 249,173 (7.9 ms) | 205,226 (5.4 ms) | **253,352** (7.7 ms) |
+
+- **Against Tokio:** 11% and 9% more requests at 64 and 256 connections, with lower p99. At 1,024 connections Vega does 10% fewer requests (see below).
+- **Against SwiftNIO:** 1.36× and 1.32× the throughput at 64 and 256 connections, 1.11× at 1,024, with 37% lower p99 at 64 and 256.
+
+**How the driver works.**
+- The parked worker that owns the timers also owns the driver: it blocks in `epoll_pwait2`, with the next timer deadline as the timeout.
+- Busy workers poll the driver with a zero timeout every 61 ticks.
+- A worker blocked in the driver is woken through an eventfd. Its parker has a fourth state, "parked in I/O", so every existing wake path (`cv_unpark`) works unchanged.
+- Each fd has a read slot and a write slot: idle, ready, or a waiting continuation. Arming, readiness and cancellation are each one CAS, so cancelling one read leaves the socket usable.
+- A closed fd's registration is freed only after the driver's next turn, because a batch already taken from the kernel may still name it.
+
+**Three findings from tuning:**
+1. **Short reads.** When a read returns fewer bytes than the buffer holds, the socket is drained. The next read waits for an event instead of making a `recv` that only returns `EAGAIN`. Tokio does the same. This took 64 connections from about 280k to 299k requests/s and 256 connections from 269k to 297k, since syscalls are 78% of the server's CPU.
+2. **Fairness under load.**
+   - *The problem.* At 1,024 connections, p99 was 20–25 ms against Tokio's 7–8 ms.
+   - *The cause.* A busy worker's poll returns about 190 ready tasks, while it runs 61 jobs between polls. Its local queue overflowed, and overflow sends the oldest half to the inject queue, which each worker served one job per 31 ticks. Newly woken connections kept being served first, while the overflowed ones waited.
+   - *The fix.*
+     - A busy worker's poll fills only its local queue's free room, and the rest goes to the inject queue in event order.
+     - Every 31 ticks a worker takes a fair batch from the inject queue instead of one job.
+   - *The result.* p99 fell to about 6.5 ms, below Tokio's.
+   - *The cost.* Throughput at 1,024 connections. In a closed loop, throughput is connections divided by mean latency, and fair FIFO order raised p50 from 2.4 to 4.5 ms.
+3. **Batch size.** The driver takes up to 1,024 events per poll, as Tokio does. With 256, ready sockets were left for the next poll.
+
+**Where the time goes at 1,024 connections (perf):**
+- 78% kernel: TCP, syscall entry and exit, conntrack, AppArmor.
+- 11% Swift's concurrency runtime, mostly the status-record lock taken by `withTaskCancellationHandler` and by `getPreferredTaskExecutor` on each resume.
+- 6% Vega.
+
+**Open question.** The patched runtime is slower than stock at 64 and 256 connections and faster at 1,024. In the scheduler benchmarks it is faster everywhere. This needs a per-patch bisect.

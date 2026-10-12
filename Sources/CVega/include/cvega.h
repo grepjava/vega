@@ -69,6 +69,118 @@ typedef void (*cv_thread_fn)(void *arg);
 /// Returns 0 or an errno value.
 int cv_thread_spawn(cv_thread_fn fn, void *arg, const char *name, int cpu);
 
+// ---- I/O driver (Linux: edge-triggered epoll) -----------------------------
+// One per runtime, as in Tokio. Whichever parked worker owns the timers blocks
+// in it; busy workers poll it with a zero timeout. A parker blocked in the
+// driver is woken through the driver's eventfd instead of a futex.
+
+/// One registered fd. Each direction has a slot: 0 idle, 1 ready (an event
+/// came while nobody waited), or a waiting continuation's bits.
+typedef struct cv_io {
+    uintptr_t slot[2]; // only through __atomic builtins
+    int fd;
+    /// Set by the owning task after a short read: the socket is drained, so
+    /// the next read waits for an event instead of a recv that says EAGAIN.
+    int read_drained;
+    struct cv_io *next; // deferred-release list
+} cv_io;
+
+#define CV_IO_READ 0
+#define CV_IO_WRITE 1
+#define CV_IO_IDLE ((uintptr_t)0)
+#define CV_IO_READY ((uintptr_t)1)
+
+/// The task got EAGAIN and wants to wait: store `waiter` in the slot.
+/// Returns 0 if armed, 1 if an event had already arrived (consumed: retry the
+/// syscall instead of waiting).
+static inline int cv_io_arm(cv_io *io, int dir, uintptr_t waiter) {
+    uintptr_t cur = __atomic_load_n(&io->slot[dir], __ATOMIC_ACQUIRE);
+    for (;;) {
+        uintptr_t next = cur == CV_IO_READY ? CV_IO_IDLE : waiter;
+        if (__atomic_compare_exchange_n(&io->slot[dir], &cur, next, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return next == CV_IO_IDLE;
+    }
+}
+
+/// Take `waiter` back out of the slot. Returns 1 if it was still there (the
+/// caller resumes it), 0 if the driver or a canceller already took it.
+static inline int cv_io_disarm(cv_io *io, int dir, uintptr_t waiter) {
+    return __atomic_compare_exchange_n(&io->slot[dir], &waiter, CV_IO_IDLE, 0,
+                                       __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+}
+
+/// Consume a READY left by an event that came while nobody waited.
+/// Returns 1 if there was one.
+static inline int cv_io_take_ready(cv_io *io, int dir) {
+    uintptr_t ready = CV_IO_READY;
+    return __atomic_load_n(&io->slot[dir], __ATOMIC_RELAXED) == CV_IO_READY &&
+           __atomic_compare_exchange_n(&io->slot[dir], &ready, CV_IO_IDLE, 0,
+                                       __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+}
+
+/// Cancellation: take whatever waiter is in the slot, or 0 if none.
+static inline uintptr_t cv_io_take_waiter(cv_io *io, int dir) {
+    uintptr_t cur = __atomic_load_n(&io->slot[dir], __ATOMIC_ACQUIRE);
+    while (cur > CV_IO_READY) {
+        if (__atomic_compare_exchange_n(&io->slot[dir], &cur, CV_IO_IDLE, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return cur;
+    }
+    return 0;
+}
+
+typedef struct cv_driver cv_driver;
+/// NULL on failure, with errno set (or where there is no driver yet).
+cv_driver *cv_driver_new(void);
+void cv_driver_free(cv_driver *d);
+/// Route this parker's wakes through the driver while it is parked in it.
+void cv_parker_attach_driver(cv_parker *p, cv_driver *d);
+/// Exclusive right to poll. try_lock returns 1 on success.
+int cv_driver_try_lock(cv_driver *d);
+void cv_driver_lock(cv_driver *d);
+void cv_driver_unlock(cv_driver *d);
+/// Registered fds right now; busy workers skip polling when it is 0.
+int cv_driver_registered(cv_driver *d);
+/// One poll, holding the lock. With a parker, block up to timeout_ns
+/// (< 0: forever) unless it is notified; without, timeout_ns is normally 0.
+/// Frees registrations released before this turn. Returns how many waiters
+/// became ready; their bits are in cv_driver_wakes(d)[0..<n].
+int cv_driver_turn(cv_driver *d, cv_parker *p, int64_t timeout_ns);
+uintptr_t *cv_driver_wakes(cv_driver *d);
+/// Counters, updated by the lock holder only (read racily).
+typedef struct cv_driver_stats {
+    uint64_t parked_turns; // turns by a parked worker (blocking)
+    uint64_t busy_turns;   // zero-timeout turns by a busy worker
+    uint64_t events;       // events returned by the kernel
+    uint64_t wakes;        // waiters resumed
+    uint64_t full_batches; // turns that filled the whole event array
+} cv_driver_stats;
+cv_driver_stats cv_driver_get_stats(cv_driver *d);
+/// Register a non-blocking fd for both directions. NULL with *err on failure.
+cv_io *cv_driver_register(cv_driver *d, int fd, int *err);
+/// Unregister and close the fd. The cv_io is freed after the next turn, since
+/// a batch already taken from the kernel may still name it.
+void cv_driver_deregister(cv_driver *d, cv_io *io);
+
+// ---- sockets -------------------------------------------------------------
+// All fds are non-blocking and close-on-exec. Failures return -1 and an errno
+// in *err; a non-numeric host is resolved with a blocking getaddrinfo.
+/// A listening TCP socket (SO_REUSEADDR, and SO_REUSEPORT if reuse_port).
+int cv_tcp_listen(const char *host, int port, int backlog, int reuse_port, int *err);
+/// Start a TCP connect. Returns the fd; *err is 0 when connected already,
+/// EINPROGRESS when the caller must wait for writability, else the failure.
+int cv_tcp_connect(const char *host, int port, int *err);
+/// Accept one connection (TCP_NODELAY set). -1 with *err (EAGAIN: none yet).
+int cv_tcp_accept(int fd, int *err);
+/// The pending error of a socket (SO_ERROR), 0 if none.
+int cv_socket_error(int fd);
+/// The local port a socket is bound to, or -1.
+int cv_local_port(int fd);
+/// recv / send (MSG_NOSIGNAL): bytes moved, or -errno.
+long cv_recv(int fd, void *buf, long len);
+long cv_send(int fd, const void *buf, long len);
+
 // ---- Swift runtime hooks -------------------------------------------------
 typedef void (*cv_enqueue_fn)(void *job, void *ctx);
 /// Route swift_task_enqueueGlobal to fn(job, ctx) through the runtime's

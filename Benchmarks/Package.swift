@@ -11,6 +11,12 @@ let package = Package(
             dependencies: [.product(name: "Vega", package: "vega")],
             swiftSettings: [.swiftLanguageMode(.v6), .unsafeFlags(["-enforce-exclusivity=unchecked"])]
         ),
+        // TCP echo server, driven by tokio-bench's echo-load.
+        .executableTarget(
+            name: "vega-echo",
+            dependencies: [.product(name: "Vega", package: "vega")],
+            swiftSettings: [.swiftLanguageMode(.v6), .unsafeFlags(["-enforce-exclusivity=unchecked"])]
+        ),
         // Checks Vega as the process-wide executor; tests can't install it
         // because the test runner has created tasks by then.
         .executableTarget(

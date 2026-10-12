@@ -48,6 +48,23 @@ public final class Runtime: Sendable {
         Task(executorPreference: scheduler, priority: priority, operation: operation)
     }
 
+    /// Spawn a task that takes ownership of `value`, such as a `TCPStream`
+    /// (a closure can't capture a `~Copyable` value):
+    ///
+    /// ```swift
+    /// let stream = try await listener.accept()
+    /// rt.spawn(with: stream) { stream in await serve(stream) }
+    /// ```
+    @discardableResult
+    public func spawn<Value: ~Copyable & Sendable>(
+        with value: consuming Value,
+        priority: TaskPriority? = nil,
+        _ operation: sending @escaping (consuming Value) async -> Void
+    ) -> Task<Void, Never> {
+        let box = Handoff(value)
+        return Task(executorPreference: scheduler, priority: priority) { await operation(box.take()) }
+    }
+
     /// Run `operation` on the runtime and block the calling thread until it
     /// finishes. Must not be called from a worker thread of any Vega runtime.
     public func block<T: Sendable, E: Error>(
@@ -108,6 +125,18 @@ public final class Runtime: Sendable {
         scheduler.workers.map { ($0.jobsRun.load(ordering: .relaxed), $0.steals.load(ordering: .relaxed)) }
     }
 
+    /// I/O driver counters since start (zeros where there is no driver).
+    public var ioMetrics: IOMetrics {
+        #if os(Linux)
+        if let d = scheduler.driver {
+            let s = cv_driver_get_stats(d.raw)
+            return IOMetrics(parkedPolls: s.parked_turns, busyPolls: s.busy_turns, events: s.events,
+                             wakes: s.wakes, fullBatches: s.full_batches)
+        }
+        #endif
+        return IOMetrics()
+    }
+
     /// Make a new runtime the global executor, so every `Task {}`,
     /// `Task.detached` and `Task.sleep` in the process runs on Vega.
     ///
@@ -121,6 +150,15 @@ public final class Runtime: Sendable {
         rt.scheduler.installEnqueueGlobalHook()
         return rt
     }
+}
+
+/// Carries a `~Copyable` value into a task: taken exactly once, by the task.
+private final class Handoff<Value: ~Copyable>: @unchecked Sendable {
+    private var value: Value?
+
+    init(_ value: consuming Value) { self.value = consume value }
+
+    func take() -> Value { value.take()! }
 }
 
 /// Hands a result from a task to a blocked plain thread.
