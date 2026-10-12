@@ -146,8 +146,10 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
         return 0
     }
 
-    /// `deadline` and `now` are `cv_now_ns()` times.
-    func addTimer(_ action: TimerAction, deadline: UInt64, now: UInt64, shard: Int) {
+    /// `deadline` and `now` are `cv_now_ns()` times. Returns the linked
+    /// timer, or nil if it fired at once (or was dropped).
+    @discardableResult
+    func addTimer(_ action: TimerAction, deadline: UInt64, now: UInt64, shard: Int) -> TimerHandle? {
         timedEnqueues.add(1, ordering: .relaxed)
         let added: TimerWheel.Added = deadline <= now ? .due : timers.add(action, deadline: deadline, now: now, shard: shard)
         switch added {
@@ -157,19 +159,22 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
             } else {
                 fire(action, on: nil)
             }
+            return nil
         case .dropped:
             if case .waiter(let u) = action { u.release() }
-        case .inserted(let earliest):
+            return nil
+        case .inserted(let earliest, let handle):
             // A new earliest deadline: the timer owner must re-arm its sleep.
             // seq_cst pairs with the owner's claim-then-read in Worker.park:
             // one of the two sides is guaranteed to see the other.
-            guard earliest, timers.isEarliest(shard) else { return }
+            guard earliest, timers.isEarliest(shard) else { return handle }
             let owner = timerOwner.load(ordering: .sequentiallyConsistent)
             if owner >= 0 {
                 cv_unpark(parkers[owner])
             } else {
                 notifyParked()
             }
+            return handle
         }
     }
 
@@ -177,6 +182,15 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     /// deadline, and drop the retain the wheel held.
     func removeSleep(_ waiter: SleepWaiter) {
         if timers.remove(waiter) { Unmanaged.passUnretained(waiter).release() }
+    }
+
+    /// A `Runtime.timeout` whose operation finished: unlink the timer that
+    /// would cancel `task`. True if it hadn't fired; the retain on `task`
+    /// the wheel held is then dropped here.
+    func removeTimeout(_ handle: TimerHandle, task: UnsafeRawPointer) -> Bool {
+        guard timers.remove(handle) else { return false }
+        Unmanaged<AnyObject>.fromOpaque(task).release()
+        return true
     }
 
     // MARK: worker support
@@ -209,6 +223,9 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
         switch action {
         case .waiter(let w):
             w.takeRetainedValue().fire() // drops the retain the wheel held
+        case .cancel(let task):
+            cv_task_cancel(UnsafeMutableRawPointer(mutating: task))
+            Unmanaged<AnyObject>.fromOpaque(task).release()
         case .job(let job):
             #if VEGA_JOB_AUDIT
             JobAudit.enqueued(job, "timer")

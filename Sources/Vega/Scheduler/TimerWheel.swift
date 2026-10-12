@@ -7,6 +7,9 @@ enum TimerAction: @unchecked Sendable {
     /// A task parked in `Runtime.sleep`. The wheel holds one retain, which
     /// whoever takes the entry out (firing or cancelling) consumes.
     case waiter(Unmanaged<SleepWaiter>)
+    /// Cancel a task (a `Runtime.timeout` child): a retained task object,
+    /// consumed the same way.
+    case cancel(UnsafeRawPointer)
 }
 
 /// One pending timer, linked into a wheel slot. Raw memory from the shard's
@@ -16,8 +19,11 @@ struct TimerEntry {
     var when: UInt64
     var prev: UnsafeMutablePointer<TimerEntry>?
     var next: UnsafeMutablePointer<TimerEntry>?
-    /// `level * 64 + slot` while linked into the wheel.
-    var slot: Int
+    /// `level * 64 + slot` while linked into the wheel, -1 otherwise.
+    var slot: Int32
+    /// Bumped each time the entry is handed out, so a stale `TimerHandle`
+    /// to a recycled entry is recognised.
+    var gen: UInt32
     var action: TimerAction
 }
 
@@ -77,6 +83,7 @@ struct Wheel {
     private mutating func allocate() -> UnsafeMutablePointer<TimerEntry> {
         if let e = free {
             free = e.pointee.next
+            e.pointee.gen &+= 1
             return e
         }
         // TimerEntry is trivial: zeroed memory is a valid free entry, and
@@ -87,6 +94,7 @@ struct Wheel {
         chunks.append(chunk)
         for i in 1..<Self.chunkSize - 1 { chunk[i].next = chunk + i + 1 }
         free = chunk + 1
+        chunk.pointee.gen = 1
         return chunk
     }
 
@@ -102,7 +110,7 @@ struct Wheel {
         let level = Self.level(elapsed: elapsed, when: e.pointee.when)
         let slot = Int(truncatingIfNeeded: e.pointee.when &>> UInt64(6 * level)) & 63
         let i = level * 64 + slot
-        e.pointee.slot = i
+        e.pointee.slot = Int32(i)
         e.pointee.next = nil
         e.pointee.prev = tails[i]
         if let t = tails[i] { t.pointee.next = e } else { heads[i] = e }
@@ -111,7 +119,7 @@ struct Wheel {
     }
 
     private mutating func unlink(_ e: UnsafeMutablePointer<TimerEntry>) {
-        let i = e.pointee.slot
+        let i = Int(e.pointee.slot)
         if let p = e.pointee.prev { p.pointee.next = e.pointee.next } else { heads[i] = e.pointee.next }
         if let n = e.pointee.next { n.pointee.prev = e.pointee.prev } else { tails[i] = e.pointee.prev }
         if heads[i] == nil { occupied[i / 64] &= ~(1 &<< UInt64(i & 63)) }
@@ -126,6 +134,11 @@ struct Wheel {
         link(e)
         count += 1
         return e
+    }
+
+    /// Whether `e` is linked in and still the timer handed out as `gen`.
+    func isLinked(_ e: UnsafeMutablePointer<TimerEntry>, gen: UInt32) -> Bool {
+        e.pointee.slot >= 0 && e.pointee.gen == gen
     }
 
     /// Unlink a timer and free its entry.
@@ -219,6 +232,14 @@ final class TimerShard: @unchecked Sendable {
     }
 }
 
+/// A linked timer, for removing it later. Trivial to copy; stale once the
+/// timer fires or is removed (the entry's generation moves on).
+struct TimerHandle: @unchecked Sendable {
+    let entry: UnsafeMutablePointer<TimerEntry>
+    let gen: UInt32
+    let shard: Int
+}
+
 /// The runtime's timers: one `TimerShard` per worker. Times are absolute
 /// `cv_now_ns()` nanoseconds, rounded *up* to whole milliseconds on insert,
 /// so a timer never fires early.
@@ -235,7 +256,7 @@ final class TimerWheel: @unchecked Sendable {
 
     enum Added {
         /// Linked in; `earliest` if it lowered its shard's `next`.
-        case inserted(earliest: Bool)
+        case inserted(earliest: Bool, TimerHandle)
         /// Already due: the caller fires it now.
         case due
         /// A sleeper cancelled before it got here: nothing linked, the
@@ -281,9 +302,10 @@ final class TimerWheel: @unchecked Sendable {
             }
             let before = s.next.load(ordering: .relaxed)
             let after = w.pointee.nextDeadline(origin: origin)
-            guard after < before else { return .inserted(earliest: false) }
+            let handle = TimerHandle(entry: e, gen: e.pointee.gen, shard: i)
+            guard after < before else { return .inserted(earliest: false, handle) }
             s.next.store(after, ordering: .sequentiallyConsistent)
-            return .inserted(earliest: true)
+            return .inserted(earliest: true, handle)
         }
     }
 
@@ -297,6 +319,20 @@ final class TimerWheel: @unchecked Sendable {
             guard let raw = waiter.entry.load(ordering: .relaxed) else { return false }
             waiter.entry.store(nil, ordering: .relaxed)
             w.pointee.remove(raw.assumingMemoryBound(to: TimerEntry.self))
+            s.next.store(w.pointee.nextDeadline(origin: origin), ordering: .releasing)
+            return true
+        }
+    }
+
+    /// Unlink the timer `handle` names, if it hasn't fired. True if it was
+    /// still linked: the caller then owns what its action holds.
+    func remove(_ handle: TimerHandle) -> Bool {
+        shards[handle.shard]._withUnsafeGuaranteedRef { s in
+            let w = s.wheel.pointer
+            s.lock.lock()
+            defer { s.lock.unlock() }
+            guard w.pointee.isLinked(handle.entry, gen: handle.gen) else { return false }
+            w.pointee.remove(handle.entry)
             s.next.store(w.pointee.nextDeadline(origin: origin), ordering: .releasing)
             return true
         }

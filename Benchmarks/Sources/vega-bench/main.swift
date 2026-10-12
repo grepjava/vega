@@ -322,8 +322,19 @@ let sleepMany = Bench(name: "sleep_many", ops: 10_000) { ex in
     }
 }
 
+/// 10,000 tasks each run an operation under a timeout it beats: the cost of
+/// `Runtime.timeout` (a child task plus arming and unlinking a timer).
+let timeoutOK = Bench(name: "timeout_ok", ops: 10_000) { ex in
+    await withTaskGroup(of: Void.self) { g in
+        for i in 0..<10_000 {
+            g.addTask(executorPreference: ex) { _ = try? await Runtime.timeout(.seconds(10)) { i } }
+        }
+        await g.waitForAll()
+    }
+}
+
 let benches = [spawnMany, spawnDiscard, poolSpawn, chainedSpawn, pingPong, pingPongNotify, pingPongNotifyNC, yieldMany, yieldVega,
-               mpscPingPong, mpscPingPongNC, mpscFanIn, mpscFanInNC, semaphore, semaphoreNC, sleepCancel, sleepMany].filter { only?.contains($0.name) ?? true }
+               mpscPingPong, mpscPingPongNC, mpscFanIn, mpscFanInNC, semaphore, semaphoreNC, sleepCancel, sleepMany, timeoutOK].filter { only?.contains($0.name) ?? true }
 
 // MARK: run
 

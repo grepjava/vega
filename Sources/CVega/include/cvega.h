@@ -243,6 +243,13 @@ typedef void (*cv_enqueue_fn)(void *job, void *ctx);
 /// Returns 0, or -1 if the runtime has no such hook.
 int cv_install_enqueue_global_hook(cv_enqueue_fn fn, void *ctx);
 
+// The running task, and cancelling a task, as plain pointers: no ARC, unlike
+// UnsafeCurrentTask. Both are Swift-convention runtime entry points.
+extern void *swift_task_getCurrent(void) __attribute__((swiftcall));
+extern void swift_task_cancel(void *task) __attribute__((swiftcall));
+static inline void *cv_task_current(void) { return swift_task_getCurrent(); }
+static inline void cv_task_cancel(void *task) { swift_task_cancel(task); }
+
 #ifdef __cplusplus
 }
 #endif

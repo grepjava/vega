@@ -34,8 +34,8 @@ private func drain(_ w: inout Wheel, _ now: UInt64) -> [Int] {
         func add(_ id: Int, _ at: UInt64) -> TimerWheel.Added {
             t.add(.job(fakeJob(id)), deadline: at * ms, now: 0, shard: 0)
         }
-        guard case .inserted(true) = add(1, 30), case .inserted(true) = add(2, 10),
-              case .inserted(false) = add(3, 30), case .inserted(false) = add(4, 20) else {
+        guard case .inserted(true, _) = add(1, 30), case .inserted(true, _) = add(2, 10),
+              case .inserted(false, _) = add(3, 30), case .inserted(false, _) = add(4, 20) else {
             Issue.record("wrong earliest flags"); return
         }
         #expect(t.timeout(now: 5 * ms) == Int64(5 * ms))
@@ -241,5 +241,159 @@ private func drain(_ w: inout Wheel, _ now: UInt64) -> [Int] {
         let delayed = run(.delay)
         #expect(delayed[0] == 10)
         #expect(delayed[1] >= 45 && delayed[2] - delayed[1] >= 10, "\(delayed)")
+    }
+}
+
+/// Counts its deinits: captured by a task's closure, it shows the task was
+/// freed.
+private final class Tracker: Sendable {
+    deinit { trackersFreed.add(1, ordering: .relaxed) }
+}
+private let trackersFreed = Atomic<Int>(0)
+
+@Suite struct TimeoutTests {
+    @Test func returnsTheResultInTime() {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let (v, left) = rt.block { () async -> (Int?, Int) in
+            let v = try? await Runtime.timeout(.seconds(10)) {
+                try await Runtime.sleep(for: .milliseconds(5))
+                return 42
+            }
+            return (v, rt.scheduler.timers.count)
+        }
+        #expect(v == 42)
+        #expect(left == 0, "the timeout's timer outlived it")
+    }
+
+    @Test func cancelsTheOperationAtTheDeadline() {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let start = cv_now_ns()
+        let (outcome, callerCancelled) = rt.block { () async -> (String, Bool) in
+            let outcome: String
+            do {
+                _ = try await Runtime.timeout(.milliseconds(20)) { try await Runtime.sleep(for: .seconds(60)) }
+                outcome = "finished"
+            } catch is TimeoutError {
+                outcome = "timeout"
+            } catch {
+                outcome = "\(error)"
+            }
+            return (outcome, Task.isCancelled)
+        }
+        let elapsed = (cv_now_ns() - start) / ms
+        #expect(outcome == "timeout")
+        #expect(!callerCancelled, "only the operation is cancelled")
+        #expect(elapsed >= 20 && elapsed < 1_000, "took \(elapsed) ms")
+    }
+
+    /// An operation that ignores cancellation keeps its result.
+    @Test func keepsAResultThatArrivesLate() {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let v = rt.block { () async -> Int? in
+            try? await Runtime.timeout(.milliseconds(1)) {
+                spin(microseconds: 10_000)
+                return 7
+            }
+        }
+        #expect(v == 7)
+    }
+
+    @Test func rethrowsTheOperationsOwnError() {
+        struct Boom: Error {}
+        let rt = Runtime(workers: 1)
+        defer { rt.shutdown() }
+        let isBoom = rt.block { () async -> Bool in
+            do {
+                _ = try await Runtime.timeout(.seconds(10)) { () async throws -> Int in throw Boom() }
+                return false
+            } catch {
+                return error is Boom
+            }
+        }
+        #expect(isBoom)
+    }
+
+    @Test func zeroTimeoutCancelsAtOnce() {
+        let rt = Runtime(workers: 1)
+        defer { rt.shutdown() }
+        let timedOut = rt.block { () async -> Bool in
+            do {
+                _ = try await Runtime.timeout(.zero) { try await Runtime.sleep(for: .seconds(60)) }
+                return false
+            } catch {
+                return error is TimeoutError
+            }
+        }
+        #expect(timedOut)
+    }
+
+    /// Cancelling the caller is a cancellation, not a timeout.
+    @Test func callerCancellationIsNotATimeout() {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let error = rt.block { () async -> String in
+            let t = rt.spawn { () async -> String in
+                do {
+                    _ = try await Runtime.timeout(.seconds(60)) { try await Runtime.sleep(for: .seconds(60)) }
+                    return "finished"
+                } catch {
+                    return "\(type(of: error))"
+                }
+            }
+            try? await Runtime.sleep(for: .milliseconds(10))
+            t.cancel()
+            return await t.value
+        }
+        #expect(error == "CancellationError")
+    }
+
+    /// Many timeouts racing their deadlines on 4 workers: each ends exactly
+    /// once and no timer or task is left behind.
+    @Test func timeoutsRaceTheirDeadlines() {
+        let rt = Runtime(workers: 4)
+        defer { rt.shutdown() }
+        let freedBefore = trackersFreed.load(ordering: .relaxed)
+        let (done, timedOut, left) = rt.block { () async -> (Int, Int, Int) in
+            await withTaskGroup(of: Bool.self) { g in
+                for i in 0..<2_000 {
+                    g.addTask(executorPreference: rt.executor) {
+                        // Freed with the child task's closure: a leaked
+                        // task retain would keep it alive.
+                        let tracker = Tracker()
+                        do {
+                            try await Runtime.timeout(.milliseconds(2)) {
+                                try await Runtime.sleep(for: .microseconds(1_000 + (i % 40) * 50))
+                                _ = tracker
+                            }
+                            return true
+                        } catch {
+                            return false
+                        }
+                    }
+                }
+                var done = 0, timedOut = 0
+                for await ok in g { if ok { done += 1 } else { timedOut += 1 } }
+                return (done, timedOut, rt.scheduler.timers.count)
+            }
+        }
+        #expect(done + timedOut == 2_000)
+        #expect(left == 0)
+        // Tasks are freed just after they complete, possibly on a worker.
+        let start = cv_now_ns()
+        func freed() -> Int { trackersFreed.load(ordering: .relaxed) - freedBefore }
+        while freed() < 2_000, cv_now_ns() - start < 2_000 * ms { spin(microseconds: 1_000) }
+        #expect(freed() == 2_000, "child tasks leaked")
+    }
+
+    @Test func worksOffTheRuntime() async {
+        let late: Void? = try? await Runtime.timeout(.milliseconds(10)) {
+            try await Task.sleep(for: .seconds(60))
+        }
+        #expect(late == nil)
+        let v = try? await Runtime.timeout(.seconds(10)) { 5 }
+        #expect(v == 5)
     }
 }
