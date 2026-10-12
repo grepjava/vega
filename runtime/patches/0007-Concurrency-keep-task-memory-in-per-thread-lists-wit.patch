@@ -1,0 +1,229 @@
+From e6e6b294d5e84d3a128ebf99427291f1874b4001 Mon Sep 17 00:00:00 2001
+From: grepjava <grepjava@gmail.com>
+Date: Mon, 12 Oct 2026 13:29:08 +0800
+Subject: [PATCH 7/7] Concurrency: keep task memory in per-thread lists with
+ batched hand-off
+
+A task is usually created on one thread and destroyed on another, the pattern that defeats malloc per-thread caches: every task paid for arena locks on both sides. Small tasks now come from 1 KiB blocks kept in per-thread lists; a thread with more than two batches parks a batch of 32 in a global pool and a thread with none takes one back, so the lock is taken once per 32 tasks. The rest of the block becomes the first allocator slab. A 16-byte header records which tasks are pooled; a pthread key returns a thread list when the thread exits.
+---
+ stdlib/public/Concurrency/Task.cpp | 183 ++++++++++++++++++++++++++++-
+ 1 file changed, 178 insertions(+), 5 deletions(-)
+
+diff --git a/stdlib/public/Concurrency/Task.cpp b/stdlib/public/Concurrency/Task.cpp
+index c703ada2..2c1913bf 100644
+--- a/stdlib/public/Concurrency/Task.cpp
++++ b/stdlib/public/Concurrency/Task.cpp
+@@ -37,6 +37,9 @@
+ #include "swift/Runtime/HeapObject.h"
+ #include "swift/Runtime/Heap.h"
+ #include "swift/Threading/Mutex.h"
++#if defined(__linux__) || defined(__APPLE__)
++#include <pthread.h>
++#endif
+ #include <atomic>
+ #include <new>
+ #include <unordered_set>
+@@ -352,6 +355,176 @@ uint64_t AsyncTask::getTaskId() {
+   return ((uint64_t)_private().Id << 32) | (uint64_t)Id;
+ }
+ 
++/**************************************************************************/
++/**************************** TASK MEMORY *********************************/
++/**************************************************************************/
++
++// A task is usually created on one thread and destroyed on another (the
++// worker that ran it last). With malloc that is the worst pattern there is:
++// the freeing thread's per-thread cache fills, the allocating thread's
++// empties, and every task then pays for an arena lock on both sides.
++//
++// So small tasks come from fixed-size blocks kept in per-thread lists. A
++// thread whose list grows past two batches hands a batch of blocks to a
++// global pool; a thread whose list is empty takes a batch back. That is one
++// lock per TaskBlockBatch tasks instead of one or two per task. A 16-byte
++// header in front of every task records whether its block is pooled.
++namespace {
++
++constexpr size_t TaskBlockSize = 1024;
++constexpr size_t TaskBlockHeaderSize = 16; // keeps the task 16-byte aligned
++constexpr unsigned TaskBlockBatch = 32;
++constexpr unsigned TaskBlockPoolMaxBatches = 128; // 4 MiB parked globally
++
++enum : uintptr_t { TaskMemoryMalloc = 0, TaskMemoryPooled = 1 };
++
++struct TaskBlock {
++  TaskBlock *next;      // within a thread list or a batch
++  TaskBlock *nextBatch; // between batches in the global pool (batch heads)
++};
++
++#if (defined(__linux__) || defined(__APPLE__)) && !SWIFT_STDLIB_SINGLE_THREADED_CONCURRENCY
++#define SWIFT_TASK_BLOCK_POOL 1
++
++static LazyMutex TaskBlockPoolLock;
++static TaskBlock *TaskBlockPoolBatches = nullptr;
++static unsigned TaskBlockPoolCount = 0;
++
++// Per-thread list. Plain pointers, so no TLS constructor or destructor runs;
++// a pthread key's destructor returns the list when the thread exits.
++static thread_local TaskBlock *TaskBlockList = nullptr;
++static thread_local unsigned TaskBlockListCount = 0;
++static thread_local unsigned char TaskBlockListState = 0; // 0 new, 1 live, 2 exiting
++
++static pthread_key_t TaskBlockExitKey;
++static pthread_once_t TaskBlockExitKeyOnce = PTHREAD_ONCE_INIT;
++
++static void freeTaskBlockList(TaskBlock *block) {
++  while (block) {
++    TaskBlock *next = block->next;
++    free(block);
++    block = next;
++  }
++}
++
++static void taskBlockThreadExit(void *) {
++  TaskBlockListState = 2; // later frees on this thread go straight to free()
++  TaskBlock *list = TaskBlockList;
++  TaskBlockList = nullptr;
++  TaskBlockListCount = 0;
++  freeTaskBlockList(list);
++}
++
++static void makeTaskBlockExitKey() {
++  pthread_key_create(&TaskBlockExitKey, taskBlockThreadExit);
++}
++
++/// Detach the first `count` blocks of the thread list as one batch.
++static TaskBlock *takeFromThreadList(unsigned count) {
++  TaskBlock *head = TaskBlockList, *tail = head;
++  for (unsigned i = 1; i < count; ++i)
++    tail = tail->next;
++  TaskBlockList = tail->next;
++  TaskBlockListCount -= count;
++  tail->next = nullptr;
++  return head;
++}
++
++static void *allocateTaskBlock() {
++  if (SWIFT_UNLIKELY(!TaskBlockList) && TaskBlockListState == 1) {
++    TaskBlock *batch = nullptr;
++    TaskBlockPoolLock.withLock([&] {
++      if ((batch = TaskBlockPoolBatches)) {
++        TaskBlockPoolBatches = batch->nextBatch;
++        TaskBlockPoolCount--;
++      }
++    });
++    if (batch) {
++      TaskBlockList = batch;
++      TaskBlockListCount = TaskBlockBatch;
++    }
++  }
++  if (TaskBlock *block = TaskBlockList) {
++    TaskBlockList = block->next;
++    TaskBlockListCount--;
++    return block;
++  }
++  return malloc(TaskBlockSize);
++}
++
++static void freeTaskBlock(void *memory) {
++  if (SWIFT_UNLIKELY(TaskBlockListState != 1)) {
++    if (TaskBlockListState == 2)
++      return free(memory);
++    // First use on this thread: arrange to hand the list back at exit.
++    pthread_once(&TaskBlockExitKeyOnce, makeTaskBlockExitKey);
++    pthread_setspecific(TaskBlockExitKey, (void *)1);
++    TaskBlockListState = 1;
++  }
++  auto block = static_cast<TaskBlock *>(memory);
++  block->next = TaskBlockList;
++  TaskBlockList = block;
++  if (SWIFT_LIKELY(++TaskBlockListCount < 2 * TaskBlockBatch))
++    return;
++
++  TaskBlock *batch = takeFromThreadList(TaskBlockBatch);
++  bool parked = false;
++  TaskBlockPoolLock.withLock([&] {
++    if (TaskBlockPoolCount < TaskBlockPoolMaxBatches) {
++      batch->nextBatch = TaskBlockPoolBatches;
++      TaskBlockPoolBatches = batch;
++      TaskBlockPoolCount++;
++      parked = true;
++    }
++  });
++  if (!parked)
++    freeTaskBlockList(batch);
++}
++
++/// Allocating also marks the thread live, so a thread that only allocates
++/// can take batches the freeing threads park.
++static void noteTaskBlockAllocatingThread() {
++  if (SWIFT_UNLIKELY(TaskBlockListState == 0)) {
++    pthread_once(&TaskBlockExitKeyOnce, makeTaskBlockExitKey);
++    pthread_setspecific(TaskBlockExitKey, (void *)1);
++    TaskBlockListState = 1;
++  }
++}
++#endif
++
++} // end anonymous namespace
++
++/// Allocate memory for a task of `size` bytes, plus as large a first
++/// allocator slab as fits a pooled block (at least `minSlab` bytes). Returns
++/// the task's address; sets `slabSize`.
++static void *allocateTaskMemory(size_t size, unsigned minSlab,
++                                unsigned &slabSize) {
++#if SWIFT_TASK_BLOCK_POOL
++  if (TaskBlockHeaderSize + size + minSlab <= TaskBlockSize) {
++    noteTaskBlockAllocatingThread();
++    char *block = static_cast<char *>(allocateTaskBlock());
++    *reinterpret_cast<uintptr_t *>(block) = TaskMemoryPooled;
++    // Give the first slab whatever is left of the block, to 16 bytes.
++    slabSize = (TaskBlockSize - TaskBlockHeaderSize - size) & ~size_t(15);
++    return block + TaskBlockHeaderSize;
++  }
++#endif
++  slabSize = minSlab;
++  char *block = static_cast<char *>(
++      malloc(TaskBlockHeaderSize + size + minSlab));
++  *reinterpret_cast<uintptr_t *>(block) = TaskMemoryMalloc;
++  return block + TaskBlockHeaderSize;
++}
++
++static void freeTaskMemory(void *task) {
++  char *block = static_cast<char *>(task) - TaskBlockHeaderSize;
++#if SWIFT_TASK_BLOCK_POOL
++  if (*reinterpret_cast<uintptr_t *>(block) == TaskMemoryPooled)
++    return freeTaskBlock(block);
++#endif
++  free(block);
++}
++
+ SWIFT_CC(swift)
+ static void destroyTask(SWIFT_CONTEXT HeapObject *obj) {
+   auto task = static_cast<AsyncTask*>(obj);
+@@ -364,7 +537,7 @@ static void destroyTask(SWIFT_CONTEXT HeapObject *obj) {
+   // here.
+ 
+   SWIFT_TASK_DEBUG_LOG("Destroyed task %p", task);
+-  free(task);
++  freeTaskMemory(task);
+ }
+ 
+ #if !SWIFT_CONCURRENCY_EMBEDDED
+@@ -954,10 +1127,10 @@ swift_task_create_commonImpl(size_t rawTaskCreateFlags,
+   } else {
+     // Allocate the task allocator's first slab together with the task.
+     // Nearly every task allocates (frames, its executor preference record),
+-    // and a separate slab is a second malloc/free pair per task, usually
+-    // freed on another thread than the one that spawned it. Together they
+-    // stay within one small malloc size class.
+-    allocation = malloc(amountToAllocate + initialSlabSize);
++    // and a separate slab is a second allocation per task, usually freed on
++    // another thread than the one that spawned it. See allocateTaskMemory.
++    allocation = allocateTaskMemory(amountToAllocate, initialSlabSize,
++                                    initialSlabSize);
+     hasInlineInitialSlab = true;
+   }
+   SWIFT_TASK_DEBUG_LOG("allocate task %p, parent = %p, slab %u", allocation,
+-- 
+2.43.0
+

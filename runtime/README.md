@@ -14,6 +14,7 @@ and replaces the toolchain's copy at load time.
 | 0004 | `Task.yield` copied `Task.currentExecutor`, an existential, which retains and releases the executor on every yield from every thread. It now enqueues through executor refs, with the same order of preference. |
 | 0005 | On x86-64, every 16-byte atomic load (task status, default-actor state) was `lock cmpxchg16b`, which costs as much as a store. On CPUs with AVX, an aligned `movdqa` is guaranteed atomic, so the load uses that. |
 | 0006 | Waking a task from a continuation updated its escalation dependency record under the status-record lock. When the task goes to the generic executor, escalation through that record is a no-op both before and after, so one CAS on the status bits replaces the lock. |
+| 0007 | Tasks are usually created on one thread and freed on another, the pattern that defeats malloc's per-thread caches, so every task paid for arena locks. Small tasks now come from 1 KiB blocks kept in per-thread lists, which hand batches of 32 through a global pool: one lock per 32 tasks. When a thread exits, its list is returned. |
 
 These are the costs in the runtime itself. Vega already avoids the ones it
 can avoid without a patch:
@@ -49,6 +50,8 @@ The simplest way to use the patches is a patched toolchain. `make-toolchain-linu
 ```
 
 The binary then carries the patched runtime, and nothing else has to ship with it. Static linking is also the fastest option: the runtime's thread-local variables become direct accesses instead of `__tls_get_addr` calls. On the bench box that takes ping_pong from 298 to 261 ns and yield_vega from 46 to 40 ns.
+
+After updating the patched toolchain, do a clean build (delete `.build`). SwiftPM doesn't track the runtime archive, so it won't relink on its own.
 
 Test targets can't link statically, because swift-testing is only built for dynamic linking. Run them against the shared library (`LD_LIBRARY_PATH`).
 

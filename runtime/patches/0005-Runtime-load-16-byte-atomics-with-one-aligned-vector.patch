@@ -1,7 +1,7 @@
 From 54bec67052d17dd27b79215279c185db1848afdf Mon Sep 17 00:00:00 2001
 From: grepjava <grepjava@gmail.com>
 Date: Mon, 12 Oct 2026 13:00:20 +0800
-Subject: [PATCH 5/6] Runtime: load 16-byte atomics with one aligned vector
+Subject: [PATCH 5/7] Runtime: load 16-byte atomics with one aligned vector
  load on x86-64
 
 On x86-64 every 16-byte atomic load (a task status, a default actor state) compiled to LOCK CMPXCHG16B, which takes the cache line exclusive and costs as much as a store. Intel and AMD guarantee aligned 16-byte SSE loads are atomic on processors that enumerate AVX, the rule libatomic also uses, so load with MOVDQA there and keep CMPXCHG16B as the fallback.

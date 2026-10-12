@@ -1,7 +1,7 @@
 From 601cc12919af00d9afe73e42c3f77090c67d7a07 Mon Sep 17 00:00:00 2001
 From: grepjava <grepjava@gmail.com>
 Date: Mon, 12 Oct 2026 12:33:17 +0800
-Subject: [PATCH 2/6] Concurrency: remove cancellation handlers without taking
+Subject: [PATCH 2/7] Concurrency: remove cancellation handlers without taking
  the status record lock
 
 The handler record is always the innermost record when withTaskCancellationHandler ends, so removeStatusRecord unlinks it with one CAS unless a canceller holds the lock, in which case it waits as before. popStatusRecordOfType locked every time.

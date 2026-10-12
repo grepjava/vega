@@ -126,3 +126,15 @@ Same box, 8 workers, preference mode, median of 5 runs, ns/op. "Stock" is Vega o
 **Where Tokio is still ahead, and why:**
 - **Creating a Swift task (spawn_many).** A Swift task is a refcounted runtime object with status records and group bookkeeping under the parent's lock. A Tokio task is one allocation holding a header and the future. `TaskPool` is the route for hot spawns.
 - **Cancellable waits (ping_pong_notify).** Every wait has to register a cancellation record and remove it again; Tokio's waits cancel by being dropped.
+
+### Patch 0007: task memory pool
+
+Static, patched, ns/op; each value is the range over three rounds.
+
+| Bench | Before 0007 | With 0007 | Tokio |
+|---|---|---|---|
+| spawn_discard | 1,740–1,850 | **1,222–1,273** | 474 |
+| chained_spawn | 1,168–1,220 | **973–1,158** | 921 |
+| spawn_many | 1,481–1,845 | 1,515–1,694 | 474 |
+
+**Why spawn_many didn't move.** Its regular task group keeps every finished child alive until the parent collects the result, so all 100k tasks, about 100 MB, are live at once. No allocator can recycle those, and the spawning thread's time goes to fresh memory: page faults and `_int_malloc`. Tokio's equivalent bench drops each task as it finishes. The like-for-like comparison is spawn_discard, whose children are freed on completion: about 2.6× Tokio.

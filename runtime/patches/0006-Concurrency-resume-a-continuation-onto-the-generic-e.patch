@@ -1,7 +1,7 @@
 From 989f60db637cae9fa96e48f1ce1f7aacc1da5be2 Mon Sep 17 00:00:00 2001
 From: grepjava <grepjava@gmail.com>
 Date: Mon, 12 Oct 2026 13:04:55 +0800
-Subject: [PATCH 6/6] Concurrency: resume a continuation onto the generic
+Subject: [PATCH 6/7] Concurrency: resume a continuation onto the generic
  executor without the status record lock
 
 Waking a suspended task updated its dependency record to enqueued-on-executor under the status record lock: a mutex and two CASes on every resume. When the task waited on a continuation or task group and goes to the generic executor, escalation through that record is a no-op before and after (performEscalationAction ignores both kinds and swift_executor_escalate ignores the generic executor), so update only the status bits with one CAS, falling back to the locked path when the lock is held.

@@ -112,7 +112,8 @@ if [ $SHARED = YES ]; then
     exit 1
   fi
   lib=$build/Concurrency/libswift_Concurrency.so
-  if ! nm "$lib" | grep -q "U swift_addNewDSOImage"; then
+  # (Not `nm | grep -q`: with pipefail, grep exiting early fails nm.)
+  if [ "$(nm "$lib" | grep -c "U swift_addNewDSOImage")" = 0 ]; then
     echo "$lib does not register its metadata (no swiftrt.o constructor)" >&2
     exit 1
   fi
