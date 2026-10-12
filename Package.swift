@@ -1,0 +1,19 @@
+// swift-tools-version: 6.2
+import PackageDescription
+
+let swiftSettings: [SwiftSetting] = [.swiftLanguageMode(.v6)]
+
+let package = Package(
+    name: "Vega",
+    // Replacing the global executor needs the custom-executor runtime (macOS/iOS 26.4).
+    platforms: [.macOS("26.4"), .iOS("26.4")],
+    products: [
+        .library(name: "Vega", targets: ["Vega"]),
+    ],
+    targets: [
+        .target(name: "CVega", cSettings: [.define("_GNU_SOURCE")]),
+        .target(name: "Vega", dependencies: ["CVega"], swiftSettings: swiftSettings),
+        .testTarget(name: "VegaTests", dependencies: ["Vega", "CVega"], swiftSettings: swiftSettings),
+    ],
+    cLanguageStandard: .gnu11
+)

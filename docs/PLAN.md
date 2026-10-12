@@ -16,7 +16,11 @@ You want a Swift networking engine that **fully replaces SwiftNIO**, has **featu
 5. **API:** its own native async API with full feature parity. **It is also swappable with SwiftNIO** through `VegaNIO`, a separate package that depends on swift-nio's `NIOCore`.
    - It provides `VegaEventLoopGroup` and `VegaEventLoop` (serial executors pinned to Vega workers) and Vega-backed `Channel`s and bootstraps. These channels use NIO's own `ChannelPipeline`, the same way NIOTransportServices does.
    - Vapor, Hummingbird, AsyncHTTPClient and grpc-swift then run on Vega just by swapping the `EventLoopGroup`.
-   - NIO's contract pins a channel to its event loop, so NIO-API code gets Vega's drivers but not work stealing. Native code gets both.
+   - VegaNIO is an API adapter, not a second engine: Vega does the I/O underneath.
+   - NIO promises that a channel's handlers always run on one thread (lock-free handler state, `assertInEventLoop`, `EventLoopFuture` callbacks), so **pipeline handlers stay pinned**.
+   - With Vega installed as the global executor, apps' `async` route handlers and business logic run as ordinary Swift tasks and **are stolen**.
+   - Idle connections are moved between loops between requests (Garuda-style rebalancing).
+   - Native Vega code gets full stealing everywhere.
 6. **Platforms:** Linux (epoll + io_uring), macOS (kqueue), Windows (IOCP), and iOS/Apple clients (Network.framework).
 
 ### Why it beats SwiftNIO
