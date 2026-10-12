@@ -8,7 +8,7 @@ and replaces the toolchain's copy at load time.
 
 | Patch | Fixes |
 |---|---|
-| 0001 | `getPreferredTaskExecutor` took the task's status-record mutex and made two CASes on the status word, on every enqueue and executor switch of a task with an executor preference. It now does one acquire load. |
+| 0001 | `getPreferredTaskExecutor` took the task's status-record mutex and made two CASes on the status word, on every enqueue and executor switch of a task with an executor preference. It now does one acquire load. **Only valid for 6.3.x:** later runtimes (`main`) have `AsyncTaskStealer`, whose stale jobs read a task's records while it runs elsewhere, so the lock is needed there. |
 | 0002 | Ending `withTaskCancellationHandler` took the same lock to pop a record that is always the innermost one. It is now one CAS, and it still waits for a canceller that is running the handler. |
 | 0003 | Each task made two mallocs: the task itself, then its allocator's first slab on the first `swift_task_alloc`. They are now one malloc, as async-let tasks already do. |
 | 0004 | `Task.yield` copied `Task.currentExecutor`, an existential, which retains and releases the executor on every yield from every thread. It now enqueues through executor refs, with the same order of preference. |

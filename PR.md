@@ -11,6 +11,7 @@ Update the table whenever a PR changes state: opened, reviewed, CI run, merged, 
 | [swiftlang/swift#93174](https://github.com/swiftlang/swift/pull/93174) | Concurrency: remove cancellation handlers without taking the status record lock | 0002 | 2026-10-12 | ktoso replied positively and started CI (Linux, Windows, macOS); pending on 2026-10-12 |
 | [swiftlang/swift#93173](https://github.com/swiftlang/swift/pull/93173) | Runtime: load 16-byte atomics with one aligned vector load on x86-64 | 0005 | 2026-10-12 | Awaiting review |
 | [swiftlang/swift#93179](https://github.com/swiftlang/swift/pull/93179) | Concurrency: tell TSan when a continuation is resumed before its await | — (found while testing Vega's sync primitives) | 2026-10-12 | Awaiting review |
+| [swiftlang/swift#93180](https://github.com/swiftlang/swift/pull/93180) | Concurrency: Task.yield enqueues without copying the current executor | 0004 | 2026-10-12 | Awaiting review. Measured −35% per yield on a custom task executor (8 threads); no change on the default Dispatch executor |
 
 ## Merged
 
@@ -22,9 +23,8 @@ From `runtime/patches` (see `runtime/README.md` for details). Each one needs a b
 
 | Patch | Fixes |
 |---|---|
-| 0001 | `getPreferredTaskExecutor` takes the status-record lock and does two CASes on every enqueue. The patch makes it one acquire load. |
+| 0001 | `getPreferredTaskExecutor` takes the status-record lock and does two CASes on every enqueue. The patch makes it one acquire load. **Not upstreamable as is:** on `main`, stale `AsyncTaskStealer` and direct jobs call it (`Actor.cpp`, `fromTaskExecutorPreference`) while the task may be running on another thread, so a lock-free walk of the record chain can race the task pushing and popping records. Needs a different design, e.g. a separately published preference. |
 | 0003 | Each task costs two mallocs, the task itself plus its allocator's first slab. The patch makes it one. |
-| 0004 | `Task.yield` copies `Task.currentExecutor`, retaining and releasing the executor on every yield. The patch avoids the copy. |
 | 0006 | A continuation resume updates the escalation record under the status lock. The patch makes it one CAS. |
 | 0007 | Per-thread task-memory lists, handed between threads in batches of 32, so tasks freed on another thread don't take malloc's arena lock. |
 
@@ -35,7 +35,7 @@ Each fix lets Vega drop something, but only once the fix is in a **released** Sw
 | PR | Remove from Vega |
 |---|---|
 | #93179 | `Tests/tsan.supp` and its mention in `README.md` |
-| #93174, #93173 | Patches 0002 and 0005 from `runtime/patches`, and their rows in `runtime/README.md` |
+| #93174, #93173, #93180 | Patches 0002, 0005 and 0004 from `runtime/patches`, and their rows in `runtime/README.md` |
 
 ## Working on a PR
 
@@ -46,8 +46,10 @@ Each fix lets Vega drop something, but only once the fix is in a **released** Sw
   | `up-0002` | #93174 |
   | `up-0005` | #93173 |
   | `tsan-continuation-await` | #93179 |
+  | `up-0004` | #93180 |
 
 - **Build and test** with `~/swiftrt/upstream/up-switch.sh <branch>` (incremental rebuild), then `up-lit.sh <label>` (`test/Concurrency`). The baseline on `main` is 378 passed and 166 unsupported.
 - **TSan tests** show as UNSUPPORTED in that build, because it has no `tsan_runtime` or `libdispatch`. Check them with the Swift 6.3.3 toolchain against a 6.3.3 runtime built with the fix, as was done for #93179.
+- **Measuring:** `~/swiftrt/upbench` (`bench.swift`, `snap.sh <label>`, `run-box.sh` with `LABELS=`) measures `main` against a branch on the box. For changes aimed at custom executors, use Vega's `vega-bench` against a 6.3.3 runtime with only that patch (see #93180).
 - **Status:** `gh pr view <n> --repo swiftlang/swift --comments` and `gh pr checks <n> --repo swiftlang/swift`.
 - Commits and PR descriptions carry no attribution lines.
