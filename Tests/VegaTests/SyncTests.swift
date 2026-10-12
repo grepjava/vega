@@ -93,6 +93,26 @@ struct Tracked: ~Copyable, Sendable {
         #expect(sem.tryAcquire(3))
     }
 
+    /// Cancelled while waiting, a non-cancellable acquire keeps waiting.
+    @Test func acquireIgnoringCancellationKeepsWaiting() {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let sem = Semaphore(permits: 0)
+        let outcome = rt.block { () async -> AcquireError? in
+            let waiter = rt.spawn { () async -> AcquireError? in
+                do throws(AcquireError) { try await sem.acquireIgnoringCancellation(2); return nil }
+                catch { return error }
+            }
+            try? await Runtime.sleep(for: .milliseconds(10))
+            waiter.cancel()
+            try? await Runtime.sleep(for: .milliseconds(10))
+            sem.release(2)
+            return await waiter.value
+        }
+        #expect(outcome == nil)
+        #expect(sem.availablePermits == 0)
+    }
+
     @Test func closeFailsWaiters() {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
@@ -361,6 +381,41 @@ struct Tracked: ~Copyable, Sendable {
         }
         #expect(first == .cancelled)
         #expect(value == 9)
+    }
+
+    /// Cancelled while parked, non-cancellable sends and receives keep
+    /// waiting and complete once the other side shows up.
+    @Test func ignoringCancellationKeepsWaiting() {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let (received, sent) = rt.block { () async -> (Int, ChannelError?) in
+            // Receiver side: waits on an empty channel.
+            let a = Channel<Int>(capacity: 1)
+            let receiver = rt.spawn(with: a.receiver) { rx -> Int in
+                var rx = rx
+                return (try? await rx.receiveIgnoringCancellation()) ?? -1
+            }
+            // Sender side: waits on a full channel.
+            let b = Channel<Int>(capacity: 1)
+            try? b.sender.trySend(1)
+            let sender = rt.spawn(with: b.sender.clone()) { tx -> ChannelError? in
+                do throws(ChannelError) { try await tx.sendIgnoringCancellation(2); return nil }
+                catch { return error }
+            }
+            try? await Runtime.sleep(for: .milliseconds(10))
+            receiver.cancel()
+            sender.cancel()
+            try? await Runtime.sleep(for: .milliseconds(10))
+            try? a.sender.trySend(7)
+            var rx = b.receiver
+            _ = try? rx.tryReceive() // makes room: the parked 2 moves in
+            let sent = await sender.value
+            let second = try? rx.tryReceive()
+            #expect(second == 2)
+            return (await receiver.value, sent)
+        }
+        #expect(received == 7)
+        #expect(sent == nil)
     }
 
     @Test func unboundedNeverWaits() {

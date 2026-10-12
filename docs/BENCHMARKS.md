@@ -206,3 +206,16 @@ Requests per second, with p99 round-trip latency:
 - **mpsc_ping_pong.** Every operation parks one side and wakes the other. It costs about what two `Notify` round trips cost (ping_pong_notify: 776 ns), so the time is in park and wake, not in the channel. The status record from `withTaskCancellationHandler` is the largest part.
 - **mpsc_fan_in.** Nine threads share one lock. Tokio's senders reserve a slot with one atomic add on a lock-free block list. Vega would need the same structure to close this gap.
 - **semaphore.** On the patched runtime, Vega is ahead of Tokio. With nobody waiting, acquire and release are single CASes.
+
+### Non-cancellable waits (stock runtime)
+
+`Sender.sendIgnoringCancellation`, `Receiver.receiveIgnoringCancellation` and `Semaphore.acquireIgnoringCancellation` park without `withTaskCancellationHandler`, so the runtime adds no status record per wait. They are opt-in, for loops that are never cancelled mid-wait, the same trade as `Notify.notifiedIgnoringCancellation`. 8 workers, stock 6.3.3 runtime, median of 9 runs, ns/op.
+
+| Bench | Cancellable | Non-cancellable | Change |
+|---|---|---|---|
+| mpsc_ping_pong | 2,275 | 1,651 | −27% |
+| semaphore | 565 | 491 | −13% |
+| mpsc_fan_in | 673 | 750 | +11% |
+
+- **mpsc_ping_pong and semaphore.** Both park on most operations, so skipping the status record pays off.
+- **mpsc_fan_in.** The receiver rarely parks, so the status record costs little there. It got slower in both modes, and the cause isn't known yet.

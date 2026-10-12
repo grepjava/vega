@@ -239,8 +239,61 @@ let semaphore = Bench(name: "semaphore", ops: 100_000) { ex in
     }
 }
 
+/// mpsc_ping_pong with the non-cancellable send and receive.
+let mpscPingPongNC = Bench(name: "mpsc_ping_pong_nc", ops: 100_000) { ex in
+    let there = Channel<Int>(capacity: 1), back = Channel<Int>(capacity: 1)
+    let ends = Move(EchoEnds(rx: there.receiver, tx: back.sender))
+    let echo = Task(executorPreference: ex) {
+        var e = ends.take()
+        while let v = try? await e.rx.receiveIgnoringCancellation() { try? await e.tx.sendIgnoringCancellation(v) }
+    }
+    let tx = there.sender
+    var rx = back.receiver
+    for i in 0..<100_000 {
+        try? await tx.sendIgnoringCancellation(i)
+        _ = try? await rx.receiveIgnoringCancellation()
+    }
+    _ = consume tx
+    await echo.value
+}
+
+/// mpsc_fan_in with the non-cancellable send and receive.
+let mpscFanInNC = Bench(name: "mpsc_fan_in_nc", ops: 100_000) { ex in
+    let ch = Channel<Int>(capacity: 1024)
+    var producers: [Task<Void, Never>] = []
+    for _ in 0..<8 {
+        let tx = Move(ch.sender.clone())
+        producers.append(Task(executorPreference: ex) {
+            let tx = tx.take()
+            for i in 0..<12_500 { try? await tx.sendIgnoringCancellation(i) }
+        })
+    }
+    _ = consume ch.sender
+    var rx = ch.receiver
+    var n = 0
+    while (try? await rx.receiveIgnoringCancellation()) != nil { n += 1 }
+    precondition(n == 100_000)
+    for p in producers { await p.value }
+}
+
+/// semaphore with the non-cancellable acquire.
+let semaphoreNC = Bench(name: "semaphore_nc", ops: 100_000) { ex in
+    let sem = Semaphore(permits: 2)
+    await withTaskGroup(of: Void.self) { g in
+        for _ in 0..<200 {
+            g.addTask(executorPreference: ex) {
+                for _ in 0..<500 {
+                    try? await sem.acquireIgnoringCancellation()
+                    sem.release()
+                }
+            }
+        }
+        await g.waitForAll()
+    }
+}
+
 let benches = [spawnMany, spawnDiscard, poolSpawn, chainedSpawn, pingPong, pingPongNotify, pingPongNotifyNC, yieldMany, yieldVega,
-               mpscPingPong, mpscFanIn, semaphore].filter { only?.contains($0.name) ?? true }
+               mpscPingPong, mpscPingPongNC, mpscFanIn, mpscFanInNC, semaphore, semaphoreNC].filter { only?.contains($0.name) ?? true }
 
 // MARK: run
 

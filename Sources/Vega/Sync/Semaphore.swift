@@ -75,7 +75,7 @@ public final class Semaphore: @unchecked Sendable {
         let id = currentTaskID()
         let code = await withTaskCancellationHandler {
             await withUnsafeContinuation { (c: UnsafeContinuation<UInt8, Never>) in
-                let now = lock.withLock { () -> UInt8? in enqueue(id, n, c) }
+                let now = lock.withLock { () -> UInt8? in enqueue(id, n, c, cancellable: true) }
                 if let now { c.resume(returning: now) }
             }
         } onCancel: {
@@ -94,12 +94,31 @@ public final class Semaphore: @unchecked Sendable {
         }
     }
 
+    /// As `acquire`, but a cancelled task keeps waiting. Throws only `.closed`.
+    ///
+    /// Cancellation support costs a status record in the Swift runtime on
+    /// every wait (installed and removed under a per-task lock). Loops that
+    /// are never cancelled mid-wait can skip it.
+    public func acquireIgnoringCancellation(_ n: Int = 1) async throws(AcquireError) {
+        if tryAcquire(n) {
+            await Runtime.consumeBudget()
+            return
+        }
+        if isClosed { throw .closed }
+        let code = await withUnsafeContinuation { (c: UnsafeContinuation<UInt8, Never>) in
+            let now = lock.withLock { () -> UInt8? in enqueue(0, n, c, cancellable: false) }
+            if let now { c.resume(returning: now) }
+        }
+        if code == 1 { throw .closed }
+    }
+
     /// Under the lock: take `n` permits now (0), report closed (1) or
     /// cancelled (2), or take what is free and queue for the rest (nil).
-    private func enqueue(_ id: UInt, _ n: Int, _ c: UnsafeContinuation<UInt8, Never>) -> UInt8? {
+    private func enqueue(_ id: UInt, _ n: Int, _ c: UnsafeContinuation<UInt8, Never>,
+                         cancellable: Bool) -> UInt8? {
         // Checked under the lock: either the cancel handler runs after this
         // and finds the waiter, or the flag is already visible.
-        if Task.isCancelled { return 2 }
+        if cancellable && Task.isCancelled { return 2 }
         var w = word.load(ordering: .relaxed)
         while true {
             if w & Semaphore.closedBit != 0 { return 1 }

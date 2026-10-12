@@ -63,7 +63,18 @@ public struct Channel<Element: ~Copyable & Sendable>: ~Copyable, Sendable {
         /// task is cancelled while waiting (`.cancelled`).
         @inlinable
         public func send(_ value: consuming Element) async throws(ChannelError) {
-            try await core.send(value)
+            try await core.send(value, cancellable: true)
+        }
+
+        /// As `send`, but a cancelled task keeps waiting for room. Throws only
+        /// `.closed`.
+        ///
+        /// Cancellation support costs a status record in the Swift runtime on
+        /// every wait (installed and removed under a per-task lock). Loops
+        /// that are never cancelled mid-send can skip it.
+        @inlinable
+        public func sendIgnoringCancellation(_ value: consuming Element) async throws(ChannelError) {
+            try await core.send(value, cancellable: false)
         }
 
         /// Queue `value` if there is room now. Throws, dropping the value,
@@ -98,7 +109,14 @@ public struct Channel<Element: ~Copyable & Sendable>: ~Copyable, Sendable {
         /// is cancelled while waiting (nothing is lost).
         @inlinable
         public mutating func receive() async throws(ChannelError) -> Element {
-            try await core.receive()
+            try await core.receive(cancellable: true)
+        }
+
+        /// As `receive`, but a cancelled task keeps waiting. Throws only
+        /// `.closed`. See `Sender.sendIgnoringCancellation` for why.
+        @inlinable
+        public mutating func receiveIgnoringCancellation() async throws(ChannelError) -> Element {
+            try await core.receive(cancellable: false)
         }
 
         /// The next value if one is queued.
@@ -210,8 +228,38 @@ final class ChannelCore<Element: ~Copyable & Sendable>: @unchecked Sendable {
         waiter?.resume()
     }
 
+    /// In the continuation's closure: queue the value now (0), report the
+    /// channel closed (1) or the task cancelled (2), or park the sender and
+    /// return nil. The caller resumes `c` with a non-nil result.
     @inlinable
-    func send(_ value: consuming Element) async throws(ChannelError) {
+    func parkSender(_ item: inout Element?, _ id: UInt, _ c: UnsafeContinuation<UInt8, Never>,
+                    cancellable: Bool) -> UInt8? {
+        let s = state
+        lock.lock()
+        if s.pointee.closed {
+            lock.unlock()
+            return 1
+        }
+        if hasRoom(s) { // a receive made room meanwhile
+            s.pointee.buffer.pushBack(item.take()!)
+            let waiter = s.pointee.receiver.take()
+            lock.unlock()
+            waiter?.resume()
+            return 0
+        }
+        // Checked under the lock: either the cancel handler runs after this
+        // and finds the parked sender, or the flag is already set.
+        if cancellable && Task.isCancelled {
+            lock.unlock()
+            return 2
+        }
+        s.pointee.parked.pushBack(Parked(id: id, value: item.take()!, continuation: c))
+        lock.unlock()
+        return nil
+    }
+
+    @inlinable
+    func send(_ value: consuming Element, cancellable: Bool) async throws(ChannelError) {
         let s = state
         var item = Optional(value)
         lock.lock()
@@ -231,38 +279,23 @@ final class ChannelCore<Element: ~Copyable & Sendable>: @unchecked Sendable {
 
         // Full: park the value with the continuation.
         let id = currentTaskID()
-        let code = await withTaskCancellationHandler {
-            await withUnsafeContinuation { (c: UnsafeContinuation<UInt8, Never>) in
+        let code: UInt8
+        if cancellable {
+            code = await withTaskCancellationHandler {
+                await withUnsafeContinuation { (c: UnsafeContinuation<UInt8, Never>) in
+                    if let now = parkSender(&item, id, c, cancellable: true) { c.resume(returning: now) }
+                }
+            } onCancel: {
                 lock.lock()
-                if s.pointee.closed {
-                    lock.unlock()
-                    c.resume(returning: 1)
-                    return
-                }
-                if hasRoom(s) { // a receive made room meanwhile
-                    s.pointee.buffer.pushBack(item.take()!)
-                    let waiter = s.pointee.receiver.take()
-                    lock.unlock()
-                    waiter?.resume()
-                    c.resume(returning: 0)
-                    return
-                }
-                // Checked under the lock: either the cancel handler runs
-                // after this and finds the parked sender, or the flag is set.
-                if Task.isCancelled {
-                    lock.unlock()
-                    c.resume(returning: 2)
-                    return
-                }
-                s.pointee.parked.pushBack(Parked(id: id, value: item.take()!, continuation: c))
+                let parked = state.pointee.parked.remove { $0.id == id }
                 lock.unlock()
+                // Its value drops here, outside the lock.
+                if let parked { parked.continuation.resume(returning: 2) }
             }
-        } onCancel: {
-            lock.lock()
-            let parked = state.pointee.parked.remove { $0.id == id }
-            lock.unlock()
-            // Its value drops here, outside the lock.
-            if let parked { parked.continuation.resume(returning: 2) }
+        } else {
+            code = await withUnsafeContinuation { (c: UnsafeContinuation<UInt8, Never>) in
+                if let now = parkSender(&item, id, c, cancellable: false) { c.resume(returning: now) }
+            }
         }
         switch code {
         case 0: return
@@ -299,8 +332,24 @@ final class ChannelCore<Element: ~Copyable & Sendable>: @unchecked Sendable {
         throw done ? .closed : .empty
     }
 
+    /// In the continuation's closure: park the receiver, or resume it now if
+    /// there is something to see (a value, the end, a cancellation).
     @inlinable
-    func receive() async throws(ChannelError) -> Element {
+    func parkReceiver(_ c: UnsafeContinuation<Void, Never>, cancellable: Bool) {
+        let s = state
+        lock.lock()
+        if !s.pointee.buffer.isEmpty || s.pointee.closed || s.pointee.senders == 0
+            || (cancellable && Task.isCancelled) {
+            lock.unlock()
+            c.resume()
+            return
+        }
+        s.pointee.receiver = c
+        lock.unlock()
+    }
+
+    @inlinable
+    func receive(cancellable: Bool) async throws(ChannelError) -> Element {
         let s = state
         while true {
             var wake: UnsafeContinuation<UInt8, Never>? = nil
@@ -316,24 +365,23 @@ final class ChannelCore<Element: ~Copyable & Sendable>: @unchecked Sendable {
                 throw .closed
             }
             lock.unlock()
-            if Task.isCancelled { throw .cancelled }
 
-            await withTaskCancellationHandler {
-                await withUnsafeContinuation { (c: UnsafeContinuation<Void, Never>) in
-                    lock.lock()
-                    if !s.pointee.buffer.isEmpty || s.pointee.closed || s.pointee.senders == 0 || Task.isCancelled {
-                        lock.unlock()
-                        c.resume()
-                        return
+            if cancellable {
+                if Task.isCancelled { throw .cancelled }
+                await withTaskCancellationHandler {
+                    await withUnsafeContinuation { (c: UnsafeContinuation<Void, Never>) in
+                        parkReceiver(c, cancellable: true)
                     }
-                    s.pointee.receiver = c
+                } onCancel: {
+                    lock.lock()
+                    let waiter = state.pointee.receiver.take()
                     lock.unlock()
+                    waiter?.resume()
                 }
-            } onCancel: {
-                lock.lock()
-                let waiter = state.pointee.receiver.take()
-                lock.unlock()
-                waiter?.resume()
+            } else {
+                await withUnsafeContinuation { (c: UnsafeContinuation<Void, Never>) in
+                    parkReceiver(c, cancellable: false)
+                }
             }
         }
     }
