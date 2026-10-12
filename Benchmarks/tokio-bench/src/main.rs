@@ -1,10 +1,10 @@
-//! The same four scheduler benchmarks as vega-bench, on Tokio's multi-threaded
+//! The same scheduler and sync benchmarks as vega-bench, on Tokio's multi-threaded
 //! runtime, so the numbers line up row for row.
 //!
 //!   tokio-bench [--workers N] [--runs N]
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::Notify;
+use tokio::sync::{mpsc, Notify, Semaphore};
 
 fn main() {
     let mut workers = std::thread::available_parallelism().unwrap().get();
@@ -25,11 +25,14 @@ fn main() {
     println!("tokio-bench: {workers} workers, median of {runs} runs");
     println!("{:<16}{:>14}", "bench", "Tokio ns/op");
 
-    let benches: [(&str, usize, fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>); 4] = [
+    let benches: [(&str, usize, fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>); 7] = [
         ("spawn_many", 100_000, || Box::pin(spawn_many())),
         ("chained_spawn", 10_000, || Box::pin(chained_spawn(10_000))),
         ("ping_pong", 100_000, || Box::pin(ping_pong())),
         ("yield_many", 100_000, || Box::pin(yield_many())),
+        ("mpsc_ping_pong", 100_000, || Box::pin(mpsc_ping_pong())),
+        ("mpsc_fan_in", 100_000, || Box::pin(mpsc_fan_in())),
+        ("semaphore", 100_000, || Box::pin(semaphore())),
     ];
     for (name, ops, f) in benches {
         let mut samples: Vec<f64> = (0..runs)
@@ -88,6 +91,59 @@ async fn yield_many() {
             tokio::spawn(async {
                 for _ in 0..500 {
                     tokio::task::yield_now().await;
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.await.unwrap();
+    }
+}
+
+async fn mpsc_ping_pong() {
+    let (tx1, mut rx1) = mpsc::channel::<usize>(1);
+    let (tx2, mut rx2) = mpsc::channel::<usize>(1);
+    let echo = tokio::spawn(async move {
+        while let Some(v) = rx1.recv().await {
+            if tx2.send(v).await.is_err() {
+                break;
+            }
+        }
+    });
+    for i in 0..100_000 {
+        tx1.send(i).await.unwrap();
+        rx2.recv().await.unwrap();
+    }
+    drop(tx1);
+    echo.await.unwrap();
+}
+
+async fn mpsc_fan_in() {
+    let (tx, mut rx) = mpsc::channel::<usize>(1024);
+    for _ in 0..8 {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            for i in 0..12_500 {
+                tx.send(i).await.unwrap();
+            }
+        });
+    }
+    drop(tx);
+    let mut n = 0;
+    while rx.recv().await.is_some() {
+        n += 1;
+    }
+    assert_eq!(n, 100_000);
+}
+
+async fn semaphore() {
+    let sem = Arc::new(Semaphore::new(2));
+    let handles: Vec<_> = (0..200)
+        .map(|_| {
+            let sem = sem.clone();
+            tokio::spawn(async move {
+                for _ in 0..500 {
+                    let _permit = sem.acquire().await.unwrap();
                 }
             })
         })

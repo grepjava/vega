@@ -75,8 +75,7 @@ public final class Notify: @unchecked Sendable {
             return
         }
 
-        // A task waits on one thing at a time: its address names the waiter.
-        let id = withUnsafeCurrentTask { t in t.map { UInt(bitPattern: unsafeBitCast($0, to: Int.self)) } ?? 0 }
+        let id = currentTaskID()
         await withTaskCancellationHandler {
             await withUnsafeContinuation { (c: UnsafeContinuation<Void, Never>) in
                 let resumeNow = lock.withLock { () -> Bool in

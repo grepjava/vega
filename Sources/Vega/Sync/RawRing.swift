@@ -1,30 +1,40 @@
 /// A growable FIFO ring for use under a lock. Not thread-safe by itself, no
 /// class, no ARC of its own: elements are moved in and out, so it works for
-/// closures as well as trivial values. The owner calls `destroy()`.
-struct RawRing<Element> {
-    private(set) var buffer: UnsafeMutablePointer<Element>
-    private(set) var capacity: Int
-    private(set) var head = 0
-    private(set) var count = 0
+/// closures, trivial values and `~Copyable` values. The owner calls `destroy()`.
+///
+/// Inlinable so that generic users (`Channel`) specialize in client modules.
+@usableFromInline
+struct RawRing<Element: ~Copyable> {
+    @usableFromInline var buffer: UnsafeMutablePointer<Element>
+    @usableFromInline var capacity: Int
+    @usableFromInline var head = 0
+    @usableFromInline var count = 0
 
+    @inlinable
     init(capacity: Int = 16) {
         precondition(capacity > 0 && capacity & (capacity - 1) == 0, "capacity must be a power of two")
         self.capacity = capacity
         buffer = .allocate(capacity: capacity)
     }
 
-    var isEmpty: Bool { count == 0 }
+    @inlinable var isEmpty: Bool { count == 0 }
 
-    @inline(__always) private func slot(_ i: Int) -> UnsafeMutablePointer<Element> {
+    /// The oldest element, in place.
+    @inlinable var front: UnsafeMutablePointer<Element>? { count > 0 ? buffer + head : nil }
+
+    @inlinable @inline(__always)
+    func slot(_ i: Int) -> UnsafeMutablePointer<Element> {
         buffer + ((head + i) & (capacity - 1))
     }
 
+    @inlinable
     mutating func pushBack(_ x: consuming Element) {
         if count == capacity { grow() }
         slot(count).initialize(to: x)
         count += 1
     }
 
+    @inlinable
     mutating func popFront() -> Element? {
         guard count > 0 else { return nil }
         let x = (buffer + head).move()
@@ -34,6 +44,7 @@ struct RawRing<Element> {
     }
 
     /// Remove and return the first element matching `predicate`, keeping order.
+    @inlinable
     mutating func remove(where predicate: (borrowing Element) -> Bool) -> Element? {
         for i in 0..<count where predicate(slot(i).pointee) {
             let x = slot(i).move()
@@ -44,7 +55,8 @@ struct RawRing<Element> {
         return nil
     }
 
-    private mutating func grow() {
+    @inlinable
+    mutating func grow() {
         let bigger = UnsafeMutablePointer<Element>.allocate(capacity: capacity * 2)
         for i in 0..<count { (bigger + i).initialize(to: slot(i).move()) }
         buffer.deallocate()
@@ -53,6 +65,7 @@ struct RawRing<Element> {
         head = 0
     }
 
+    @inlinable
     mutating func destroy() {
         while popFront() != nil {}
         buffer.deallocate()

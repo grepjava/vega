@@ -173,7 +173,74 @@ let poolSpawn = Bench(name: "pool_spawn", ops: 100_000) { _ in
     await d.done.notified()
 }
 
-let benches = [spawnMany, spawnDiscard, poolSpawn, chainedSpawn, pingPong, pingPongNotify, pingPongNotifyNC, yieldMany, yieldVega].filter { only?.contains($0.name) ?? true }
+/// Carries a `~Copyable` value into a task closure, which can't capture one.
+final class Move<T: ~Copyable>: @unchecked Sendable {
+    var value: T?
+    init(_ v: consuming T) { value = consume v }
+    func take() -> T { value.take()! }
+}
+
+struct EchoEnds: ~Copyable, Sendable {
+    var rx: Channel<Int>.Receiver
+    let tx: Channel<Int>.Sender
+}
+
+/// A value bounced through two capacity-1 channels: every send meets a
+/// full or empty channel, so each round trip parks and wakes both sides.
+let mpscPingPong = Bench(name: "mpsc_ping_pong", ops: 100_000) { ex in
+    let there = Channel<Int>(capacity: 1), back = Channel<Int>(capacity: 1)
+    let ends = Move(EchoEnds(rx: there.receiver, tx: back.sender))
+    let echo = Task(executorPreference: ex) {
+        var e = ends.take()
+        while let v = try? await e.rx.receive() { try? await e.tx.send(v) }
+    }
+    let tx = there.sender
+    var rx = back.receiver
+    for i in 0..<100_000 {
+        try? await tx.send(i)
+        _ = try? await rx.receive()
+    }
+    _ = consume tx
+    await echo.value
+}
+
+/// 8 producers × 12,500 sends into one bounded(1024) channel, one consumer.
+let mpscFanIn = Bench(name: "mpsc_fan_in", ops: 100_000) { ex in
+    let ch = Channel<Int>(capacity: 1024)
+    var producers: [Task<Void, Never>] = []
+    for _ in 0..<8 {
+        let tx = Move(ch.sender.clone())
+        producers.append(Task(executorPreference: ex) {
+            let tx = tx.take()
+            for i in 0..<12_500 { try? await tx.send(i) }
+        })
+    }
+    _ = consume ch.sender
+    var rx = ch.receiver
+    var n = 0
+    while (try? await rx.receive()) != nil { n += 1 }
+    precondition(n == 100_000)
+    for p in producers { await p.value }
+}
+
+/// 200 tasks × 500 acquire/release on a 2-permit semaphore.
+let semaphore = Bench(name: "semaphore", ops: 100_000) { ex in
+    let sem = Semaphore(permits: 2)
+    await withTaskGroup(of: Void.self) { g in
+        for _ in 0..<200 {
+            g.addTask(executorPreference: ex) {
+                for _ in 0..<500 {
+                    try? await sem.acquire()
+                    sem.release()
+                }
+            }
+        }
+        await g.waitForAll()
+    }
+}
+
+let benches = [spawnMany, spawnDiscard, poolSpawn, chainedSpawn, pingPong, pingPongNotify, pingPongNotifyNC, yieldMany, yieldVega,
+               mpscPingPong, mpscFanIn, semaphore].filter { only?.contains($0.name) ?? true }
 
 // MARK: run
 

@@ -185,3 +185,24 @@ Requests per second, with p99 round-trip latency:
 - 6% Vega.
 
 **Open question.** The patched runtime is slower than stock at 64 and 256 connections and faster at 1,024. In the scheduler benchmarks it is faster everywhere. This needs a per-patch bisect.
+
+## Sync primitives (2026-10-12)
+
+8 workers, executor preference, median of 9 runs, in ns/op. Tokio's numbers come from the same benchmarks in `tokio-bench`.
+
+- **mpsc_ping_pong:** one value bounced through two capacity-1 channels, 100k round trips.
+- **mpsc_fan_in:** 8 producers × 12,500 sends into one channel bounded at 1,024, with one consumer.
+- **semaphore:** 200 tasks × 500 acquire/release on 2 permits.
+
+| Bench | Swift default | Vega, stock runtime | Vega, patched runtime | Tokio |
+|---|---|---|---|---|
+| mpsc_ping_pong | 10,094 | 2,418 | 987 | **492** |
+| mpsc_fan_in | 3,459 | 784 | 473 | **227** |
+| semaphore | 3,684 | 548 | **348** | 463 |
+
+**Specialization.** At first `Channel` and `Oneshot` were ordinary generic code. Called from another module they ran unspecialized, through value witnesses for every push and pop. That made mpsc_ping_pong 2,160 ns and mpsc_fan_in 1,090 ns on the patched runtime. Building with `-cross-module-optimization` cut those to 892 and 456, which showed that missed specialization was nearly all of the cost. Apps shouldn't need an unsafe flag to get that speed, so the channel types, their cores, `RawRing` and `RawLock` are now `@inlinable`/`@usableFromInline`. A plain release build matches the CMO numbers.
+
+**What is left against Tokio:**
+- **mpsc_ping_pong.** Every operation parks one side and wakes the other. It costs about what two `Notify` round trips cost (ping_pong_notify: 776 ns), so the time is in park and wake, not in the channel. The status record from `withTaskCancellationHandler` is the largest part.
+- **mpsc_fan_in.** Nine threads share one lock. Tokio's senders reserve a slot with one atomic add on a lock-free block list. Vega would need the same structure to close this gap.
+- **semaphore.** On the patched runtime, Vega is ahead of Tokio. With nobody waiting, acquire and release are single CASes.

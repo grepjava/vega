@@ -25,3 +25,11 @@ Linux is the primary target. Building through WSL works:
 swift build --scratch-path ~/.cache/vega-build
 swift test  --scratch-path ~/.cache/vega-build
 ```
+
+Under ThreadSanitizer, use the suppression file: it covers a Swift runtime gap (see the file for details).
+
+```sh
+swift build --build-tests --sanitize=thread --scratch-path ~/.cache/vega-build-tsan
+TSAN_OPTIONS=suppressions=$PWD/Tests/tsan.supp VEGA_MODEL_N=50000 \
+  swift test --skip-build --sanitize=thread --scratch-path ~/.cache/vega-build-tsan
+```

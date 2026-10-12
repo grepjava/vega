@@ -1,0 +1,11 @@
+# ThreadSanitizer suppressions for Vega's tests.
+#
+# Swift's swift_continuation_await (stdlib/public/Concurrency/Task.cpp) has no
+# _swift_tsan_acquire on its early-resume paths: when a continuation is
+# resumed before its task reaches the await, the task carries on without
+# TSan seeing the resumer's _swift_tsan_release. The task's next write to its
+# own continuation frame is then reported as racing with the resumer's
+# resume(returning:). Present in Swift 6.3.3 and on main as of 2026-10-11.
+# Only reports whose top frame is the compiler-generated body of
+# withUnsafeContinuation itself are suppressed.
+race_top:ss22withUnsafeContinuation9isolation_
