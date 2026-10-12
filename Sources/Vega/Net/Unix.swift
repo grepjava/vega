@@ -1,6 +1,10 @@
-#if os(Linux)
+#if os(Linux) || canImport(Darwin)
 import CVega
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 
 /// A listening Unix stream socket. The path must not exist yet, and is left
 /// behind when the listener is dropped (remove it yourself, as with Tokio).
@@ -58,7 +62,7 @@ public struct UnixStream: ~Copyable, Sendable {
         guard e == 0 else { throw IOError(code: e) }
         let a: IORegistration
         do { a = try IORegistration(fd: fds.0, driver: driver) } catch {
-            Glibc.close(fds.1)
+            closeDescriptor(fds.1)
             throw error
         }
         let first = UnixStream(reg: a)

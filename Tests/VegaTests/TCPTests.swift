@@ -1,5 +1,9 @@
-#if os(Linux)
+#if os(Linux) || canImport(Darwin)
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 import Testing
 @testable import Vega
 

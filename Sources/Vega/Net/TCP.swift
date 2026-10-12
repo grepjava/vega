@@ -1,6 +1,10 @@
-#if os(Linux)
+#if os(Linux) || canImport(Darwin)
 import CVega
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 
 /// A listening TCP socket.
 ///
@@ -69,7 +73,7 @@ public struct TCPStream: ~Copyable, Sendable {
     public static func connect(to address: SocketAddress) async throws(IOError) -> TCPStream {
         let driver = try IODriver.current()
         var err: Int32 = 0
-        let fd = withUnsafePointer(to: address.raw) { cv_connect_new($0, Int32(SOCK_STREAM.rawValue), &err) }
+        let fd = withUnsafePointer(to: address.raw) { cv_connect_new($0, socketStream, &err) }
         guard fd >= 0 else { throw IOError(code: err) }
         let stream = TCPStream(reg: try IORegistration(fd: fd, driver: driver))
         try await stream.reg.connected(err)

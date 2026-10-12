@@ -192,7 +192,7 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     /// the wheel held is then dropped here.
     func removeTimeout(_ handle: TimerHandle, task: UnsafeRawPointer) -> Bool {
         guard timers.remove(handle) else { return false }
-        Unmanaged<AnyObject>.fromOpaque(task).release()
+        cv_task_release(task)
         return true
     }
 
@@ -230,7 +230,7 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
             w.takeRetainedValue().fire() // drops the retain the wheel held
         case .cancel(let task):
             cv_task_cancel(UnsafeMutableRawPointer(mutating: task))
-            Unmanaged<AnyObject>.fromOpaque(task).release()
+            cv_task_release(task)
         case .job(let job):
             #if VEGA_JOB_AUDIT
             JobAudit.enqueued(job, "timer")

@@ -1,6 +1,10 @@
-#if os(Linux)
+#if os(Linux) || canImport(Darwin)
 import CVega
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 
 // The byte-stream operations TCP and Unix sockets (and their split halves)
 // share. The readiness backends try the syscall first and wait only on EAGAIN.

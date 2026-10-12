@@ -1,9 +1,16 @@
-#if os(Linux)
+#if os(Linux) || canImport(Darwin)
 import CVega
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 
-/// The runtime's I/O driver: one edge-triggered epoll instance, as in Tokio's
-/// multi-threaded runtime. The parked worker that owns the timers blocks in
+/// close(2), under a name that a type's own `close()` doesn't shadow.
+@inline(__always) func closeDescriptor(_ fd: Int32) { _ = close(fd) }
+
+/// The runtime's I/O driver: one edge-triggered epoll (Linux) or kqueue
+/// (Darwin) instance, as in Tokio's multi-threaded runtime. The parked worker that owns the timers blocks in
 /// it; busy workers poll it every `Worker.timerInterval` ticks. Trivial to
 /// copy (no ARC); the scheduler frees it.
 struct IODriver: @unchecked Sendable {
@@ -72,7 +79,7 @@ struct IORegistration: @unchecked Sendable {
     init(fd: Int32, driver: IODriver) throws(IOError) {
         var err: Int32 = 0
         guard let io = cv_driver_register(driver.raw, fd, &err) else {
-            Glibc.close(fd)
+            closeDescriptor(fd)
             throw IOError(code: err)
         }
         self.io = io

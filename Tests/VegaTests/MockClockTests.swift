@@ -5,6 +5,8 @@ import Vega
 import VegaTest
 #if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
 #endif
 
 private final class ClockLog: Sendable {

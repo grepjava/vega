@@ -1,6 +1,8 @@
 import Synchronization
 #if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
 #endif
 import CVega
 import Testing

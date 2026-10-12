@@ -1,5 +1,9 @@
 import CVega
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 import Synchronization
 import Testing
 @testable import Vega

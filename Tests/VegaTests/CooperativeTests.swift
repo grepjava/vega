@@ -183,8 +183,12 @@ final class Counter: Sendable {
         // All eight must be suspended at once: needs eight pooled tasks.
         while waiting.value < 8 { spin(microseconds: 100) }
         #expect(pool.taskCount >= 8)
-        gate.notifyWaiters()
-        while waiting.value > 0 { spin(microseconds: 100) }
+        // A closure counts itself before it waits on the gate, and
+        // notifyWaiters stores no permit: repeat until all eight are out.
+        while waiting.value > 0 {
+            gate.notifyWaiters()
+            spin(microseconds: 100)
+        }
         pool.close()
     }
 }

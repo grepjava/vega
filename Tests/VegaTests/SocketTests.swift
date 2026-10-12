@@ -1,6 +1,10 @@
-#if os(Linux)
+#if os(Linux) || canImport(Darwin)
 import CVega
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 import Testing
 @testable import Vega
 
@@ -39,8 +43,12 @@ private func drain(_ conn: borrowing TCPStream) async -> [UInt8] {
             #expect(try s.option(.keepAliveIdle) == 30)
             #expect(try s.option(.keepAliveInterval) == 5)
             #expect(try s.option(.keepAliveCount) == 4)
-            try s.setOption(.userTimeout, to: 10_000)
-            #expect(try s.option(.userTimeout) == 10_000)
+            do throws(IOError) {
+                try s.setOption(.userTimeout, to: 10_000)
+                #expect(try s.option(.userTimeout) == 10_000)
+            } catch where error.code == ENOPROTOOPT {
+                // Linux only.
+            }
             #expect(try s.option(.linger) == -1)
             try s.setOption(.linger, to: 5)
             #expect(try s.option(.linger) == 5)

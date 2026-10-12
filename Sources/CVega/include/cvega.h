@@ -70,10 +70,11 @@ typedef void (*cv_thread_fn)(void *arg);
 /// Returns 0 or an errno value.
 int cv_thread_spawn(cv_thread_fn fn, void *arg, const char *name, int cpu);
 
-// ---- I/O driver (Linux: edge-triggered epoll) -----------------------------
+// ---- I/O driver (edge-triggered: epoll on Linux, kqueue on Darwin) ----------
 // One per runtime, as in Tokio. Whichever parked worker owns the timers blocks
 // in it; busy workers poll it with a zero timeout. A parker blocked in the
-// driver is woken through the driver's eventfd instead of a futex.
+// driver is woken through it (an eventfd, or an EVFILT_USER event) instead of
+// a futex.
 
 /// One registered fd. Each direction has a slot: 0 idle, 1 ready (an event
 /// came while nobody waited), or a waiting continuation's bits.
@@ -181,7 +182,8 @@ cv_io *cv_driver_register(cv_driver *d, int fd, int *err);
 void cv_driver_deregister(cv_driver *d, cv_io *io);
 
 // ---- sockets -------------------------------------------------------------
-// All fds are non-blocking and close-on-exec. Failures return -1 and an errno
+// All fds are non-blocking and close-on-exec, and never raise SIGPIPE
+// (MSG_NOSIGNAL on Linux, SO_NOSIGPIPE on Darwin). Failures return -1 and an errno
 // in *err. Functions taking a host name resolve it with a blocking getaddrinfo.
 
 /// A socket address of any family (room and alignment of sockaddr_storage).
@@ -323,6 +325,13 @@ extern void *swift_task_getCurrent(void) __attribute__((swiftcall));
 extern void swift_task_cancel(void *task) __attribute__((swiftcall));
 static inline void *cv_task_current(void) { return swift_task_getCurrent(); }
 static inline void cv_task_cancel(void *task) { swift_task_cancel(task); }
+
+// Retain and release a task (or any native Swift object). Unmanaged<AnyObject>
+// would go through objc_retain on Darwin, which can't handle a task.
+extern void *swift_retain(void *object);
+extern void swift_release(void *object);
+static inline void cv_task_retain(const void *task) { swift_retain((void *)task); }
+static inline void cv_task_release(const void *task) { swift_release((void *)task); }
 
 /// Tell ThreadSanitizer that whatever another thread did before releasing
 /// `addr` happens before the caller's next steps; a no-op without TSan.

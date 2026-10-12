@@ -30,6 +30,7 @@
 #elif defined(__APPLE__)
 #include <mach/mach_time.h>
 #include <os/os_sync_wait_on_address.h>
+#include <sys/event.h>
 #endif
 
 __thread void *cv_current_tls;
@@ -47,12 +48,13 @@ int cv_cpu_count(void) {
 
 // ---- parker --------------------------------------------------------------
 
-// PARKED_IO: blocked in the I/O driver, woken through its eventfd.
+// PARKED_IO: blocked in the I/O driver, woken through it (an eventfd write
+// on Linux, an EVFILT_USER trigger on Darwin).
 enum { EMPTY = 0, PARKED = 1, NOTIFIED = 2, PARKED_IO = 3 };
 
 struct cv_parker {
     _Atomic uint32_t state;
-    int wake_fd; // the driver's eventfd, or -1
+    int wake_fd; // the driver's eventfd (Linux) or kqueue (Darwin), or -1
     char pad[120]; // own cache line pair: parkers are hit from other threads
 };
 
@@ -78,13 +80,9 @@ static void wait_on(_Atomic uint32_t *addr, uint32_t expected, int64_t timeout_n
 #elif defined(__APPLE__)
     if (timeout_ns < 0)
         os_sync_wait_on_address((void *)addr, expected, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE);
-    else {
-        static mach_timebase_info_data_t tb;
-        if (tb.denom == 0) mach_timebase_info(&tb); // racy but idempotent
-        uint64_t ticks = (uint64_t)timeout_ns * tb.denom / tb.numer;
+    else if (timeout_ns > 0) // the timeout is in nanoseconds; 0 is an error
         os_sync_wait_on_address_with_timeout((void *)addr, expected, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE,
-                                             OS_CLOCK_MACH_ABSOLUTE_TIME, ticks);
-    }
+                                             OS_CLOCK_MACH_ABSOLUTE_TIME, (uint64_t)timeout_ns);
 #else
 #error "cv_park: unsupported platform"
 #endif
@@ -156,14 +154,27 @@ void cv_park_spin(cv_parker *p, int64_t timeout_ns, int64_t spin_ns) {
     atomic_store(&p->state, EMPTY); // timed out; a racing notify is consumed (caller rechecks)
 }
 
+/// Interrupt a turn blocked in the driver whose wake fd is `fd`.
+static void driver_wake(int fd) {
+#if defined(__linux__)
+    uint64_t one = 1;
+    ssize_t r = write(fd, &one, sizeof one);
+    (void)r; // EAGAIN only if the counter is saturated: a wake is pending anyway
+#elif defined(__APPLE__)
+    struct kevent ev;
+    EV_SET(&ev, 0, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
+    kevent(fd, &ev, 1, NULL, 0, NULL);
+#else
+    (void)fd;
+#endif
+}
+
 void cv_unpark(cv_parker *p) {
     uint32_t old = atomic_exchange(&p->state, NOTIFIED);
     if (old == PARKED) {
         wake_one(&p->state);
     } else if (old == PARKED_IO) {
-        uint64_t one = 1;
-        ssize_t r = write(p->wake_fd, &one, sizeof one);
-        (void)r; // EAGAIN only if the counter is saturated: a wake is pending anyway
+        driver_wake(p->wake_fd);
     }
 }
 
@@ -249,10 +260,18 @@ int cv_thread_spawn(cv_thread_fn fn, void *arg, const char *name, int cpu) {
 }
 
 // ---- I/O driver ----------------------------------------------------------
+// Edge-triggered readiness: epoll with EPOLLET on Linux, kqueue with EV_CLEAR
+// on Darwin. Everything but creating, registering and polling is shared.
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 
 #define CV_MAX_EVENTS 1024 // as Tokio: fewer ready sockets left for the next poll
+
+#if defined(__linux__)
+typedef struct epoll_event cv_event;
+#else
+typedef struct kevent cv_event;
+#endif
 
 struct cv_driver {
     _Atomic uint32_t locked; // polled by one thread at a time
@@ -260,11 +279,11 @@ struct cv_driver {
     _Atomic int registered;
     _Atomic(cv_io *) released; // deregistered, freed by the next turn
     char pad1[112];
-    int epfd;
-    int wake_fd;
+    int poll_fd; // the epoll or kqueue instance
+    int wake_fd; // Linux: an eventfd; Darwin: poll_fd itself (EVFILT_USER)
     // Used only by the lock holder.
     cv_driver_stats stats;
-    struct epoll_event events[CV_MAX_EVENTS];
+    cv_event events[CV_MAX_EVENTS];
     uintptr_t wakes[2 * CV_MAX_EVENTS];
 };
 
@@ -272,17 +291,29 @@ cv_driver *cv_driver_new(void) {
     cv_driver *d = aligned_alloc(128, (sizeof(cv_driver) + 127) & ~(size_t)127);
     if (!d) return NULL;
     memset(d, 0, sizeof *d);
-    d->epfd = epoll_create1(EPOLL_CLOEXEC);
+#if defined(__linux__)
+    d->poll_fd = epoll_create1(EPOLL_CLOEXEC);
     d->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (d->epfd < 0 || d->wake_fd < 0) goto fail;
+    if (d->poll_fd < 0 || d->wake_fd < 0) goto fail;
     // data.ptr == NULL marks the eventfd.
     struct epoll_event ev = {.events = EPOLLIN | EPOLLET, .data.ptr = NULL};
-    if (epoll_ctl(d->epfd, EPOLL_CTL_ADD, d->wake_fd, &ev) != 0) goto fail;
+    if (epoll_ctl(d->poll_fd, EPOLL_CTL_ADD, d->wake_fd, &ev) != 0) goto fail;
+#else
+    d->wake_fd = -1;
+    d->poll_fd = kqueue();
+    if (d->poll_fd < 0) goto fail;
+    fcntl(d->poll_fd, F_SETFD, FD_CLOEXEC);
+    // Wakes are an EVFILT_USER event, re-armed by EV_CLEAR once collected.
+    struct kevent ev;
+    EV_SET(&ev, 0, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
+    if (kevent(d->poll_fd, &ev, 1, NULL, 0, NULL) != 0) goto fail;
+    d->wake_fd = d->poll_fd;
+#endif
     return d;
 fail: {
     int e = errno;
-    if (d->epfd >= 0) close(d->epfd);
-    if (d->wake_fd >= 0) close(d->wake_fd);
+    if (d->poll_fd >= 0) close(d->poll_fd);
+    if (d->wake_fd >= 0 && d->wake_fd != d->poll_fd) close(d->wake_fd);
     free(d);
     errno = e;
     return NULL;
@@ -301,8 +332,8 @@ static void release_pending(cv_driver *d) {
 void cv_driver_free(cv_driver *d) {
     if (!d) return;
     release_pending(d);
-    close(d->epfd);
-    close(d->wake_fd);
+    if (d->wake_fd != d->poll_fd) close(d->wake_fd);
+    close(d->poll_fd);
     free(d);
 }
 
@@ -345,6 +376,7 @@ static uintptr_t io_ready(cv_io *io, int dir) {
 }
 
 static int poll_events(cv_driver *d, int64_t timeout_ns) {
+#if defined(__linux__)
 #ifdef SYS_epoll_pwait2
     static _Atomic int no_pwait2;
     if (!atomic_load_explicit(&no_pwait2, memory_order_relaxed)) {
@@ -354,14 +386,23 @@ static int poll_events(cv_driver *d, int64_t timeout_ns) {
             ts.tv_nsec = (long)(timeout_ns % 1000000000);
             tp = &ts;
         }
-        long n = syscall(SYS_epoll_pwait2, d->epfd, d->events, CV_MAX_EVENTS, tp, NULL, 0);
+        long n = syscall(SYS_epoll_pwait2, d->poll_fd, d->events, CV_MAX_EVENTS, tp, NULL, 0);
         if (n >= 0 || errno != ENOSYS) return (int)n;
         atomic_store_explicit(&no_pwait2, 1, memory_order_relaxed);
     }
 #endif
     // Milliseconds, rounded up so a timer is never polled for early.
     int ms = timeout_ns < 0 ? -1 : (int)((timeout_ns + 999999) / 1000000);
-    return epoll_wait(d->epfd, d->events, CV_MAX_EVENTS, ms);
+    return epoll_wait(d->poll_fd, d->events, CV_MAX_EVENTS, ms);
+#else
+    struct timespec ts, *tp = NULL;
+    if (timeout_ns >= 0) {
+        ts.tv_sec = (time_t)(timeout_ns / 1000000000);
+        ts.tv_nsec = (long)(timeout_ns % 1000000000);
+        tp = &ts;
+    }
+    return kevent(d->poll_fd, NULL, 0, d->events, CV_MAX_EVENTS, tp);
+#endif
 }
 
 int cv_driver_turn(cv_driver *d, cv_parker *p, int64_t timeout_ns) {
@@ -388,6 +429,8 @@ int cv_driver_turn(cv_driver *d, cv_parker *p, int64_t timeout_ns) {
     if (n == CV_MAX_EVENTS) d->stats.full_batches++;
     int woken = 0;
     for (int i = 0; i < n; i++) {
+        uintptr_t w;
+#if defined(__linux__)
         cv_io *io = d->events[i].data.ptr;
         uint32_t e = d->events[i].events;
         if (!io) {
@@ -396,7 +439,6 @@ int cv_driver_turn(cv_driver *d, cv_parker *p, int64_t timeout_ns) {
             (void)r;
             continue;
         }
-        uintptr_t w;
         // Before io_ready, whose CAS publishes it to the task it wakes.
         if (e & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
             __atomic_store_n(&io->read_closed, 1, __ATOMIC_RELEASE);
@@ -404,6 +446,21 @@ int cv_driver_turn(cv_driver *d, cv_parker *p, int64_t timeout_ns) {
             d->wakes[woken++] = w;
         if ((e & (EPOLLOUT | EPOLLHUP | EPOLLERR)) && (w = io_ready(io, CV_IO_WRITE)))
             d->wakes[woken++] = w;
+#else
+        // One event per filter. EVFILT_USER is a wake: EV_CLEAR re-armed it.
+        const struct kevent *ev = &d->events[i];
+        cv_io *io = ev->udata;
+        if (ev->filter == EVFILT_USER || !io) continue;
+        if (ev->filter == EVFILT_READ) {
+            // EV_EOF: the peer shut down its side, or the socket failed.
+            // Before io_ready, whose CAS publishes it to the task it wakes.
+            if (ev->flags & (EV_EOF | EV_ERROR))
+                __atomic_store_n(&io->read_closed, 1, __ATOMIC_RELEASE);
+            if ((w = io_ready(io, CV_IO_READ))) d->wakes[woken++] = w;
+        } else if (ev->filter == EVFILT_WRITE) {
+            if ((w = io_ready(io, CV_IO_WRITE))) d->wakes[woken++] = w;
+        }
+#endif
     }
     d->stats.wakes += (uint64_t)woken;
     return woken;
@@ -417,20 +474,51 @@ cv_io *cv_driver_register(cv_driver *d, int fd, int *err) {
     }
     io->fd = fd;
     io->refs = 1;
+#if defined(__linux__)
     struct epoll_event ev = {.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET, .data.ptr = io};
-    if (epoll_ctl(d->epfd, EPOLL_CTL_ADD, fd, &ev) != 0) {
+    if (epoll_ctl(d->poll_fd, EPOLL_CTL_ADD, fd, &ev) != 0) {
         *err = errno;
         free(io);
         return NULL;
     }
+#else
+    // Both filters in one call; EV_RECEIPT reports each one's result.
+    struct kevent ch[2], out[2];
+    EV_SET(&ch[0], fd, EVFILT_READ, EV_ADD | EV_CLEAR | EV_RECEIPT, 0, 0, io);
+    EV_SET(&ch[1], fd, EVFILT_WRITE, EV_ADD | EV_CLEAR | EV_RECEIPT, 0, 0, io);
+    int n = kevent(d->poll_fd, ch, 2, out, 2, NULL);
+    int e = n < 0 ? errno : 0, added[2] = {0, 0};
+    for (int i = 0; i < n; i++) {
+        int k = out[i].filter == EVFILT_READ ? 0 : 1;
+        if ((out[i].flags & EV_ERROR) && out[i].data != 0) {
+            if (!e) e = (int)out[i].data;
+        } else {
+            added[k] = 1;
+        }
+    }
+    if (e || n < 2) {
+        // Take back a filter that went in, so no event names the freed io.
+        for (int k = 0; k < 2; k++) {
+            if (!added[k]) continue;
+            struct kevent del;
+            EV_SET(&del, fd, k == 0 ? EVFILT_READ : EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+            kevent(d->poll_fd, &del, 1, NULL, 0, NULL);
+        }
+        *err = e ? e : EIO;
+        free(io);
+        return NULL;
+    }
+#endif
     atomic_fetch_add_explicit(&d->registered, 1, memory_order_relaxed);
     return io;
 }
 
 void cv_driver_deregister(cv_driver *d, cv_io *io) {
     if (__atomic_sub_fetch(&io->refs, 1, __ATOMIC_ACQ_REL) != 0) return; // the other half has it
-    epoll_ctl(d->epfd, EPOLL_CTL_DEL, io->fd, NULL);
-    close(io->fd);
+#if defined(__linux__)
+    epoll_ctl(d->poll_fd, EPOLL_CTL_DEL, io->fd, NULL);
+#endif
+    close(io->fd); // kqueue drops an fd's filters when it is closed
     atomic_fetch_sub_explicit(&d->registered, 1, memory_order_relaxed);
     cv_io *head = atomic_load_explicit(&d->released, memory_order_relaxed);
     do {
@@ -439,7 +527,7 @@ void cv_driver_deregister(cv_driver *d, cv_io *io) {
                                                     memory_order_release, memory_order_relaxed));
 }
 
-#else // no driver on this platform yet (kqueue is next)
+#else // no driver on this platform yet
 
 cv_driver *cv_driver_new(void) {
     errno = ENOSYS;
@@ -457,13 +545,28 @@ static int set_nonblocking_cloexec(int fd) {
     return fcntl(fd, F_SETFD, FD_CLOEXEC);
 }
 
+#if !defined(__linux__) // Linux sets all of this when it creates the fd
+/// Non-blocking, close-on-exec, and (where there is no MSG_NOSIGNAL) no
+/// SIGPIPE on a write to a closed peer. 0, or -1 with errno.
+static int prepare_fd(int fd) {
+    if (set_nonblocking_cloexec(fd) != 0) return -1;
+#ifdef SO_NOSIGPIPE
+    int one = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one) != 0) return -1;
+#endif
+    return 0;
+}
+#endif
+
 static int new_socket(int family, int type) {
 #if defined(__linux__)
     return socket(family, type | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
 #else
     int fd = socket(family, type, 0);
-    if (fd >= 0 && set_nonblocking_cloexec(fd) != 0) {
+    if (fd >= 0 && prepare_fd(fd) != 0) {
+        int e = errno;
         close(fd);
+        errno = e;
         return -1;
     }
     return fd;
@@ -542,8 +645,10 @@ static int accept_nb(int fd, int *err) {
     int c = accept4(fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
 #else
     int c = accept(fd, NULL, NULL);
-    if (c >= 0 && set_nonblocking_cloexec(c) != 0) {
+    if (c >= 0 && prepare_fd(c) != 0) {
+        int e = errno;
         close(c);
+        errno = e;
         c = -1;
     }
 #endif
@@ -650,7 +755,7 @@ int cv_local_port(int fd) {
 }
 
 #ifndef MSG_NOSIGNAL
-#define MSG_NOSIGNAL 0 // Darwin: SO_NOSIGPIPE instead (with the kqueue driver)
+#define MSG_NOSIGNAL 0 // Darwin: SO_NOSIGPIPE, set on every socket by prepare_fd
 #endif
 
 long cv_recv(int fd, void *buf, long len) {
@@ -761,7 +866,7 @@ int cv_unix_pair(int fds[2]) {
     if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds) != 0) return errno;
 #else
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) return errno;
-    if (set_nonblocking_cloexec(fds[0]) != 0 || set_nonblocking_cloexec(fds[1]) != 0) {
+    if (prepare_fd(fds[0]) != 0 || prepare_fd(fds[1]) != 0) {
         int e = errno;
         close(fds[0]);
         close(fds[1]);
@@ -865,6 +970,18 @@ static int sockopt_name(int opt, int *level, int *name) {
     }
 }
 
+/// On/off options, read back as 0 or 1.
+static int is_flag(int opt) {
+    switch (opt) {
+    case CV_OPT_TCP_NODELAY: case CV_OPT_KEEPALIVE: case CV_OPT_TCP_QUICKACK:
+    case CV_OPT_REUSEADDR: case CV_OPT_REUSEPORT: case CV_OPT_BROADCAST:
+    case CV_OPT_IPV6_V6ONLY: case CV_OPT_IP_MULTICAST_LOOP: case CV_OPT_IPV6_MULTICAST_LOOP:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 int cv_sockopt_set(int fd, int opt, int value) {
     if (opt == CV_OPT_LINGER) {
         struct linger l = {.l_onoff = value >= 0, .l_linger = value >= 0 ? value : 0};
@@ -896,6 +1013,8 @@ int cv_sockopt_get(int fd, int opt, int *value) {
     socklen_t len = sizeof v;
     if (getsockopt(fd, level, name, &v, &len) != 0) return errno;
     *value = len == 1 ? (int)*(unsigned char *)&v : v;
+    // Darwin reports some flags as their internal bit (SO_KEEPALIVE is 8).
+    if (is_flag(opt)) *value = *value != 0;
     return 0;
 }
 

@@ -1,6 +1,10 @@
-#if os(Linux)
+#if os(Linux) || canImport(Darwin)
 import CVega
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 
 /// A UDP socket.
 ///
@@ -43,7 +47,7 @@ public struct UDPSocket: ~Copyable, Sendable {
     public static func connect(to address: SocketAddress) throws(IOError) -> UDPSocket {
         let driver = try IODriver.current()
         var err: Int32 = 0
-        let fd = withUnsafePointer(to: address.raw) { cv_connect_new($0, Int32(SOCK_DGRAM.rawValue), &err) }
+        let fd = withUnsafePointer(to: address.raw) { cv_connect_new($0, socketDatagram, &err) }
         guard fd >= 0 else { throw IOError(code: err) }
         return UDPSocket(reg: try IORegistration(fd: fd, driver: driver))
     }

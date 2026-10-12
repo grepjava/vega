@@ -1,4 +1,4 @@
-#if os(Linux)
+#if os(Linux) || canImport(Darwin)
 import CVega
 
 /// A socket option, for the methods of ``SocketHandle``.

@@ -1,6 +1,19 @@
-#if os(Linux)
+#if os(Linux) || canImport(Darwin)
 import CVega
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
+
+// Socket types as the Int32 that cv_connect_new takes (Glibc imports them as enums).
+#if canImport(Glibc)
+let socketStream = Int32(SOCK_STREAM.rawValue)
+let socketDatagram = Int32(SOCK_DGRAM.rawValue)
+#else
+let socketStream = SOCK_STREAM
+let socketDatagram = SOCK_DGRAM
+#endif
 
 /// An IPv4, IPv6 or Unix socket address. Plain bytes: copying it is free.
 public struct SocketAddress: Sendable, Hashable, CustomStringConvertible {

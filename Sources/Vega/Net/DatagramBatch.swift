@@ -1,6 +1,10 @@
-#if os(Linux)
+#if os(Linux) || canImport(Darwin)
 import CVega
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 
 /// A set of datagrams in one block of memory, for receiving or sending many
 /// with one system call (`recvmmsg` / `sendmmsg`).

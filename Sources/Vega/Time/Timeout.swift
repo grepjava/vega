@@ -61,7 +61,7 @@ extension Runtime {
                 // whoever unlinks it: the firing worker (which cancels us)
                 // or us, below.
                 let task = UnsafeRawPointer(cv_task_current().unsafelyUnwrapped)
-                _ = Unmanaged<AnyObject>.fromOpaque(task).retain()
+                cv_task_retain(task)
                 let handle = scheduler.addTimer(.cancel(task), deadline: deadline, now: scheduler.clock.now,
                                                 shard: scheduler.currentShard)
                 // nil: already due, so the child is cancelled.
