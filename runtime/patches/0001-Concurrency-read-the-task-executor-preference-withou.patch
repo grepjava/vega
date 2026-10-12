@@ -1,7 +1,7 @@
 From f01c122abf1f4aa056e0f5da787ef38776484ad5 Mon Sep 17 00:00:00 2001
 From: grepjava <grepjava@gmail.com>
 Date: Mon, 12 Oct 2026 12:33:17 +0800
-Subject: [PATCH 1/4] Concurrency: read the task executor preference without
+Subject: [PATCH 1/6] Concurrency: read the task executor preference without
  the status record lock
 
 getPreferredTaskExecutor runs on every enqueue and executor switch of a task with an executor preference. Its callers are the task itself or a thread holding it suspended, and only the task changes its own record chain, so an acquire load of the status is enough. Taking the lock cost a mutex and two CASes on the status word each time.

@@ -98,3 +98,31 @@ The patched runtime is Swift 6.3.3's `libswift_Concurrency` with the four patche
 **What's left in the runtime:**
 - Task creation is still about 1.6 µs. It goes through the task-creation options, the group and status-record attach under the parent's mutex, and the task's malloc and free on different threads.
 - In discarding groups, a finishing child detaches itself under the parent's status-record mutex, by scanning the child list, which is O(n).
+
+## Round 3 (2026-10-12): 16-byte atomic loads, lock-free resume, word lock, static linking
+
+Same box, 8 workers, preference mode, median of 5 runs, ns/op. "Stock" is Vega on the unpatched runtime, so its numbers include the Vega-side changes. Each value is the range over two rounds.
+
+| Bench | Stock | Patched (.so) | Patched static | Tokio | Static vs Tokio |
+|---|---|---|---|---|---|
+| ping_pong | 575–588 | 298–299 | **261** | 369 | **29% faster** |
+| ping_pong_notify_nc | 840 | 390–391 | **331–333** | 369 | **10% faster** |
+| ping_pong_notify | 1,599–1,641 | 779–785 | **667–709** | 369 | 1.8–1.9× |
+| pool_spawn | 613–617 | 537–547 | 548–572 | 474 | 1.2× |
+| spawn_many | 2,181–2,341 | 1,484–1,535 | 1,481–1,845 | 474 | 3.1–3.9× |
+| chained_spawn | 1,351–1,357 | 1,185–1,202 | 1,168–1,220 | 921 | 1.3× |
+| yield_many | 137–139 | 54 | **47** | 34 | 1.4× |
+| yield_vega | 78 | 46.5–46.7 | **39.4–39.8** | 34 | 1.16× |
+
+**What changed:**
+- **Patch 0005, 16-byte atomic loads.** On x86-64 every load of a task's status was `lock cmpxchg16b`. Profiling showed one such instruction was 76% of `getPreferredTaskExecutor`. With an aligned `movdqa` (atomic on AVX CPUs), ping_pong went from 427 to 358.
+- **Patch 0006, resume without the status-record lock.** A task woken from a continuation onto the generic executor now changes its status bits with one CAS. ping_pong went from 358 to 298.
+- **Vega's `RawLock` is now a futex word lock.** Lock is one inlined CAS and unlock one exchange; the slow path spins, then waits on the futex. It replaces the pthread mutex. pool_spawn went from 830 to 540, and every user of the lock benefits.
+- **`Notify` has a Tokio-style state word.** Storing and taking a permit are single CASes, and the lock is only for queueing waiters.
+- **Static linking** (`-static-stdlib` with the patched archive). The runtime's thread-local variables stop going through `__tls_get_addr`.
+
+**Correction to the option 2 round.** The shared libraries measured there were missing their metadata-registration constructor (`swiftrt.o`). Concurrency types could not be looked up by mangled name, and the toolchain's own SwiftPM crashed on them. Vega's tests and benchmarks never do such lookups, so they passed. The rebuilt libraries give the same numbers. `build-linux.sh` now links the object and refuses a library that SwiftPM can't run on.
+
+**Where Tokio is still ahead, and why:**
+- **Creating a Swift task (spawn_many).** A Swift task is a refcounted runtime object with status records and group bookkeeping under the parent's lock. A Tokio task is one allocation holding a header and the future. `TaskPool` is the route for hot spawns.
+- **Cancellable waits (ping_pong_notify).** Every wait has to register a cancellation record and remove it again; Tokio's waits cancel by being dropped.

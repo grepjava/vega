@@ -148,25 +148,37 @@ void cv_unpark(cv_parker *p) {
 
 // ---- lock ----------------------------------------------------------------
 
-struct cv_lock {
-    pthread_mutex_t m;
-    char pad[128 - sizeof(pthread_mutex_t) % 128];
-};
-
 cv_lock *cv_lock_new(void) {
-    cv_lock *l = aligned_alloc(128, sizeof(cv_lock));
+    // A cache line of its own: the word is written by every locker.
+    cv_lock *l = aligned_alloc(128, 128);
     if (!l) abort();
-    pthread_mutex_init(&l->m, NULL);
+    __atomic_store_n(&l->state, 0, __ATOMIC_RELAXED);
     return l;
 }
 
-void cv_lock_free(cv_lock *l) {
-    pthread_mutex_destroy(&l->m);
-    free(l);
+void cv_lock_free(cv_lock *l) { free(l); }
+
+void cv_lock_lock_slow(cv_lock *l) {
+    // Spin while the holder is likely mid-critical-section: they are short.
+    for (int i = 0; i < 100; i++) {
+        uint32_t s = __atomic_load_n(&l->state, __ATOMIC_RELAXED);
+        if (s == 0) {
+            uint32_t expected = 0;
+            if (__atomic_compare_exchange_n(&l->state, &expected, 1, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+                return;
+        } else if (s == 2) {
+            break; // others already sleep: queue up behind them
+        }
+        cpu_relax();
+    }
+    // Mark contended (2) so the unlocker wakes someone, and sleep until the
+    // exchange finds the lock free. Holding 2 after acquiring is harmless:
+    // at worst one spurious wake.
+    while (__atomic_exchange_n(&l->state, 2, __ATOMIC_ACQUIRE) != 0)
+        wait_on((_Atomic uint32_t *)&l->state, 2, -1);
 }
 
-void cv_lock_lock(cv_lock *l) { pthread_mutex_lock(&l->m); }
-void cv_lock_unlock(cv_lock *l) { pthread_mutex_unlock(&l->m); }
+void cv_lock_wake(cv_lock *l) { wake_one((_Atomic uint32_t *)&l->state); }
 
 // ---- threads -------------------------------------------------------------
 

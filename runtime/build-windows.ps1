@@ -74,16 +74,30 @@ Pop-Location
 # Library evolution is the Windows default for shared builds (as in the
 # toolchain's own build); set it explicitly anyway.
 $build = Join-Path $Work "build-$variant-windows"
-Run cmake -G Ninja -S (Join-Path $src "Runtimes\Core") -B $build `
-    -DCMAKE_BUILD_TYPE=Release `
-    -DBUILD_SHARED_LIBS=YES `
-    -DSwiftCore_ENABLE_CONCURRENCY=ON `
-    -DSwiftCore_ENABLE_LIBRARY_EVOLUTION=ON `
-    "-DCMAKE_C_COMPILER=$tc\bin\clang-cl.exe" `
-    "-DCMAKE_CXX_COMPILER=$tc\bin\clang-cl.exe" `
-    "-DCMAKE_Swift_COMPILER=$tc\bin\swiftc.exe" `
-    "-Ddispatch_INCLUDE_DIR=$dispatchInclude" `
-    "-Ddispatch_LIBRARY=$($dispatchLib.FullName)"
+function Configure([string]$linkerFlags) {
+    Run cmake -G Ninja -S (Join-Path $src "Runtimes\Core") -B $build `
+        -DCMAKE_BUILD_TYPE=Release `
+        -DBUILD_SHARED_LIBS=YES `
+        -DSwiftCore_ENABLE_CONCURRENCY=ON `
+        -DSwiftCore_ENABLE_LIBRARY_EVOLUTION=ON `
+        "-DCMAKE_C_COMPILER=$tc\bin\clang-cl.exe" `
+        "-DCMAKE_CXX_COMPILER=$tc\bin\clang-cl.exe" `
+        "-DCMAKE_Swift_COMPILER=$tc\bin\swiftc.exe" `
+        "-Ddispatch_INCLUDE_DIR=$dispatchInclude" `
+        "-Ddispatch_LIBRARY=$($dispatchLib.FullName)" `
+        "-DCMAKE_SHARED_LINKER_FLAGS=$linkerFlags"
+}
+Configure ""
+# A Swift DLL must register its metadata sections with the runtime when it
+# loads; swiftrt.obj does that. swiftc adds it when it links, this CMake
+# project links with clang-cl, so add the project's own object by hand (on
+# Linux, leaving it out made every by-name lookup of a concurrency type fail).
+Run cmake --build $build --target swiftrt
+$swiftrt = Get-ChildItem (Join-Path $build "runtime") -Recurse -Filter "SwiftRT-COFF.cpp.obj" |
+    Where-Object FullName -notmatch 'swiftrtT' | Select-Object -First 1
+if (-not $swiftrt) { throw "swiftrt object not built" }
+Configure $swiftrt.FullName
+Get-ChildItem $build -Recurse -Filter swift_Concurrency.dll | Remove-Item -Force  # force the relink
 Run cmake --build $build --target swift_Concurrency
 
 $dll = Get-ChildItem $build -Recurse -Filter swift_Concurrency.dll | Select-Object -First 1

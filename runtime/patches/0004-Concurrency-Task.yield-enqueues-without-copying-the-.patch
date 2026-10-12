@@ -1,7 +1,7 @@
 From efe5d0f551c1614e1caceddbb32e3e322576e079 Mon Sep 17 00:00:00 2001
 From: grepjava <grepjava@gmail.com>
 Date: Mon, 12 Oct 2026 12:33:17 +0800
-Subject: [PATCH 4/4] Concurrency: Task.yield enqueues without copying the
+Subject: [PATCH 4/6] Concurrency: Task.yield enqueues without copying the
  current executor
 
 Task.currentExecutor returns an existential, so every yield retained and released the executor object, contended across all threads yielding to it. Enqueue through the executor refs in the same order of preference instead.

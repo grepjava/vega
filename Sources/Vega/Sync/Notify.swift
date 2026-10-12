@@ -1,3 +1,5 @@
+import Synchronization
+
 /// Wake one task, or all waiting tasks, without passing data: Tokio's `Notify`.
 ///
 /// ```swift
@@ -9,17 +11,24 @@
 /// `notifyOne()` with nobody waiting stores a single permit, which the next
 /// `notified()` consumes without suspending. Waiters are woken in FIFO order.
 /// A waiter whose task is cancelled returns early.
+///
+/// As in Tokio, one atomic word says whether a permit is stored or tasks are
+/// waiting: storing and consuming a permit are single CASes, and the lock is
+/// only taken to queue or wake a waiter.
 public final class Notify: @unchecked Sendable {
+    /// `word` values. Only lock holders move into or out of `waiting`.
+    private static let empty = 0, notified = 1, waiting = 2
+
     private struct Waiter {
         let id: UInt
         let continuation: UnsafeContinuation<Void, Never>
     }
 
     private struct State {
-        var permit = false
         var waiters = RawRing<Waiter>(capacity: 4)
     }
 
+    private let word = Atomic<Int>(Notify.empty)
     private let lock = RawLock()
     private let state = Guarded(State())
 
@@ -31,16 +40,37 @@ public final class Notify: @unchecked Sendable {
         lock.destroy()
     }
 
+    /// Take a stored permit, if there is one.
+    @inline(__always) private func takePermit() -> Bool {
+        word.compareExchange(expected: Notify.notified, desired: Notify.empty,
+                             successOrdering: .acquiring, failureOrdering: .relaxed).exchanged
+    }
+
+    /// Under the lock: consume a permit (true), or mark the word `waiting` so
+    /// that a notifier takes the lock and finds the waiter about to be queued.
+    @inline(__always) private func permitOrMarkWaiting() -> Bool {
+        while true {
+            switch word.load(ordering: .relaxed) {
+            case Notify.notified:
+                if takePermit() { return true }
+            case Notify.empty:
+                if word.compareExchange(expected: Notify.empty, desired: Notify.waiting,
+                                        ordering: .relaxed).exchanged { return false }
+            default:
+                return false
+            }
+        }
+    }
+
+    /// Under the lock, after removing waiters: nobody left means not `waiting`.
+    @inline(__always) private func clearWaitingIfEmpty(_ s: UnsafeMutablePointer<State>) {
+        if s.pointee.waiters.isEmpty { word.store(Notify.empty, ordering: .relaxed) }
+    }
+
     /// Wait for a notification, or consume the stored permit.
     public func notified() async {
         let s = state.pointer
-        // Fast path: a permit is waiting.
-        let took = lock.withLock { () -> Bool in
-            guard s.pointee.permit else { return false }
-            s.pointee.permit = false
-            return true
-        }
-        if took {
+        if takePermit() {
             await Runtime.consumeBudget()
             return
         }
@@ -50,20 +80,22 @@ public final class Notify: @unchecked Sendable {
         await withTaskCancellationHandler {
             await withUnsafeContinuation { (c: UnsafeContinuation<Void, Never>) in
                 let resumeNow = lock.withLock { () -> Bool in
-                    if s.pointee.permit {
-                        s.pointee.permit = false
-                        return true
-                    }
                     // Checked under the lock: either the cancel handler runs
                     // after this and finds us, or the flag is already visible.
                     if Task.isCancelled { return true }
+                    if permitOrMarkWaiting() { return true }
                     s.pointee.waiters.pushBack(Waiter(id: id, continuation: c))
                     return false
                 }
                 if resumeNow { c.resume() }
             }
         } onCancel: {
-            let waiter = lock.withLock { state.pointer.pointee.waiters.remove { $0.id == id } }
+            let waiter = lock.withLock { () -> Waiter? in
+                let s = state.pointer
+                let w = s.pointee.waiters.remove { $0.id == id }
+                if w != nil { clearWaitingIfEmpty(s) }
+                return w
+            }
             waiter?.continuation.resume()
         }
     }
@@ -75,12 +107,13 @@ public final class Notify: @unchecked Sendable {
     /// loops between tasks that are never cancelled mid-wait can skip it.
     public func notifiedIgnoringCancellation() async {
         let s = state.pointer
+        if takePermit() {
+            await Runtime.consumeBudget()
+            return
+        }
         await withUnsafeContinuation { (c: UnsafeContinuation<Void, Never>) in
             let resumeNow = lock.withLock { () -> Bool in
-                if s.pointee.permit {
-                    s.pointee.permit = false
-                    return true
-                }
+                if permitOrMarkWaiting() { return true }
                 s.pointee.waiters.pushBack(Waiter(id: 0, continuation: c))
                 return false
             }
@@ -90,10 +123,22 @@ public final class Notify: @unchecked Sendable {
 
     /// Wake the longest-waiting task, or store a permit if none is waiting.
     public func notifyOne() {
+        // Nobody waiting: store the permit (or find it stored) without the lock.
+        var current = word.load(ordering: .relaxed)
+        while current != Notify.waiting {
+            let (done, now) = word.compareExchange(expected: current, desired: Notify.notified,
+                                                   successOrdering: .releasing, failureOrdering: .relaxed)
+            if done { return }
+            current = now
+        }
         let s = state.pointer
         let waiter = lock.withLock { () -> Waiter? in
-            if let w = s.pointee.waiters.popFront() { return w }
-            s.pointee.permit = true
+            // Waiters can have gone (cancelled) since the load: re-decide.
+            if let w = s.pointee.waiters.popFront() {
+                clearWaitingIfEmpty(s)
+                return w
+            }
+            word.store(Notify.notified, ordering: .releasing)
             return nil
         }
         waiter?.continuation.resume()
@@ -102,9 +147,11 @@ public final class Notify: @unchecked Sendable {
     /// Wake every task waiting now. Stores no permit.
     public func notifyWaiters() {
         let s = state.pointer
+        guard word.load(ordering: .acquiring) == Notify.waiting else { return }
         var woken = lock.withLock { () -> RawRing<Waiter> in
             let all = s.pointee.waiters
             s.pointee.waiters = RawRing(capacity: 4)
+            if word.load(ordering: .relaxed) == Notify.waiting { word.store(Notify.empty, ordering: .relaxed) }
             return all
         }
         while let w = woken.popFront() { w.continuation.resume() }

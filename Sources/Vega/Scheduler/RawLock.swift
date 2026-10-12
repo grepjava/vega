@@ -3,7 +3,7 @@ import CVega
 /// A handle to a C mutex. Trivial to copy (no ARC); whoever creates it calls
 /// `destroy()`.
 struct RawLock: @unchecked Sendable {
-    let handle: OpaquePointer
+    let handle: UnsafeMutablePointer<cv_lock>
 
     init() { handle = cv_lock_new() }
 

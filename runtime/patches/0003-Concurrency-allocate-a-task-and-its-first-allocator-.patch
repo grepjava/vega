@@ -1,7 +1,7 @@
 From a1dafc504c81d3194dcfbffbf7355c8511fab2e3 Mon Sep 17 00:00:00 2001
 From: grepjava <grepjava@gmail.com>
 Date: Mon, 12 Oct 2026 12:33:17 +0800
-Subject: [PATCH 3/4] Concurrency: allocate a task and its first allocator slab
+Subject: [PATCH 3/6] Concurrency: allocate a task and its first allocator slab
  together
 
 A task created with malloc got its task-allocator slab from a second malloc on its first swift_task_alloc, which nearly every task makes (frames, the executor preference record). Allocate a 512-byte first slab inline, as async let tasks already do: one malloc/free pair per task instead of two, still a small size class.

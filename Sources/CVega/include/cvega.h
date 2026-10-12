@@ -35,15 +35,33 @@ void cv_park_spin(cv_parker *p, int64_t timeout_ns, int64_t spin_ns);
 void cv_unpark(cv_parker *p);
 
 // ---- lock ----------------------------------------------------------------
-// A plain pthread mutex on its own cache line. Used instead of Swift's
-// Synchronization.Mutex because TSan understands it (Mutex's futex code is not
-// instrumented, so TSan reports false races through it) and because the
-// guarded state can then live in raw memory, with no ARC or exclusivity checks.
-typedef struct cv_lock cv_lock;
+// A futex word lock on its own cache line (the design of Rust's std Mutex):
+// 0 unlocked, 1 locked, 2 locked with waiters. Locking uncontended is one
+// CAS, unlocking one exchange, both inlined into Swift callers; only
+// contention calls out (spin briefly, then sleep on the word). Used instead
+// of Synchronization.Mutex because these atomics are compiled with the
+// caller, so TSan sees them (Mutex's futex code is not instrumented), and the
+// guarded state can live in raw memory with no ARC or exclusivity checks.
+typedef struct cv_lock {
+    uint32_t state; // only through __atomic builtins
+} cv_lock;
 cv_lock *cv_lock_new(void);
 void cv_lock_free(cv_lock *l);
-void cv_lock_lock(cv_lock *l);
-void cv_lock_unlock(cv_lock *l);
+void cv_lock_lock_slow(cv_lock *l);
+void cv_lock_wake(cv_lock *l);
+
+static inline void cv_lock_lock(cv_lock *l) {
+    uint32_t expected = 0;
+    if (__builtin_expect(__atomic_compare_exchange_n(&l->state, &expected, 1, 0,
+                                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED), 1))
+        return;
+    cv_lock_lock_slow(l);
+}
+
+static inline void cv_lock_unlock(cv_lock *l) {
+    if (__builtin_expect(__atomic_exchange_n(&l->state, 0, __ATOMIC_RELEASE) == 2, 0))
+        cv_lock_wake(l);
+}
 
 // ---- threads -------------------------------------------------------------
 typedef void (*cv_thread_fn)(void *arg);

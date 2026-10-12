@@ -70,6 +70,7 @@ fi
 (cd "$src/Runtimes" && cmake -P Resync.cmake >/dev/null)
 
 build=$WORK/build-$variant
+configure() {
 cmake -G Ninja -S "$src/Runtimes/Core" -B "$build" \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=$SHARED \
@@ -79,7 +80,22 @@ cmake -G Ninja -S "$src/Runtimes/Core" -B "$build" \
   -DCMAKE_CXX_COMPILER="$TC/bin/clang++" \
   -DCMAKE_Swift_COMPILER="$TC/bin/swiftc" \
   -Ddispatch_INCLUDE_DIR="$TC/lib/swift" \
-  -Ddispatch_LIBRARY="$TC/lib/swift/linux/libdispatch.so" >/dev/null
+  -Ddispatch_LIBRARY="$TC/lib/swift/linux/libdispatch.so"   -DCMAKE_SHARED_LINKER_FLAGS="$1" >/dev/null
+}
+configure ""
+if [ $SHARED = YES ]; then
+  # A Swift shared library must register its metadata sections with the
+  # runtime when it loads: swiftrt.o's constructor does that. swiftc adds it
+  # when it links; this CMake project links with clang++, so add the project's
+  # own swiftrt object (built with the same configuration) by hand. Without
+  # it every lookup of a concurrency type by mangled name returns nil.
+  cmake --build "$build" --target swiftrt
+  swiftrt=$(find "$build/runtime" -name 'SwiftRT-ELF-WASM.cpp.o' | head -1)
+  [ -n "$swiftrt" ] || { echo "swiftrt object not built" >&2; exit 1; }
+  configure "$swiftrt"
+  # Force the relink: a changed linker flag alone may not trigger one.
+  rm -f "$build/Concurrency/libswift_Concurrency.so"
+fi
 cmake --build "$build" --target swift_Concurrency
 
 mkdir -p "$OUT"
@@ -95,7 +111,39 @@ if [ $SHARED = YES ]; then
     echo "$missing" | head -20 >&2
     exit 1
   fi
-  cp "$build/Concurrency/libswift_Concurrency.so" "$OUT/"
+  lib=$build/Concurrency/libswift_Concurrency.so
+  if ! nm "$lib" | grep -q "U swift_addNewDSOImage"; then
+    echo "$lib does not register its metadata (no swiftrt.o constructor)" >&2
+    exit 1
+  fi
+  # Behaviour gate: the toolchain's own SwiftPM, a large concurrent Swift
+  # program, must build a small package with a dependency on the new
+  # library (it resolves concurrency types by name, runs task groups,
+  # actors). This is what caught the missing metadata registration.
+  probe=$(mktemp -d)
+  mkdir -p "$probe/app/Sources/app" "$probe/dep/Sources/dep"
+  cat > "$probe/dep/Package.swift" <<'EOF'
+// swift-tools-version: 6.0
+import PackageDescription
+let package = Package(name: "dep", products: [.library(name: "dep", targets: ["dep"])],
+                      targets: [.target(name: "dep")])
+EOF
+  echo 'public let x = 1' > "$probe/dep/Sources/dep/dep.swift"
+  cat > "$probe/app/Package.swift" <<'EOF'
+// swift-tools-version: 6.0
+import PackageDescription
+let package = Package(name: "app", dependencies: [.package(path: "../dep")],
+                      targets: [.executableTarget(name: "app", dependencies: ["dep"])])
+EOF
+  echo 'import dep; print(x)' > "$probe/app/Sources/app/main.swift"
+  if ! LD_LIBRARY_PATH="$(dirname "$lib")" SWIFT_BACKTRACE=enable=no        "$TC/bin/swift-build" --package-path "$probe/app" >"$probe/log" 2>&1; then
+    echo "SwiftPM fails on the new library:" >&2
+    tail -20 "$probe/log" >&2
+    rm -rf "$probe"
+    exit 1
+  fi
+  rm -rf "$probe"
+  cp "$lib" "$OUT/"
 else
   cp "$build/Concurrency/libswift_Concurrency.a" "$OUT/"
 fi

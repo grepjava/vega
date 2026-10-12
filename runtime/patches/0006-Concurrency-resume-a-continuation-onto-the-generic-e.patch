@@ -1,0 +1,74 @@
+From 989f60db637cae9fa96e48f1ce1f7aacc1da5be2 Mon Sep 17 00:00:00 2001
+From: grepjava <grepjava@gmail.com>
+Date: Mon, 12 Oct 2026 13:04:55 +0800
+Subject: [PATCH 6/6] Concurrency: resume a continuation onto the generic
+ executor without the status record lock
+
+Waking a suspended task updated its dependency record to enqueued-on-executor under the status record lock: a mutex and two CASes on every resume. When the task waited on a continuation or task group and goes to the generic executor, escalation through that record is a no-op before and after (performEscalationAction ignores both kinds and swift_executor_escalate ignores the generic executor), so update only the status bits with one CAS, falling back to the locked path when the lock is held.
+---
+ include/swift/ABI/TaskStatus.h          | 10 ++++++++++
+ stdlib/public/Concurrency/TaskPrivate.h | 20 ++++++++++++++++++++
+ 2 files changed, 30 insertions(+)
+
+diff --git a/include/swift/ABI/TaskStatus.h b/include/swift/ABI/TaskStatus.h
+index 56718978..f4c9fc76 100644
+--- a/include/swift/ABI/TaskStatus.h
++++ b/include/swift/ABI/TaskStatus.h
+@@ -450,6 +450,16 @@ public:
+     DependentOn.Executor = executor;
+   }
+ 
++  /// Whether escalating the waiting task does nothing through this record,
++  /// both now and once it is enqueued on `executor`: performEscalationAction
++  /// ignores continuations and task groups, and swift_executor_escalate
++  /// ignores the generic executor.
++  bool escalationIsNoOpWhenEnqueuedOn(SerialExecutorRef executor) const {
++    return executor.isGeneric() &&
++           (DependencyKind == WaitingOnContinuation ||
++            DependencyKind == WaitingOnTaskGroup);
++  }
++
+   void performEscalationAction(
+       JobPriority oldPriority, JobPriority newPriority);
+ };
+diff --git a/stdlib/public/Concurrency/TaskPrivate.h b/stdlib/public/Concurrency/TaskPrivate.h
+index 49b1a44d..ddaec2db 100644
+--- a/stdlib/public/Concurrency/TaskPrivate.h
++++ b/stdlib/public/Concurrency/TaskPrivate.h
+@@ -1087,6 +1087,25 @@ AsyncTask::flagAsAndEnqueueOnExecutor(SerialExecutorRef newExecutor) {
+     SWIFT_TASK_DEBUG_LOG("[Dependency] %p->flagAsAndEnqueueOnExecutor() and update dependencyRecord %p",
+       this, dependencyRecord);
+ 
++    // The common resume: a continuation (or task group) wakes the task onto
++    // the generic executor. Escalation through the record does nothing
++    // before or after, so leave the record alone and update only the status
++    // bits, with a CAS instead of the status record lock (a mutex and two
++    // CASes). Fall back to the locked update if someone holds the lock.
++    if (dependencyRecord->escalationIsNoOpWhenEnqueuedOn(newExecutor)) {
++      while (!oldStatus.isStatusRecordLocked()) {
++        auto newStatus = oldStatus.withoutStoredPriorityEscalation()
++                             .withEnqueued();
++        if (_private()._status().compare_exchange_weak(
++                oldStatus, newStatus,
++                /*success*/ std::memory_order_release,
++                /*failure*/ std::memory_order_relaxed)) {
++          newStatus.traceStatusChanged(this, false, oldStatus.isRunning());
++          goto enqueue;
++        }
++      }
++    }
++
+     updateStatusRecord(this, dependencyRecord, [&] {
+ 
+       // Update dependency record to the new dependency
+@@ -1140,6 +1159,7 @@ AsyncTask::flagAsAndEnqueueOnExecutor(SerialExecutorRef newExecutor) {
+     }
+   }
+ 
++enqueue:
+   // Set up task for enqueue to next location by setting the Job priority field
+   Flags.setPriority(oldStatus.getStoredPriority());
+   concurrency::trace::task_flags_changed(
+-- 
+2.43.0
+
