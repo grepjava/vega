@@ -3,11 +3,17 @@ import Synchronization
 import Testing
 @testable import Vega
 
-/// A shared, lockable list that tasks can append to.
-final class Log<T: Sendable>: Sendable {
-    let items = Mutex<[T]>([])
-    func append(_ x: T) { items.withLock { $0.append(x) } }
-    var all: [T] { items.withLock { $0 } }
+/// A shared, lockable list that tasks can append to. Guarded by Vega's
+/// RawLock, not Mutex: TSan doesn't see Mutex's futex and reports a race.
+final class Log<T: Sendable>: @unchecked Sendable {
+    private let lock = RawLock()
+    private let items = Guarded<[T]>([])
+    deinit {
+        items.destroy()
+        lock.destroy()
+    }
+    func append(_ x: T) { lock.withLock { items.pointer.pointee.append(x) } }
+    var all: [T] { lock.withLock { items.pointer.pointee } }
 }
 
 /// Busy-wait without suspending, to hold a worker.

@@ -82,6 +82,13 @@ typedef struct cv_io {
     /// Set by the owning task after a short read: the socket is drained, so
     /// the next read waits for an event instead of a recv that says EAGAIN.
     int read_drained;
+    /// Set for good by the driver once the peer closed or the socket failed
+    /// (only through __atomic builtins). No edge follows that one, so a
+    /// drained read must not wait for another: end of stream is pending.
+    int read_closed;
+    /// Owners: 1, or 2 once a stream is split into halves. The last one to
+    /// let go unregisters (only through __atomic builtins).
+    int refs;
     struct cv_io *next; // deferred-release list
 } cv_io;
 
@@ -118,6 +125,14 @@ static inline int cv_io_take_ready(cv_io *io, int dir) {
            __atomic_compare_exchange_n(&io->slot[dir], &ready, CV_IO_IDLE, 0,
                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
 }
+
+/// Whether the driver has seen the read side close (see read_closed).
+static inline int cv_io_read_closed(cv_io *io) {
+    return __atomic_load_n(&io->read_closed, __ATOMIC_ACQUIRE);
+}
+
+/// Give the registration a second owner (a stream split into halves).
+static inline void cv_io_split(cv_io *io) { __atomic_store_n(&io->refs, 2, __ATOMIC_RELAXED); }
 
 /// Cancellation: take whatever waiter is in the slot, or 0 if none.
 static inline uintptr_t cv_io_take_waiter(cv_io *io, int dir) {
@@ -159,13 +174,32 @@ typedef struct cv_driver_stats {
 cv_driver_stats cv_driver_get_stats(cv_driver *d);
 /// Register a non-blocking fd for both directions. NULL with *err on failure.
 cv_io *cv_driver_register(cv_driver *d, int fd, int *err);
-/// Unregister and close the fd. The cv_io is freed after the next turn, since
-/// a batch already taken from the kernel may still name it.
+/// Drop one owner; the last unregisters and closes the fd. The cv_io is freed
+/// after the next turn, since a batch already taken from the kernel may still
+/// name it.
 void cv_driver_deregister(cv_driver *d, cv_io *io);
 
 // ---- sockets -------------------------------------------------------------
 // All fds are non-blocking and close-on-exec. Failures return -1 and an errno
 // in *err; a non-numeric host is resolved with a blocking getaddrinfo.
+
+/// A socket address of any family (room and alignment of sockaddr_storage).
+typedef struct cv_sockaddr {
+    uint64_t storage[16];
+    uint32_t len;
+} cv_sockaddr;
+/// Resolve host and port to the first address found. 0 or an errno value.
+int cv_resolve(const char *host, int port, cv_sockaddr *out);
+/// The port of an IPv4/IPv6 address, or -1.
+int cv_sockaddr_port(const cv_sockaddr *a);
+/// The host as text (an IP address, or a Unix socket's path) into buf.
+/// Returns 0, or -1 if it does not fit or the family is unknown.
+int cv_sockaddr_host(const cv_sockaddr *a, char *buf, int buflen);
+/// The family (AF_INET, AF_INET6, AF_UNIX).
+int cv_sockaddr_family(const cv_sockaddr *a);
+/// getsockname / getpeername. 0 or an errno value.
+int cv_local_address(int fd, cv_sockaddr *out);
+int cv_peer_address(int fd, cv_sockaddr *out);
 /// A listening TCP socket (SO_REUSEADDR, and SO_REUSEPORT if reuse_port).
 int cv_tcp_listen(const char *host, int port, int backlog, int reuse_port, int *err);
 /// Start a TCP connect. Returns the fd; *err is 0 when connected already,
@@ -180,6 +214,26 @@ int cv_local_port(int fd);
 /// recv / send (MSG_NOSIGNAL): bytes moved, or -errno.
 long cv_recv(int fd, void *buf, long len);
 long cv_send(int fd, const void *buf, long len);
+
+/// A UDP socket bound to host:port (port 0: any free one).
+int cv_udp_bind(const char *host, int port, int reuse_port, int *err);
+/// A UDP socket on an ephemeral port, connected to host:port.
+int cv_udp_connect(const char *host, int port, int *err);
+/// Set the default peer of a datagram socket. 0 or an errno value.
+int cv_connect_address(int fd, const cv_sockaddr *a);
+/// sendto / recvfrom: bytes moved, or -errno. A datagram longer than len is
+/// cut to len.
+long cv_sendto(int fd, const void *buf, long len, const cv_sockaddr *to);
+long cv_recvfrom(int fd, void *buf, long len, cv_sockaddr *from);
+
+/// A listening Unix stream socket at path (which must not exist yet).
+int cv_unix_listen(const char *path, int backlog, int *err);
+/// Start a Unix stream connect: as cv_tcp_connect.
+int cv_unix_connect(const char *path, int *err);
+/// Accept one connection on a Unix listener. -1 with *err (EAGAIN: none yet).
+int cv_unix_accept(int fd, int *err);
+/// A connected pair of Unix stream sockets. 0 or an errno value.
+int cv_unix_pair(int fds[2]);
 
 // ---- Swift runtime hooks -------------------------------------------------
 typedef void (*cv_enqueue_fn)(void *job, void *ctx);

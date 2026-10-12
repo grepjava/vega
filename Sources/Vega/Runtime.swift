@@ -56,11 +56,11 @@ public final class Runtime: Sendable {
     /// rt.spawn(with: stream) { stream in await serve(stream) }
     /// ```
     @discardableResult
-    public func spawn<Value: ~Copyable & Sendable>(
+    public func spawn<Value: ~Copyable & Sendable, Success: Sendable>(
         with value: consuming Value,
         priority: TaskPriority? = nil,
-        _ operation: sending @escaping (consuming Value) async -> Void
-    ) -> Task<Void, Never> {
+        _ operation: sending @escaping (consuming Value) async -> Success
+    ) -> Task<Success, Never> {
         let box = Handoff(value)
         return Task(executorPreference: scheduler, priority: priority) { await operation(box.take()) }
     }

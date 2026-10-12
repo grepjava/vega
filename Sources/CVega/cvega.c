@@ -10,6 +10,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <stddef.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
@@ -17,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -395,6 +397,9 @@ int cv_driver_turn(cv_driver *d, cv_parker *p, int64_t timeout_ns) {
             continue;
         }
         uintptr_t w;
+        // Before io_ready, whose CAS publishes it to the task it wakes.
+        if (e & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
+            __atomic_store_n(&io->read_closed, 1, __ATOMIC_RELEASE);
         if ((e & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR)) && (w = io_ready(io, CV_IO_READ)))
             d->wakes[woken++] = w;
         if ((e & (EPOLLOUT | EPOLLHUP | EPOLLERR)) && (w = io_ready(io, CV_IO_WRITE)))
@@ -411,6 +416,7 @@ cv_io *cv_driver_register(cv_driver *d, int fd, int *err) {
         return NULL;
     }
     io->fd = fd;
+    io->refs = 1;
     struct epoll_event ev = {.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET, .data.ptr = io};
     if (epoll_ctl(d->epfd, EPOLL_CTL_ADD, fd, &ev) != 0) {
         *err = errno;
@@ -422,6 +428,7 @@ cv_io *cv_driver_register(cv_driver *d, int fd, int *err) {
 }
 
 void cv_driver_deregister(cv_driver *d, cv_io *io) {
+    if (__atomic_sub_fetch(&io->refs, 1, __ATOMIC_ACQ_REL) != 0) return; // the other half has it
     epoll_ctl(d->epfd, EPOLL_CTL_DEL, io->fd, NULL);
     close(io->fd);
     atomic_fetch_sub_explicit(&d->registered, 1, memory_order_relaxed);
@@ -450,11 +457,11 @@ static int set_nonblocking_cloexec(int fd) {
     return fcntl(fd, F_SETFD, FD_CLOEXEC);
 }
 
-static int new_socket(int family) {
+static int new_socket(int family, int type) {
 #if defined(__linux__)
-    return socket(family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    return socket(family, type | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
 #else
-    int fd = socket(family, SOCK_STREAM, 0);
+    int fd = socket(family, type, 0);
     if (fd >= 0 && set_nonblocking_cloexec(fd) != 0) {
         close(fd);
         return -1;
@@ -463,12 +470,12 @@ static int new_socket(int family) {
 #endif
 }
 
-static struct addrinfo *resolve(const char *host, int port, int passive, int *err) {
+static struct addrinfo *resolve(const char *host, int port, int passive, int type, int *err) {
     char service[8];
     snprintf(service, sizeof service, "%d", port);
     struct addrinfo hints = {0}, *res = NULL;
     hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_socktype = type;
     hints.ai_flags = AI_NUMERICSERV | (passive ? AI_PASSIVE : 0);
     int rc = getaddrinfo(host && *host ? host : NULL, service, &hints, &res);
     if (rc != 0) {
@@ -479,12 +486,12 @@ static struct addrinfo *resolve(const char *host, int port, int passive, int *er
 }
 
 int cv_tcp_listen(const char *host, int port, int backlog, int reuse_port, int *err) {
-    struct addrinfo *res = resolve(host, port, 1, err);
+    struct addrinfo *res = resolve(host, port, 1, SOCK_STREAM, err);
     if (!res) return -1;
     int fd = -1;
     *err = EADDRNOTAVAIL;
     for (struct addrinfo *a = res; a; a = a->ai_next) {
-        fd = new_socket(a->ai_family);
+        fd = new_socket(a->ai_family, SOCK_STREAM);
         if (fd < 0) {
             *err = errno;
             continue;
@@ -507,12 +514,12 @@ int cv_tcp_listen(const char *host, int port, int backlog, int reuse_port, int *
 }
 
 int cv_tcp_connect(const char *host, int port, int *err) {
-    struct addrinfo *res = resolve(host, port, 0, err);
+    struct addrinfo *res = resolve(host, port, 0, SOCK_STREAM, err);
     if (!res) return -1;
     int fd = -1;
     *err = EADDRNOTAVAIL;
     for (struct addrinfo *a = res; a; a = a->ai_next) {
-        fd = new_socket(a->ai_family);
+        fd = new_socket(a->ai_family, SOCK_STREAM);
         if (fd < 0) {
             *err = errno;
             continue;
@@ -535,7 +542,7 @@ int cv_tcp_connect(const char *host, int port, int *err) {
     return fd;
 }
 
-int cv_tcp_accept(int fd, int *err) {
+static int accept_nb(int fd, int *err) {
 #if defined(__linux__)
     int c = accept4(fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
 #else
@@ -545,10 +552,13 @@ int cv_tcp_accept(int fd, int *err) {
         c = -1;
     }
 #endif
-    if (c < 0) {
-        *err = errno;
-        return -1;
-    }
+    if (c < 0) *err = errno;
+    return c;
+}
+
+int cv_tcp_accept(int fd, int *err) {
+    int c = accept_nb(fd, err);
+    if (c < 0) return -1;
     int one = 1;
     setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     return c;
@@ -561,13 +571,73 @@ int cv_socket_error(int fd) {
     return e;
 }
 
-int cv_local_port(int fd) {
-    struct sockaddr_storage ss;
-    socklen_t len = sizeof ss;
-    if (getsockname(fd, (struct sockaddr *)&ss, &len) != 0) return -1;
-    if (ss.ss_family == AF_INET) return ntohs(((struct sockaddr_in *)&ss)->sin_port);
-    if (ss.ss_family == AF_INET6) return ntohs(((struct sockaddr_in6 *)&ss)->sin6_port);
+_Static_assert(sizeof(((cv_sockaddr *)0)->storage) >= sizeof(struct sockaddr_storage),
+               "cv_sockaddr too small");
+
+int cv_resolve(const char *host, int port, cv_sockaddr *out) {
+    int err = 0;
+    struct addrinfo *res = resolve(host, port, 0, SOCK_STREAM, &err);
+    if (!res) return err;
+    memcpy(out->storage, res->ai_addr, res->ai_addrlen);
+    out->len = (uint32_t)res->ai_addrlen;
+    freeaddrinfo(res);
+    return 0;
+}
+
+int cv_sockaddr_family(const cv_sockaddr *a) {
+    return ((const struct sockaddr *)a->storage)->sa_family;
+}
+
+int cv_sockaddr_port(const cv_sockaddr *a) {
+    const struct sockaddr *sa = (const struct sockaddr *)a->storage;
+    if (sa->sa_family == AF_INET) return ntohs(((const struct sockaddr_in *)sa)->sin_port);
+    if (sa->sa_family == AF_INET6) return ntohs(((const struct sockaddr_in6 *)sa)->sin6_port);
     return -1;
+}
+
+int cv_sockaddr_host(const cv_sockaddr *a, char *buf, int buflen) {
+    const struct sockaddr *sa = (const struct sockaddr *)a->storage;
+    switch (sa->sa_family) {
+    case AF_INET:
+        return inet_ntop(AF_INET, &((const struct sockaddr_in *)sa)->sin_addr, buf,
+                         (socklen_t)buflen) ? 0 : -1;
+    case AF_INET6:
+        return inet_ntop(AF_INET6, &((const struct sockaddr_in6 *)sa)->sin6_addr, buf,
+                         (socklen_t)buflen) ? 0 : -1;
+    case AF_UNIX: {
+        // An unnamed socket (a connecting client, a socketpair) has no path.
+        const struct sockaddr_un *un = (const struct sockaddr_un *)sa;
+        size_t off = offsetof(struct sockaddr_un, sun_path);
+        size_t max = a->len > off ? a->len - off : 0;
+        if (max > sizeof un->sun_path) max = sizeof un->sun_path;
+        size_t n = strnlen(un->sun_path, max);
+        if (n >= (size_t)buflen) return -1;
+        memcpy(buf, un->sun_path, n);
+        buf[n] = 0;
+        return 0;
+    }
+    default:
+        return -1;
+    }
+}
+
+int cv_local_address(int fd, cv_sockaddr *out) {
+    socklen_t len = sizeof out->storage;
+    if (getsockname(fd, (struct sockaddr *)out->storage, &len) != 0) return errno;
+    out->len = (uint32_t)len;
+    return 0;
+}
+
+int cv_peer_address(int fd, cv_sockaddr *out) {
+    socklen_t len = sizeof out->storage;
+    if (getpeername(fd, (struct sockaddr *)out->storage, &len) != 0) return errno;
+    out->len = (uint32_t)len;
+    return 0;
+}
+
+int cv_local_port(int fd) {
+    cv_sockaddr a;
+    return cv_local_address(fd, &a) == 0 ? cv_sockaddr_port(&a) : -1;
 }
 
 #ifndef MSG_NOSIGNAL
@@ -582,6 +652,138 @@ long cv_recv(int fd, void *buf, long len) {
 long cv_send(int fd, const void *buf, long len) {
     ssize_t n = send(fd, buf, (size_t)len, MSG_NOSIGNAL);
     return n >= 0 ? (long)n : -(long)errno;
+}
+
+int cv_udp_bind(const char *host, int port, int reuse_port, int *err) {
+    struct addrinfo *res = resolve(host, port, 1, SOCK_DGRAM, err);
+    if (!res) return -1;
+    int fd = -1;
+    *err = EADDRNOTAVAIL;
+    for (struct addrinfo *a = res; a; a = a->ai_next) {
+        fd = new_socket(a->ai_family, SOCK_DGRAM);
+        if (fd < 0) {
+            *err = errno;
+            continue;
+        }
+#ifdef SO_REUSEPORT
+        int one = 1;
+        if (reuse_port) setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+#endif
+        if (bind(fd, a->ai_addr, a->ai_addrlen) == 0) {
+            *err = 0;
+            break;
+        }
+        *err = errno;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+    return fd;
+}
+
+int cv_udp_connect(const char *host, int port, int *err) {
+    struct addrinfo *res = resolve(host, port, 0, SOCK_DGRAM, err);
+    if (!res) return -1;
+    int fd = -1;
+    *err = EADDRNOTAVAIL;
+    for (struct addrinfo *a = res; a; a = a->ai_next) {
+        fd = new_socket(a->ai_family, SOCK_DGRAM);
+        if (fd < 0) {
+            *err = errno;
+            continue;
+        }
+        // A datagram connect only records the peer: it never blocks.
+        if (connect(fd, a->ai_addr, a->ai_addrlen) == 0) {
+            *err = 0;
+            break;
+        }
+        *err = errno;
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+    return fd;
+}
+
+int cv_connect_address(int fd, const cv_sockaddr *a) {
+    return connect(fd, (const struct sockaddr *)a->storage, (socklen_t)a->len) == 0 ? 0 : errno;
+}
+
+long cv_sendto(int fd, const void *buf, long len, const cv_sockaddr *to) {
+    ssize_t n = sendto(fd, buf, (size_t)len, MSG_NOSIGNAL, (const struct sockaddr *)to->storage,
+                       (socklen_t)to->len);
+    return n >= 0 ? (long)n : -(long)errno;
+}
+
+long cv_recvfrom(int fd, void *buf, long len, cv_sockaddr *from) {
+    socklen_t alen = sizeof from->storage;
+    ssize_t n = recvfrom(fd, buf, (size_t)len, 0, (struct sockaddr *)from->storage, &alen);
+    if (n < 0) return -(long)errno;
+    from->len = (uint32_t)alen;
+    return (long)n;
+}
+
+static int unix_address(const char *path, struct sockaddr_un *un, socklen_t *len) {
+    size_t n = strlen(path);
+    if (n == 0 || n >= sizeof un->sun_path) return ENAMETOOLONG;
+    memset(un, 0, sizeof *un);
+    un->sun_family = AF_UNIX;
+    memcpy(un->sun_path, path, n);
+    *len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + n + 1);
+    return 0;
+}
+
+int cv_unix_listen(const char *path, int backlog, int *err) {
+    struct sockaddr_un un;
+    socklen_t len;
+    if ((*err = unix_address(path, &un, &len)) != 0) return -1;
+    int fd = new_socket(AF_UNIX, SOCK_STREAM);
+    if (fd < 0) {
+        *err = errno;
+        return -1;
+    }
+    if (bind(fd, (struct sockaddr *)&un, len) != 0 || listen(fd, backlog) != 0) {
+        *err = errno;
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+int cv_unix_connect(const char *path, int *err) {
+    struct sockaddr_un un;
+    socklen_t len;
+    if ((*err = unix_address(path, &un, &len)) != 0) return -1;
+    int fd = new_socket(AF_UNIX, SOCK_STREAM);
+    if (fd < 0) {
+        *err = errno;
+        return -1;
+    }
+    if (connect(fd, (struct sockaddr *)&un, len) == 0) return fd;
+    if (errno == EINPROGRESS) {
+        *err = EINPROGRESS;
+        return fd;
+    }
+    *err = errno;
+    close(fd);
+    return -1;
+}
+
+int cv_unix_accept(int fd, int *err) { return accept_nb(fd, err); }
+
+int cv_unix_pair(int fds[2]) {
+#if defined(__linux__)
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds) != 0) return errno;
+#else
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) return errno;
+    if (set_nonblocking_cloexec(fds[0]) != 0 || set_nonblocking_cloexec(fds[1]) != 0) {
+        int e = errno;
+        close(fds[0]);
+        close(fds[1]);
+        return e;
+    }
+#endif
+    return 0;
 }
 
 // ---- Swift runtime hooks -------------------------------------------------

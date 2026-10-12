@@ -1,0 +1,183 @@
+#if os(Linux)
+import CVega
+import Glibc
+
+// The byte-stream operations TCP and Unix sockets (and their split halves)
+// share. The readiness backends try the syscall first and wait only on EAGAIN.
+extension IORegistration {
+    /// Read into `buffer`'s spare capacity: bytes read, 0 at end of stream.
+    @inline(__always)
+    func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
+        guard buffer.spareCapacity > 0 else { return 0 }
+        if io.pointee.read_drained != 0 {
+            // The last read came up short, so the socket was empty: skip the
+            // recv that would say EAGAIN and wait for the next event (Tokio
+            // does the same). Data that arrived since has left READY. Not
+            // once the peer has closed: that edge came already, and the next
+            // recv returns end of stream.
+            io.pointee.read_drained = 0
+            if cv_io_read_closed(io) == 0, cv_io_take_ready(io, CV_IO_READ) == 0 {
+                try await wait(CV_IO_READ)
+            }
+        }
+        while true {
+            let want = buffer.spareCapacity
+            let n = cv_recv(fd, buffer.base + buffer.count, want)
+            if n >= 0 {
+                buffer.count += n
+                if n > 0 && n < want { io.pointee.read_drained = 1 }
+                await Runtime.consumeBudget()
+                return n
+            }
+            let err = Int32(-n)
+            switch err {
+            case EAGAIN, EWOULDBLOCK: try await wait(CV_IO_READ)
+            case EINTR: continue
+            default: throw IOError(code: err)
+            }
+        }
+    }
+
+    /// Write all of `bytes`.
+    @inline(__always)
+    func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError) {
+        var done = 0
+        while done < bytes.count {
+            let n = cv_send(fd, bytes.baseAddress! + done, bytes.count - done)
+            if n >= 0 {
+                done += n
+                continue
+            }
+            let err = Int32(-n)
+            switch err {
+            case EAGAIN, EWOULDBLOCK: try await wait(CV_IO_WRITE)
+            case EINTR: continue
+            default: throw IOError(code: err)
+            }
+        }
+        await Runtime.consumeBudget()
+    }
+
+    /// Accept connections with `accept` (a cv_*_accept), registering each.
+    @inline(__always)
+    func accept(_ accept: (Int32, UnsafeMutablePointer<Int32>) -> Int32) async throws(IOError) -> IORegistration {
+        while true {
+            var err: Int32 = 0
+            let fd = accept(self.fd, &err)
+            if fd >= 0 {
+                await Runtime.consumeBudget()
+                return try IORegistration(fd: fd, driver: IODriver(raw: driver))
+            }
+            switch err {
+            case EAGAIN, EWOULDBLOCK: try await wait(CV_IO_READ)
+            // The peer gave up before we got to it, or a signal: try the next.
+            case EINTR, ECONNABORTED, EPROTO: continue
+            default: throw IOError(code: err)
+            }
+        }
+    }
+
+    /// Finish a non-blocking connect that said `err` (0 or EINPROGRESS).
+    func connected(_ err: Int32) async throws(IOError) {
+        guard err == EINPROGRESS else { return }
+        try await wait(CV_IO_WRITE)
+        let e = cv_socket_error(fd)
+        if e != 0 { throw IOError(code: e) }
+    }
+
+    /// One datagram-style operation: retried on EINTR, waited on EAGAIN.
+    @inline(__always)
+    func perform(_ direction: Int32, _ op: () -> Int) async throws(IOError) -> Int {
+        while true {
+            let n = op()
+            if n >= 0 {
+                await Runtime.consumeBudget()
+                return n
+            }
+            let err = Int32(-n)
+            switch err {
+            case EAGAIN, EWOULDBLOCK: try await wait(direction)
+            case EINTR: continue
+            default: throw IOError(code: err)
+            }
+        }
+    }
+
+    func shutdownWrite() throws(IOError) {
+        if shutdown(fd, Int32(SHUT_WR)) != 0 { throw IOError(code: errno) }
+    }
+
+    var localAddress: SocketAddress {
+        get throws(IOError) {
+            var raw = cv_sockaddr()
+            let e = cv_local_address(fd, &raw)
+            if e != 0 { throw IOError(code: e) }
+            return SocketAddress(raw: raw)
+        }
+    }
+
+    var peerAddress: SocketAddress {
+        get throws(IOError) {
+            var raw = cv_sockaddr()
+            let e = cv_peer_address(fd, &raw)
+            if e != 0 { throw IOError(code: e) }
+            return SocketAddress(raw: raw)
+        }
+    }
+}
+
+/// A stream split in two (Swift has no tuples of `~Copyable` values). Move
+/// the halves out to separate tasks:
+///
+/// ```swift
+/// let halves = stream.split()
+/// rt.spawn(with: halves.reader) { reader in ... }
+/// let writer = halves.writer
+/// ```
+@frozen
+public struct SplitStream: ~Copyable, Sendable {
+    public var reader: ReadHalf
+    public var writer: WriteHalf
+}
+
+/// The reading half of a split stream. Dropping both halves closes the socket.
+public struct ReadHalf: ~Copyable, Sendable {
+    let reg: IORegistration
+
+    init(reg: IORegistration) { self.reg = reg }
+
+    deinit { reg.close() }
+
+    /// Read into `buffer`'s spare capacity. Returns the bytes read: 0 means
+    /// the peer closed its side (or the buffer has no room left).
+    public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
+        try await reg.read(into: &buffer)
+    }
+}
+
+/// The writing half of a split stream. Dropping it shuts down the sending
+/// side (the peer reads end-of-stream); dropping both closes the socket.
+public struct WriteHalf: ~Copyable, Sendable {
+    let reg: IORegistration
+
+    init(reg: IORegistration) { self.reg = reg }
+
+    deinit {
+        shutdown(reg.fd, Int32(SHUT_WR))
+        reg.close()
+    }
+
+    /// Write all of `buffer`'s readable bytes.
+    public func write(_ buffer: borrowing IOBuffer) async throws(IOError) {
+        try await reg.write(UnsafeRawBufferPointer(start: buffer.base, count: buffer.count))
+    }
+
+    /// Write all of `bytes`. They must stay valid until this returns.
+    public func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError) {
+        try await reg.write(bytes)
+    }
+
+    /// Stop sending now rather than when the half is dropped.
+    public func shutdownWrite() throws(IOError) { try reg.shutdownWrite() }
+}
+#endif

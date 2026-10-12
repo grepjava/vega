@@ -1,0 +1,98 @@
+#if os(Linux)
+import CVega
+import Glibc
+
+/// A listening Unix stream socket. The path must not exist yet, and is left
+/// behind when the listener is dropped (remove it yourself, as with Tokio).
+public struct UnixListener: ~Copyable, Sendable {
+    let reg: IORegistration
+
+    /// Call from a task on a Vega runtime.
+    public static func bind(path: String, backlog: Int = 1024) throws(IOError) -> UnixListener {
+        let driver = try IODriver.current()
+        var err: Int32 = 0
+        let fd = cv_unix_listen(path, Int32(backlog), &err)
+        guard fd >= 0 else { throw IOError(code: err) }
+        return UnixListener(reg: try IORegistration(fd: fd, driver: driver))
+    }
+
+    deinit { reg.close() }
+
+    /// Wait for the next connection.
+    public func accept() async throws(IOError) -> UnixStream {
+        UnixStream(reg: try await reg.accept(cv_unix_accept))
+    }
+}
+
+/// A Unix stream connection: the same API as `TCPStream`.
+public struct UnixStream: ~Copyable, Sendable {
+    let reg: IORegistration
+
+    init(reg: IORegistration) { self.reg = reg }
+
+    /// Call from a task on a Vega runtime.
+    public static func connect(path: String) async throws(IOError) -> UnixStream {
+        let driver = try IODriver.current()
+        var err: Int32 = 0
+        let fd = cv_unix_connect(path, &err)
+        guard fd >= 0 else { throw IOError(code: err) }
+        let stream = UnixStream(reg: try IORegistration(fd: fd, driver: driver))
+        try await stream.reg.connected(err)
+        return stream
+    }
+
+    /// Two connected streams (Swift has no tuples of `~Copyable` values).
+    @frozen
+    public struct Pair: ~Copyable, Sendable {
+        public var first: UnixStream
+        public var second: UnixStream
+    }
+
+    /// Two streams connected to each other. Call from a task on a Vega runtime.
+    public static func pair() throws(IOError) -> Pair {
+        let driver = try IODriver.current()
+        var fds: (Int32, Int32) = (-1, -1)
+        let e = withUnsafeMutablePointer(to: &fds) {
+            $0.withMemoryRebound(to: Int32.self, capacity: 2) { cv_unix_pair($0) }
+        }
+        guard e == 0 else { throw IOError(code: e) }
+        let a: IORegistration
+        do { a = try IORegistration(fd: fds.0, driver: driver) } catch {
+            Glibc.close(fds.1)
+            throw error
+        }
+        let first = UnixStream(reg: a)
+        return Pair(first: first, second: UnixStream(reg: try IORegistration(fd: fds.1, driver: driver)))
+    }
+
+    deinit { reg.close() }
+
+    /// Read into `buffer`'s spare capacity. Returns the bytes read: 0 means
+    /// the peer closed its side (or the buffer has no room left).
+    public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
+        try await reg.read(into: &buffer)
+    }
+
+    /// Write all of `buffer`'s readable bytes.
+    public func write(_ buffer: borrowing IOBuffer) async throws(IOError) {
+        try await reg.write(UnsafeRawBufferPointer(start: buffer.base, count: buffer.count))
+    }
+
+    /// Write all of `bytes`. They must stay valid until this returns.
+    public func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError) {
+        try await reg.write(bytes)
+    }
+
+    /// Stop sending: the peer reads end-of-stream once it has the rest.
+    public func shutdownWrite() throws(IOError) { try reg.shutdownWrite() }
+
+    /// Split into halves that different tasks can use at once (see
+    /// `TCPStream.split()`).
+    public consuming func split() -> SplitStream {
+        let reg = self.reg
+        discard self
+        cv_io_split(reg.io)
+        return SplitStream(reader: ReadHalf(reg: reg), writer: WriteHalf(reg: reg))
+    }
+}
+#endif

@@ -8,7 +8,7 @@ import Glibc
 /// let listener = try TCPListener.bind(port: 8080)
 /// while true {
 ///     let stream = try await listener.accept()
-///     rt.spawn { await serve(stream) }
+///     rt.spawn(with: stream) { stream in await serve(stream) }
 /// }
 /// ```
 ///
@@ -33,27 +33,16 @@ public struct TCPListener: ~Copyable, Sendable {
     /// The port the listener is bound to.
     public var localPort: Int { Int(cv_local_port(reg.fd)) }
 
+    public var localAddress: SocketAddress { get throws(IOError) { try reg.localAddress } }
+
     /// Wait for the next connection.
     public func accept() async throws(IOError) -> TCPStream {
-        while true {
-            var err: Int32 = 0
-            let fd = cv_tcp_accept(reg.fd, &err)
-            if fd >= 0 {
-                await Runtime.consumeBudget()
-                return TCPStream(reg: try IORegistration(fd: fd, driver: IODriver(raw: reg.driver)))
-            }
-            switch err {
-            case EAGAIN, EWOULDBLOCK: try await reg.wait(CV_IO_READ)
-            // The peer gave up before we got to it, or a signal: try the next.
-            case EINTR, ECONNABORTED, EPROTO: continue
-            default: throw IOError(code: err)
-            }
-        }
+        TCPStream(reg: try await reg.accept(cv_tcp_accept))
     }
 }
 
-/// A TCP connection. One task reads and writes it at a time (it is
-/// `~Copyable`; split halves come later).
+/// A TCP connection. One task reads and writes it at a time; `split()` it
+/// for a reader and a writer that run at once.
 public struct TCPStream: ~Copyable, Sendable {
     let reg: IORegistration
 
@@ -67,11 +56,7 @@ public struct TCPStream: ~Copyable, Sendable {
         let fd = cv_tcp_connect(host, Int32(port), &err)
         guard fd >= 0 else { throw IOError(code: err) }
         let stream = TCPStream(reg: try IORegistration(fd: fd, driver: driver))
-        if err == EINPROGRESS {
-            try await stream.reg.wait(CV_IO_WRITE)
-            let e = cv_socket_error(fd)
-            if e != 0 { throw IOError(code: e) }
-        }
+        try await stream.reg.connected(err)
         return stream
     }
 
@@ -80,60 +65,33 @@ public struct TCPStream: ~Copyable, Sendable {
     /// Read into `buffer`'s spare capacity. Returns the bytes read: 0 means
     /// the peer closed its side (or the buffer has no room left).
     public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
-        guard buffer.spareCapacity > 0 else { return 0 }
-        let io = reg.io
-        if io.pointee.read_drained != 0 {
-            // The last read came up short, so the socket was empty: skip the
-            // recv that would say EAGAIN and wait for the next event (Tokio
-            // does the same). Data that arrived since has left READY.
-            io.pointee.read_drained = 0
-            if cv_io_take_ready(io, CV_IO_READ) == 0 { try await reg.wait(CV_IO_READ) }
-        }
-        while true {
-            let want = buffer.spareCapacity
-            let n = cv_recv(reg.fd, buffer.base + buffer.count, want)
-            if n >= 0 {
-                buffer.count += n
-                if n > 0 && n < want { io.pointee.read_drained = 1 }
-                await Runtime.consumeBudget()
-                return n
-            }
-            let err = Int32(-n)
-            switch err {
-            case EAGAIN, EWOULDBLOCK: try await reg.wait(CV_IO_READ)
-            case EINTR: continue
-            default: throw IOError(code: err)
-            }
-        }
+        try await reg.read(into: &buffer)
     }
 
     /// Write all of `buffer`'s readable bytes.
     public func write(_ buffer: borrowing IOBuffer) async throws(IOError) {
-        try await write(UnsafeRawBufferPointer(start: buffer.base, count: buffer.count))
+        try await reg.write(UnsafeRawBufferPointer(start: buffer.base, count: buffer.count))
     }
 
     /// Write all of `bytes`. They must stay valid until this returns.
     public func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError) {
-        var done = 0
-        while done < bytes.count {
-            let n = cv_send(reg.fd, bytes.baseAddress! + done, bytes.count - done)
-            if n >= 0 {
-                done += n
-                continue
-            }
-            let err = Int32(-n)
-            switch err {
-            case EAGAIN, EWOULDBLOCK: try await reg.wait(CV_IO_WRITE)
-            case EINTR: continue
-            default: throw IOError(code: err)
-            }
-        }
-        await Runtime.consumeBudget()
+        try await reg.write(bytes)
     }
 
     /// Stop sending: the peer reads end-of-stream once it has the rest.
-    public func shutdownWrite() throws(IOError) {
-        if shutdown(reg.fd, Int32(SHUT_WR)) != 0 { throw IOError(code: errno) }
+    public func shutdownWrite() throws(IOError) { try reg.shutdownWrite() }
+
+    public var localAddress: SocketAddress { get throws(IOError) { try reg.localAddress } }
+    public var peerAddress: SocketAddress { get throws(IOError) { try reg.peerAddress } }
+
+    /// Split into a reading half and a writing half that different tasks
+    /// can use at the same time. No reference counting: the halves share
+    /// the registration, and the second to be dropped closes the socket.
+    public consuming func split() -> SplitStream {
+        let reg = self.reg
+        discard self
+        cv_io_split(reg.io)
+        return SplitStream(reader: ReadHalf(reg: reg), writer: WriteHalf(reg: reg))
     }
 }
 
