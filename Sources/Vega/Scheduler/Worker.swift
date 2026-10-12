@@ -339,7 +339,7 @@ final class Worker: @unchecked Sendable {
     /// finds itself still parked, and takes over the timers. Otherwise they
     /// would wait for a busy worker's every-61-ticks check.
     private func handOverTimers(_ s: Scheduler) {
-        guard s.timers.next.load(ordering: .acquiring) != .max,
+        guard s.timers.earliest() != .max,
               let other = s.idle.anySleeper(except: index) else { return }
         cv_unpark(s.parkers[other])
     }

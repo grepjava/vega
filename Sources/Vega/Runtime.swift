@@ -96,24 +96,41 @@ public final class Runtime: Sendable {
     /// executor: `Task.sleep` wakes through a helper task that Swift runs on
     /// the *global* executor, so a busy global pool delays it. This parks the
     /// caller's continuation directly and resumes it on the firing worker.
+    /// Cancelling the task ends the sleep at once and frees its timer.
     /// Off a Vega worker it falls back to `Task.sleep`.
+    ///
+    /// Timers have millisecond resolution and never fire early.
     public static func sleep(for duration: Duration) async throws {
-        guard let scheduler = Worker.currentScheduler else {
-            try await Task.sleep(for: duration)
+        let now = cv_now_ns()
+        let ns = UInt64(clamping: Scheduler.nanoseconds(duration))
+        try await sleep(untilNanos: ns > UInt64.max - now ? UInt64.max - 1 : now + ns, now: now)
+    }
+
+    /// Suspend the calling task until `deadline`, on Vega's own timers. See
+    /// `sleep(for:)`.
+    public static func sleep(until deadline: ContinuousClock.Instant) async throws {
+        try await sleep(for: ContinuousClock.now.duration(to: deadline))
+    }
+
+    /// Sleep until `deadline`, a `cv_now_ns()` time.
+    static func sleep(untilNanos deadline: UInt64, now: UInt64) async throws {
+        guard let worker = Worker.current,
+              let scheduler = worker._withUnsafeGuaranteedRef({ $0.scheduler }) else {
+            try await Task.sleep(for: .nanoseconds(deadline > now ? Int64(clamping: deadline - now) : 0))
             return
         }
         try Task.checkCancellation()
-        let waiter = SleepWaiter()
+        let waiter = SleepWaiter(shard: worker._withUnsafeGuaranteedRef { $0.index })
         try await withTaskCancellationHandler {
             try await withUnsafeThrowingContinuation { (c: UnsafeContinuation<Void, any Error>) in
                 if waiter.arm(c) {
-                    scheduler.addTimer(.waiter(.passRetained(waiter)), in: Scheduler.nanoseconds(duration))
+                    scheduler.addTimer(.waiter(.passRetained(waiter)), deadline: deadline, now: now, shard: waiter.shard)
                 } else {
                     c.resume(throwing: CancellationError())
                 }
             }
         } onCancel: {
-            waiter.cancel()
+            if waiter.cancel() { scheduler.removeSleep(waiter) }
         }
     }
 

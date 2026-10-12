@@ -113,19 +113,3 @@ func onThreads(_ n: Int, _ body: @escaping @Sendable (Int) -> Void) {
         #expect(sum.load(ordering: .relaxed) == total * (total + 1) / 2)
     }
 }
-
-@Suite struct TimerQueueTests {
-    @Test func popsInDeadlineThenFIFOOrder() {
-        let t = TimerQueue()
-        #expect(t.add(.job(fakeJob(1)), deadline: 30))
-        #expect(t.add(.job(fakeJob(2)), deadline: 10))
-        #expect(!t.add(.job(fakeJob(3)), deadline: 30))
-        #expect(!t.add(.job(fakeJob(4)), deadline: 20))
-        #expect(t.timeout(now: 5) == 5)
-        #expect(t.popDue(now: 9) == nil)
-        var order: [Int] = []
-        while case .job(let j)? = t.popDue(now: 100) { order.append(jobID(j)) }
-        #expect(order == [2, 4, 1, 3])
-        #expect(t.timeout(now: 0) == -1)
-    }
-}

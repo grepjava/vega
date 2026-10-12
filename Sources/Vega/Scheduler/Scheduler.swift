@@ -20,7 +20,7 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     let parkers: UnsafeMutablePointer<OpaquePointer>
     let inject = InjectQueue()
     let idle: Idle
-    let timers = TimerQueue()
+    let timers: TimerWheel
     #if os(Linux)
     /// Sockets; the timer owner blocks in it while parked. nil if it can't be created.
     let driver: IODriver?
@@ -40,6 +40,7 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
         precondition(count >= 1, "a runtime needs at least one worker")
         idle = Idle(workers: count)
         workerCount = count
+        timers = TimerWheel(shards: count, origin: cv_now_ns())
         workers = (0..<count).map(Worker.init(index:))
         queues = .allocate(capacity: count)
         parkers = .allocate(capacity: count)
@@ -129,27 +130,53 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     }
 
     func addTimer(_ action: TimerAction, in ns: Int64) {
+        let now = cv_now_ns()
+        let deadline = ns <= 0 ? now : UInt64(ns) > UInt64.max - now ? UInt64.max - 1 : now + UInt64(ns)
+        addTimer(action, deadline: deadline, now: now, shard: currentShard)
+    }
+
+    /// The timer shard for a timer added on this thread: the worker's own,
+    /// or shard 0 from outside.
+    @inline(__always) var currentShard: Int {
+        if let w = Worker.current {
+            return w._withUnsafeGuaranteedRef {
+                $0.owner == Unmanaged.passUnretained(self).toOpaque() ? $0.index : 0
+            }
+        }
+        return 0
+    }
+
+    /// `deadline` and `now` are `cv_now_ns()` times.
+    func addTimer(_ action: TimerAction, deadline: UInt64, now: UInt64, shard: Int) {
         timedEnqueues.add(1, ordering: .relaxed)
-        if ns <= 0 {
+        let added: TimerWheel.Added = deadline <= now ? .due : timers.add(action, deadline: deadline, now: now, shard: shard)
+        switch added {
+        case .due:
             if let w = Worker.current {
                 w._withUnsafeGuaranteedRef { fire(action, on: $0) }
             } else {
                 fire(action, on: nil)
             }
-            return
+        case .dropped:
+            if case .waiter(let u) = action { u.release() }
+        case .inserted(let earliest):
+            // A new earliest deadline: the timer owner must re-arm its sleep.
+            // seq_cst pairs with the owner's claim-then-read in Worker.park:
+            // one of the two sides is guaranteed to see the other.
+            guard earliest, timers.isEarliest(shard) else { return }
+            let owner = timerOwner.load(ordering: .sequentiallyConsistent)
+            if owner >= 0 {
+                cv_unpark(parkers[owner])
+            } else {
+                notifyParked()
+            }
         }
-        let now = cv_now_ns()
-        let deadline = UInt64(ns) > UInt64.max - now ? UInt64.max - 1 : now + UInt64(ns)
-        guard timers.add(action, deadline: deadline) else { return }
-        // A new earliest deadline: the timer owner must re-arm its sleep.
-        // seq_cst pairs with the owner's claim-then-read in Worker.park: one of
-        // the two sides is guaranteed to see the other (store-load ordering).
-        let owner = timerOwner.load(ordering: .sequentiallyConsistent)
-        if owner >= 0 {
-            cv_unpark(parkers[owner])
-        } else {
-            notifyParked()
-        }
+    }
+
+    /// A cancelled `Runtime.sleep`: unlink its timer now rather than at the
+    /// deadline, and drop the retain the wheel held.
+    func removeSleep(_ waiter: SleepWaiter) {
+        if timers.remove(waiter) { Unmanaged.passUnretained(waiter).release() }
     }
 
     // MARK: worker support
@@ -170,9 +197,8 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
         let now = cv_now_ns()
         var fired = 0
         worker.inOrder {
-            while let action = timers.popDue(now: now) {
-                fire(action, on: worker)
-                fired += 1
+            for i in 0..<timers.shardCount {
+                fired += timers.fireDue(shard: i, now: now) { fire($0, on: worker) }
             }
         }
         if fired > 1 { notifyParked() }
@@ -182,7 +208,7 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     private func fire(_ action: TimerAction, on worker: Worker?) {
         switch action {
         case .waiter(let w):
-            w.takeRetainedValue().fire() // drops the retain the heap held
+            w.takeRetainedValue().fire() // drops the retain the wheel held
         case .job(let job):
             #if VEGA_JOB_AUDIT
             JobAudit.enqueued(job, "timer")

@@ -292,8 +292,38 @@ let semaphoreNC = Bench(name: "semaphore_nc", ops: 100_000) { ex in
     }
 }
 
+/// 10,000 tasks start a 60 s sleep and are cancelled once all are asleep:
+/// spawn, timer insert, cancel and timer removal. Off Vega (the baseline)
+/// Runtime.sleep is Task.sleep.
+final class Armed: @unchecked Sendable { let n = Atomic<Int>(0) }
+let sleepCancel = Bench(name: "sleep_cancel", ops: 10_000) { ex in
+    let armed = Armed()
+    await withTaskGroup(of: Void.self) { g in
+        for _ in 0..<10_000 {
+            g.addTask(executorPreference: ex) {
+                armed.n.add(1, ordering: .relaxed)
+                try? await Runtime.sleep(for: .seconds(60))
+            }
+        }
+        while armed.n.load(ordering: .relaxed) < 10_000 { await Task.yield() }
+        await Task.yield()
+        g.cancelAll()
+        await g.waitForAll()
+    }
+}
+
+/// 10,000 tasks each sleep 1 ms, all at once: firing a large batch of timers.
+let sleepMany = Bench(name: "sleep_many", ops: 10_000) { ex in
+    await withTaskGroup(of: Void.self) { g in
+        for _ in 0..<10_000 {
+            g.addTask(executorPreference: ex) { try? await Runtime.sleep(for: .milliseconds(1)) }
+        }
+        await g.waitForAll()
+    }
+}
+
 let benches = [spawnMany, spawnDiscard, poolSpawn, chainedSpawn, pingPong, pingPongNotify, pingPongNotifyNC, yieldMany, yieldVega,
-               mpscPingPong, mpscPingPongNC, mpscFanIn, mpscFanInNC, semaphore, semaphoreNC].filter { only?.contains($0.name) ?? true }
+               mpscPingPong, mpscPingPongNC, mpscFanIn, mpscFanInNC, semaphore, semaphoreNC, sleepCancel, sleepMany].filter { only?.contains($0.name) ?? true }
 
 // MARK: run
 
