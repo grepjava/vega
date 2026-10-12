@@ -203,6 +203,8 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     }
 
     func hasPendingWork() -> Bool {
+        // Pairs with the fence in Idle.workerToNotify (see there).
+        atomicMemoryFence(ordering: .sequentiallyConsistent)
         if !inject.isEmpty { return true }
         for i in 0..<workerCount where !queues[i]._withUnsafeGuaranteedRef({ $0.isEmpty }) { return true }
         return false

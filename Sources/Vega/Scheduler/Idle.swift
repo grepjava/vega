@@ -47,7 +47,15 @@ final class Idle: @unchecked Sendable {
 
     /// The sleeper to wake for new work, already counted as unparked and
     /// searching; nil if none should be woken.
+    ///
+    /// The fence pairs with the one in `Scheduler.hasPendingWork`: the job
+    /// was published with a release store, and a parking searcher reads the
+    /// queues after its RMW here. Without a StoreLoad barrier on both sides
+    /// each can miss the other (x86 reorders the push's store after this
+    /// load; arm64's RCpc acquire loads pass the parker's RMW), and the job
+    /// waits with every worker asleep. Tokio fences here too.
     @inline(__always) func workerToNotify() -> Int? {
+        atomicMemoryFence(ordering: .sequentiallyConsistent)
         guard shouldWake(state.load(ordering: .sequentiallyConsistent)) else { return nil }
         return workerToNotifySlow()
     }
