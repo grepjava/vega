@@ -285,7 +285,10 @@ final class Worker: @unchecked Sendable {
             s.notifyParked() // we were the last searcher and work arrived meanwhile
         }
         isSearching = false
+        if s.clock.isPaused { nudgeTimerOwner(s) }
 
+        // Paused time: the last round polled I/O and found nothing to do.
+        var idleChecked = false
         while !s.isShutdown.load(ordering: .relaxed) {
             if lifo != nil {
                 // Never sleep on a runnable job of our own.
@@ -303,11 +306,28 @@ final class Worker: @unchecked Sendable {
                     reclaim(s)
                     return
                 }
-                timeout = s.timers.timeout(now: cv_now_ns())
+                if !s.clock.isPaused {
+                    timeout = s.timers.timeout(now: s.clock.now)
+                } else if s.timers.earliest() != .max, s.canAutoAdvance() {
+                    // Everything is idle: first collect ready I/O (it may be
+                    // what the next step needs), then jump to the next timer
+                    // (Tokio's auto-advance).
+                    if idleChecked {
+                        s.clock.advance(to: s.timers.earliest())
+                        if s.fireDueTimers(on: self) > 0 {
+                            s.timerOwner.store(-1, ordering: .releasing)
+                            reclaim(s)
+                            return
+                        }
+                    }
+                    timeout = 0
+                }
+                // Otherwise real time doesn't move paused timers: sleep
+                // until MockClock.advance or the last busy worker wakes us.
             }
 
             var fired = 0
-            #if os(Linux)
+            #if os(Linux) || canImport(Darwin)
             if ownsTimers, let driver = s.driver {
                 fired = driver.park(parker, timeout: timeout, on: self)
             } else {
@@ -327,12 +347,21 @@ final class Worker: @unchecked Sendable {
                 if ownsTimers { handOverTimers(s) }
                 return
             }
-            if fired > 0 || lifo != nil {
+            if fired > 0 || lifo != nil || !queue.isEmpty {
                 reclaim(s)
                 return
             }
+            idleChecked = ownsTimers && timeout == 0
             // Spurious, or a timer owner whose deadline moved: go round.
         }
+    }
+
+    /// Paused time: the last worker to go idle wakes the timer owner, which
+    /// may then auto-advance. (With no owner, this worker becomes it.)
+    private func nudgeTimerOwner(_ s: Scheduler) {
+        guard s.idle.allParked else { return }
+        let owner = s.timerOwner.load(ordering: .sequentiallyConsistent)
+        if owner >= 0 && owner != index { cv_unpark(s.parkers[owner]) }
     }
 
     /// Leaving park while timers are pending: nudge another sleeper so it wakes,

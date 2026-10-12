@@ -28,7 +28,7 @@ extension Runtime {
     public static func timeout<T: Sendable>(
         _ duration: Duration, _ operation: sending @escaping () async throws -> T
     ) async throws -> T {
-        let now = cv_now_ns()
+        let now = nowNanos
         let ns = UInt64(clamping: Scheduler.nanoseconds(duration))
         return try await timeout(untilNanos: ns > UInt64.max - now ? UInt64.max - 1 : now + ns, now: now, operation)
     }
@@ -38,7 +38,11 @@ extension Runtime {
     public static func timeout<T: Sendable>(
         until deadline: ContinuousClock.Instant, _ operation: sending @escaping () async throws -> T
     ) async throws -> T {
-        try await timeout(ContinuousClock.now.duration(to: deadline), operation)
+        guard let s = Worker.currentScheduler else {
+            return try await timeout(ContinuousClock.now.duration(to: deadline), operation)
+        }
+        let now = s.clock.now
+        return try await timeout(untilNanos: max(s.clock.nanos(deadline), now), now: now, operation)
     }
 
     static func timeout<T: Sendable>(
@@ -58,7 +62,7 @@ extension Runtime {
                 // or us, below.
                 let task = UnsafeRawPointer(cv_task_current().unsafelyUnwrapped)
                 _ = Unmanaged<AnyObject>.fromOpaque(task).retain()
-                let handle = scheduler.addTimer(.cancel(task), deadline: deadline, now: cv_now_ns(),
+                let handle = scheduler.addTimer(.cancel(task), deadline: deadline, now: scheduler.clock.now,
                                                 shard: scheduler.currentShard)
                 // nil: already due, so the child is cancelled.
                 func expired() -> Bool { handle.map { !scheduler.removeTimeout($0, task: task) } ?? true }

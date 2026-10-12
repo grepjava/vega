@@ -28,7 +28,7 @@ public struct Interval: Sendable {
 
     public let period: Duration
     public var missedTickBehavior: MissedTickBehavior
-    /// The next tick, as a `cv_now_ns()` time.
+    /// The next tick, as a runtime-clock time.
     private var deadline: UInt64
     private let periodNanos: UInt64
     /// One instant of the public clock and the same moment on the timers'
@@ -45,8 +45,8 @@ public struct Interval: Sendable {
         self.period = period
         self.missedTickBehavior = missedTickBehavior
         periodNanos = max(1, UInt64(clamping: Scheduler.nanoseconds(period)))
-        let now = cv_now_ns()
-        base = (ContinuousClock.now, now)
+        let now = Runtime.nowNanos
+        base = (Runtime.now, now)
         deadline = now &+ UInt64(clamping: Scheduler.nanoseconds(delay))
     }
 
@@ -54,20 +54,20 @@ public struct Interval: Sendable {
     @discardableResult
     public mutating func tick() async throws -> ContinuousClock.Instant {
         let scheduled = deadline
-        let now = cv_now_ns()
+        let now = Runtime.nowNanos
         if scheduled > now {
             try await Runtime.sleep(untilNanos: scheduled, now: now)
         } else {
             try Task.checkCancellation()
         }
-        let after = cv_now_ns()
+        let after = Runtime.nowNanos
         deadline = after > scheduled + Self.missedAfter ? next(after: scheduled, now: after) : scheduled + periodNanos
         return base.instant + .nanoseconds(Int64(bitPattern: scheduled &- base.nanos))
     }
 
     /// Restart the schedule: the next tick is one period from now.
     public mutating func reset() {
-        deadline = cv_now_ns() + periodNanos
+        deadline = Runtime.nowNanos + periodNanos
     }
 
     private func next(after scheduled: UInt64, now: UInt64) -> UInt64 {

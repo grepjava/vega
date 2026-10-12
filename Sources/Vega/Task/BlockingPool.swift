@@ -140,8 +140,10 @@ extension Runtime {
     public static func blocking<T: Sendable, E: Error>(
         _ body: sending @escaping () throws(E) -> T
     ) async throws(E) -> T {
-        let pool = Worker.currentScheduler?.blocking ?? BlockingPool.shared
+        let scheduler = Worker.currentScheduler
+        let pool = scheduler?.blocking ?? BlockingPool.shared
         nonisolated(unsafe) let body = body
+        scheduler?.blockingInFlight.add(1, ordering: .sequentiallyConsistent)
         let result = await withUnsafeContinuation { (c: UnsafeContinuation<Result<T, E>, Never>) in
             pool.submit {
                 let r: Result<T, E>
@@ -151,6 +153,9 @@ extension Runtime {
                     r = .failure(error)
                 }
                 c.resume(returning: r)
+                // Only once the resume has made the caller runnable: paused
+                // time must see one or the other, or it could jump ahead.
+                scheduler?.blockingInFlight.subtract(1, ordering: .sequentiallyConsistent)
             }
         }
         // A quick job can resume us before we suspend; see cv_tsan_acquire.

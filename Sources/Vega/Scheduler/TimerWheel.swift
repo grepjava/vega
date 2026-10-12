@@ -241,7 +241,7 @@ struct TimerHandle: @unchecked Sendable {
 }
 
 /// The runtime's timers: one `TimerShard` per worker. Times are absolute
-/// `cv_now_ns()` nanoseconds, rounded *up* to whole milliseconds on insert,
+/// runtime-clock nanoseconds, rounded *up* to whole milliseconds on insert,
 /// so a timer never fires early.
 final class TimerWheel: @unchecked Sendable {
     static let tickNanos: UInt64 = 1_000_000

@@ -36,6 +36,9 @@ final class Idle: @unchecked Sendable {
     @inline(__always) private static func searching(_ s: UInt64) -> Int { Int(s & searchingMask) }
     @inline(__always) private static func unparked(_ s: UInt64) -> Int { Int(s >> 32) }
 
+    /// Every worker is parked (none notified and on its way).
+    var allParked: Bool { Self.unparked(state.load(ordering: .sequentiallyConsistent)) == 0 }
+
     var searchingCount: Int { Self.searching(state.load(ordering: .sequentiallyConsistent)) }
 
     @inline(__always) private func shouldWake(_ s: UInt64) -> Bool {

@@ -1,10 +1,14 @@
 import CVega
 import Synchronization
+// Apple's SDKs ship _Concurrency's public interface only: the scheduling and
+// executor-factory SPI exists on Linux toolchains alone.
+#if os(Linux)
 @_spi(ExperimentalCustomExecutors) @_spi(ExperimentalScheduling) import _Concurrency
+#endif
 
 /// The work-stealing executor. Internal: a public type may not conform to the
 /// SPI `SchedulingExecutor`, and users reach Vega through `Runtime`.
-final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
+final class Scheduler: TaskExecutor, @unchecked Sendable {
     /// Swift retains the executor all the time (Task.yield reads
     /// Task.currentExecutor, spawns store the preference, global enqueues
     /// fetch the default executor), from every worker: the refcount in the
@@ -23,11 +27,13 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     let timers: TimerWheel
     /// Threads for blocking work (`Runtime.blocking`).
     let blocking: BlockingPool
-    #if os(Linux)
+    #if os(Linux) || canImport(Darwin)
     /// Sockets; the timer owner blocks in it while parked. nil if it can't be created.
     let driver: IODriver?
     #endif
     let isShutdown = Atomic<Bool>(false)
+    /// The time timers run on; paused in tests.
+    let clock = RuntimeClock()
 
     /// Written fields below, away from the read-mostly ones above.
     private let writePad = Pad128()
@@ -37,6 +43,9 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     let foreignEnqueues = Atomic<UInt64>(0)
     /// Timed enqueues received (Task.sleep etc.), for tests and metrics.
     let timedEnqueues = Atomic<UInt64>(0)
+    /// `Runtime.blocking` jobs running or queued: paused time must not jump
+    /// past what one of them is about to do.
+    let blockingInFlight = Atomic<Int>(0)
 
     init(workers count: Int, name: String, pin: Bool,
          blockingThreads: Int = 512, blockingKeepAlive: Duration = .seconds(10)) {
@@ -48,13 +57,13 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
         workers = (0..<count).map(Worker.init(index:))
         queues = .allocate(capacity: count)
         parkers = .allocate(capacity: count)
-        #if os(Linux)
+        #if os(Linux) || canImport(Darwin)
         driver = IODriver.make()
         #endif
         for (i, w) in workers.enumerated() {
             (queues + i).initialize(to: .passUnretained(w.queue))
             (parkers + i).initialize(to: w.parker)
-            #if os(Linux)
+            #if os(Linux) || canImport(Darwin)
             if let driver { cv_parker_attach_driver(w.parker, driver.raw) }
             #endif
         }
@@ -80,14 +89,14 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     deinit {
         queues.deallocate()
         parkers.deallocate()
-        #if os(Linux)
+        #if os(Linux) || canImport(Darwin)
         driver?.destroy()
         #endif
     }
 
     /// Busy worker: pick up I/O readiness without blocking.
     @inline(__always) func pollIO(on worker: Worker) -> Int {
-        #if os(Linux)
+        #if os(Linux) || canImport(Darwin)
         if let driver { return driver.poll(on: worker) }
         #endif
         return 0
@@ -115,16 +124,6 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     /// Diagnostics only: called on every foreign enqueue.
     nonisolated(unsafe) static var foreignEnqueueHook: (() -> Void)?
 
-    func enqueue<C: Clock>(_ job: consuming ExecutorJob, after delay: C.Duration,
-                           tolerance: C.Duration?, clock: C) {
-        addTimer(.job(UnownedJob(job)), in: Self.nanoseconds(delay))
-    }
-
-    func enqueue<C: Clock>(_ job: consuming ExecutorJob, at instant: C.Instant,
-                           tolerance: C.Duration?, clock: C) {
-        addTimer(.job(UnownedJob(job)), in: Self.nanoseconds(clock.now.duration(to: instant)))
-    }
-
     @inline(__always) static func nanoseconds<D>(_ d: D) -> Int64 {
         guard let d = d as? Duration else { return 0 }
         let (s, atto) = d.components
@@ -134,7 +133,7 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     }
 
     func addTimer(_ action: TimerAction, in ns: Int64) {
-        let now = cv_now_ns()
+        let now = clock.now
         let deadline = ns <= 0 ? now : UInt64(ns) > UInt64.max - now ? UInt64.max - 1 : now + UInt64(ns)
         addTimer(action, deadline: deadline, now: now, shard: currentShard)
     }
@@ -150,7 +149,7 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
         return 0
     }
 
-    /// `deadline` and `now` are `cv_now_ns()` times. Returns the linked
+    /// `deadline` and `now` are runtime-clock times. Returns the linked
     /// timer, or nil if it fired at once (or was dropped).
     @discardableResult
     func addTimer(_ action: TimerAction, deadline: UInt64, now: UInt64, shard: Int) -> TimerHandle? {
@@ -212,7 +211,7 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     /// Run due timers on `worker`'s thread: jobs go onto its queue, sleepers
     /// are resumed (which schedules them on this worker). Returns how many.
     func fireDueTimers(on worker: Worker) -> Int {
-        let now = cv_now_ns()
+        let now = clock.now
         var fired = 0
         worker.inOrder {
             for i in 0..<timers.shardCount {
@@ -266,7 +265,22 @@ extension Scheduler {
     }
 }
 
+#if os(Linux)
+/// `Task.sleep` on Vega's timers.
+extension Scheduler: SchedulingExecutor {
+    func enqueue<C: Clock>(_ job: consuming ExecutorJob, after delay: C.Duration,
+                           tolerance: C.Duration?, clock: C) {
+        addTimer(.job(UnownedJob(job)), in: Self.nanoseconds(delay))
+    }
+
+    func enqueue<C: Clock>(_ job: consuming ExecutorJob, at instant: C.Instant,
+                           tolerance: C.Duration?, clock: C) {
+        addTimer(.job(UnownedJob(job)), in: Self.nanoseconds(clock.now.duration(to: instant)))
+    }
+}
+
 struct VegaExecutorFactory: ExecutorFactory {
     static var mainExecutor: any MainExecutor { PlatformExecutorFactory.mainExecutor }
     static var defaultExecutor: any TaskExecutor { installedGlobal! }
 }
+#endif

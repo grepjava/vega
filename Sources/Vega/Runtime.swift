@@ -1,6 +1,8 @@
 import CVega
 import Synchronization
+#if os(Linux)
 @_spi(ExperimentalCustomExecutors) import _Concurrency
+#endif
 
 /// A Vega runtime: a pool of worker threads that run Swift tasks with work
 /// stealing.
@@ -106,7 +108,7 @@ public final class Runtime: Sendable {
     ///
     /// Timers have millisecond resolution and never fire early.
     public static func sleep(for duration: Duration) async throws {
-        let now = cv_now_ns()
+        let now = nowNanos
         let ns = UInt64(clamping: Scheduler.nanoseconds(duration))
         try await sleep(untilNanos: ns > UInt64.max - now ? UInt64.max - 1 : now + ns, now: now)
     }
@@ -114,10 +116,15 @@ public final class Runtime: Sendable {
     /// Suspend the calling task until `deadline`, on Vega's own timers. See
     /// `sleep(for:)`.
     public static func sleep(until deadline: ContinuousClock.Instant) async throws {
-        try await sleep(for: ContinuousClock.now.duration(to: deadline))
+        guard let s = Worker.currentScheduler else {
+            try await sleep(for: ContinuousClock.now.duration(to: deadline))
+            return
+        }
+        let now = s.clock.now
+        try await sleep(untilNanos: max(s.clock.nanos(deadline), now), now: now)
     }
 
-    /// Sleep until `deadline`, a `cv_now_ns()` time.
+    /// Sleep until `deadline`, a runtime-clock time.
     static func sleep(untilNanos deadline: UInt64, now: UInt64) async throws {
         guard let worker = Worker.current,
               let scheduler = worker._withUnsafeGuaranteedRef({ $0.scheduler }) else {
@@ -149,7 +156,7 @@ public final class Runtime: Sendable {
 
     /// I/O driver counters since start (zeros where there is no driver).
     public var ioMetrics: IOMetrics {
-        #if os(Linux)
+        #if os(Linux) || canImport(Darwin)
         if let d = scheduler.driver {
             let s = cv_driver_get_stats(d.raw)
             return IOMetrics(parkedPolls: s.parked_turns, busyPolls: s.busy_turns, events: s.events,
@@ -164,11 +171,16 @@ public final class Runtime: Sendable {
     ///
     /// Must be called before the first task is created (first thing in a
     /// synchronous `main`). Uses Swift's experimental custom-executor SPI.
+    /// Apple's SDKs leave that SPI out, so there only global enqueues come
+    /// to Vega (through the runtime's enqueue hook), and `Task.sleep` keeps
+    /// the platform's timers.
     public static func installGlobal(workers: Int? = nil, name: String = "vega") -> Runtime {
         precondition(installedGlobal == nil, "Runtime.installGlobal called twice")
         let rt = Runtime(workers: workers, name: name)
         installedGlobal = rt.scheduler
+        #if os(Linux)
         _createExecutors(factory: VegaExecutorFactory.self)
+        #endif
         rt.scheduler.installEnqueueGlobalHook()
         return rt
     }
