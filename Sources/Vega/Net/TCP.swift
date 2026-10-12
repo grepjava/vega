@@ -48,12 +48,28 @@ public struct TCPStream: ~Copyable, Sendable {
 
     init(reg: IORegistration) { self.reg = reg }
 
-    /// Connect to `host` (an address, or a name resolved with a blocking
-    /// lookup) and `port`. Call from a task on a Vega runtime.
+    /// Connect to `host` and `port`. A name is looked up on the blocking pool
+    /// (see `SocketAddress.lookup`), and each address it resolves to is tried
+    /// in turn until one connects. Call from a task on a Vega runtime.
     public static func connect(host: String, port: Int) async throws(IOError) -> TCPStream {
+        _ = try IODriver.current()
+        var failure = IOError(code: EADDRNOTAVAIL)
+        for address in try await SocketAddress.lookup(host: host, port: port) {
+            do {
+                return try await connect(to: address)
+            } catch {
+                if error == .cancelled { throw error }
+                failure = error
+            }
+        }
+        throw failure
+    }
+
+    /// Connect to `address`. Call from a task on a Vega runtime.
+    public static func connect(to address: SocketAddress) async throws(IOError) -> TCPStream {
         let driver = try IODriver.current()
         var err: Int32 = 0
-        let fd = cv_tcp_connect(host, Int32(port), &err)
+        let fd = withUnsafePointer(to: address.raw) { cv_connect_new($0, Int32(SOCK_STREAM.rawValue), &err) }
         guard fd >= 0 else { throw IOError(code: err) }
         let stream = TCPStream(reg: try IORegistration(fd: fd, driver: driver))
         try await stream.reg.connected(err)

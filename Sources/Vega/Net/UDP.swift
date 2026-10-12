@@ -32,11 +32,18 @@ public struct UDPSocket: ~Copyable, Sendable {
 
     /// A socket on a free local port whose default peer is `host`:`port`,
     /// for `send(_:)` and `receive(into:)`. Datagrams from other addresses
-    /// are dropped by the kernel.
-    public static func connect(host: String, port: Int) throws(IOError) -> UDPSocket {
+    /// are dropped by the kernel. A name is looked up on the blocking pool
+    /// and the first address it resolves to is used.
+    public static func connect(host: String, port: Int) async throws(IOError) -> UDPSocket {
+        _ = try IODriver.current()
+        return try connect(to: try await SocketAddress.lookup(host: host, port: port)[0])
+    }
+
+    /// A socket on a free local port whose default peer is `address`.
+    public static func connect(to address: SocketAddress) throws(IOError) -> UDPSocket {
         let driver = try IODriver.current()
         var err: Int32 = 0
-        let fd = cv_udp_connect(host, Int32(port), &err)
+        let fd = withUnsafePointer(to: address.raw) { cv_connect_new($0, Int32(SOCK_DGRAM.rawValue), &err) }
         guard fd >= 0 else { throw IOError(code: err) }
         return UDPSocket(reg: try IORegistration(fd: fd, driver: driver))
     }

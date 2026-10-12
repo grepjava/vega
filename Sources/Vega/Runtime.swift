@@ -24,8 +24,12 @@ public final class Runtime: Sendable {
     ///   - workers: worker threads; defaults to the number of online CPUs.
     ///   - name: thread name prefix.
     ///   - pinThreads: pin worker *i* to CPU *i*.
-    public init(workers: Int? = nil, name: String = "vega", pinThreads: Bool = false) {
-        scheduler = Scheduler(workers: workers ?? Int(cv_cpu_count()), name: name, pin: pinThreads)
+    ///   - blockingThreads: most threads ``blocking(_:)`` runs at once.
+    ///   - blockingKeepAlive: how long an idle blocking thread lives.
+    public init(workers: Int? = nil, name: String = "vega", pinThreads: Bool = false,
+                blockingThreads: Int = 512, blockingKeepAlive: Duration = .seconds(10)) {
+        scheduler = Scheduler(workers: workers ?? Int(cv_cpu_count()), name: name, pin: pinThreads,
+                              blockingThreads: blockingThreads, blockingKeepAlive: blockingKeepAlive)
     }
 
     /// The runtime as a `TaskExecutor`, for `Task(executorPreference:)`,
@@ -85,7 +89,8 @@ public final class Runtime: Sendable {
     }
 
     /// Stop the workers. Jobs still queued are dropped, so shut down only
-    /// once the tasks you care about have finished.
+    /// once the tasks you care about have finished. Idle blocking threads
+    /// exit; running blocking jobs finish first.
     public func shutdown() {
         scheduler.shutdown()
     }

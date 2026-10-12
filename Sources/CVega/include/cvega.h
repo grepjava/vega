@@ -181,15 +181,19 @@ void cv_driver_deregister(cv_driver *d, cv_io *io);
 
 // ---- sockets -------------------------------------------------------------
 // All fds are non-blocking and close-on-exec. Failures return -1 and an errno
-// in *err; a non-numeric host is resolved with a blocking getaddrinfo.
+// in *err. Functions taking a host name resolve it with a blocking getaddrinfo.
 
 /// A socket address of any family (room and alignment of sockaddr_storage).
 typedef struct cv_sockaddr {
     uint64_t storage[16];
     uint32_t len;
 } cv_sockaddr;
-/// Resolve host and port to the first address found. 0 or an errno value.
-int cv_resolve(const char *host, int port, cv_sockaddr *out);
+/// Resolve host and port into out[0..<max]; *count gets how many. 0, or an
+/// errno value. With numeric_only, a host that is a name (not an address)
+/// returns -1 instead of being looked up: getaddrinfo may block on DNS, so
+/// names go through the blocking pool.
+int cv_resolve_all(const char *host, int port, int numeric_only, cv_sockaddr *out, int max,
+                   int *count);
 /// The port of an IPv4/IPv6 address, or -1.
 int cv_sockaddr_port(const cv_sockaddr *a);
 /// The host as text (an IP address, or a Unix socket's path) into buf.
@@ -202,9 +206,11 @@ int cv_local_address(int fd, cv_sockaddr *out);
 int cv_peer_address(int fd, cv_sockaddr *out);
 /// A listening TCP socket (SO_REUSEADDR, and SO_REUSEPORT if reuse_port).
 int cv_tcp_listen(const char *host, int port, int backlog, int reuse_port, int *err);
-/// Start a TCP connect. Returns the fd; *err is 0 when connected already,
-/// EINPROGRESS when the caller must wait for writability, else the failure.
-int cv_tcp_connect(const char *host, int port, int *err);
+/// Start a connect to one address on a new socket of `type` (SOCK_STREAM gets
+/// TCP_NODELAY). Returns the fd; *err is 0 when connected already,
+/// EINPROGRESS when the caller must wait for writability, else the failure
+/// (and -1). A datagram connect only records the peer and never waits.
+int cv_connect_new(const cv_sockaddr *addr, int type, int *err);
 /// Accept one connection (TCP_NODELAY set). -1 with *err (EAGAIN: none yet).
 int cv_tcp_accept(int fd, int *err);
 /// The pending error of a socket (SO_ERROR), 0 if none.
@@ -217,8 +223,6 @@ long cv_send(int fd, const void *buf, long len);
 
 /// A UDP socket bound to host:port (port 0: any free one).
 int cv_udp_bind(const char *host, int port, int reuse_port, int *err);
-/// A UDP socket on an ephemeral port, connected to host:port.
-int cv_udp_connect(const char *host, int port, int *err);
 /// Set the default peer of a datagram socket. 0 or an errno value.
 int cv_connect_address(int fd, const cv_sockaddr *a);
 /// sendto / recvfrom: bytes moved, or -errno. A datagram longer than len is
@@ -228,7 +232,7 @@ long cv_recvfrom(int fd, void *buf, long len, cv_sockaddr *from);
 
 /// A listening Unix stream socket at path (which must not exist yet).
 int cv_unix_listen(const char *path, int backlog, int *err);
-/// Start a Unix stream connect: as cv_tcp_connect.
+/// Start a Unix stream connect: as cv_connect_new.
 int cv_unix_connect(const char *path, int *err);
 /// Accept one connection on a Unix listener. -1 with *err (EAGAIN: none yet).
 int cv_unix_accept(int fd, int *err);
@@ -249,6 +253,13 @@ extern void *swift_task_getCurrent(void) __attribute__((swiftcall));
 extern void swift_task_cancel(void *task) __attribute__((swiftcall));
 static inline void *cv_task_current(void) { return swift_task_getCurrent(); }
 static inline void cv_task_cancel(void *task) { swift_task_cancel(task); }
+
+/// Tell ThreadSanitizer that whatever another thread did before releasing
+/// `addr` happens before the caller's next steps; a no-op without TSan.
+/// Swift's swift_continuation_await skips its acquire when a continuation was
+/// resumed before the task got there; the resumer released the task pointer,
+/// so acquiring `cv_task_current()` after the await restores the edge.
+void cv_tsan_acquire(const void *addr);
 
 #ifdef __cplusplus
 }

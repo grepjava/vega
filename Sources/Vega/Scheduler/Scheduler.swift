@@ -21,6 +21,8 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     let inject = InjectQueue()
     let idle: Idle
     let timers: TimerWheel
+    /// Threads for blocking work (`Runtime.blocking`).
+    let blocking: BlockingPool
     #if os(Linux)
     /// Sockets; the timer owner blocks in it while parked. nil if it can't be created.
     let driver: IODriver?
@@ -36,11 +38,13 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     /// Timed enqueues received (Task.sleep etc.), for tests and metrics.
     let timedEnqueues = Atomic<UInt64>(0)
 
-    init(workers count: Int, name: String, pin: Bool) {
+    init(workers count: Int, name: String, pin: Bool,
+         blockingThreads: Int = 512, blockingKeepAlive: Duration = .seconds(10)) {
         precondition(count >= 1, "a runtime needs at least one worker")
         idle = Idle(workers: count)
         workerCount = count
         timers = TimerWheel(shards: count, origin: cv_now_ns())
+        blocking = BlockingPool(maxThreads: blockingThreads, keepAlive: blockingKeepAlive, name: name)
         workers = (0..<count).map(Worker.init(index:))
         queues = .allocate(capacity: count)
         parkers = .allocate(capacity: count)
@@ -242,6 +246,7 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     func shutdown() {
         isShutdown.store(true, ordering: .sequentiallyConsistent)
         for i in 0..<workerCount { cv_unpark(parkers[i]) }
+        blocking.shutdown()
     }
 }
 

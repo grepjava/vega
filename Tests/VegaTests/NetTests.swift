@@ -137,7 +137,7 @@ func tempSocketPath() -> String {
                     _ = try? await server.send(buf, to: from)
                 }
             }
-            let client = try UDPSocket.connect(host: "127.0.0.1", port: port)
+            let client = try await UDPSocket.connect(host: "127.0.0.1", port: port)
             var buf = IOBuffer(capacity: 16)
             var out = IOBuffer(capacity: 4)
             var value = 0

@@ -513,33 +513,28 @@ int cv_tcp_listen(const char *host, int port, int backlog, int reuse_port, int *
     return fd;
 }
 
-int cv_tcp_connect(const char *host, int port, int *err) {
-    struct addrinfo *res = resolve(host, port, 0, SOCK_STREAM, err);
-    if (!res) return -1;
-    int fd = -1;
-    *err = EADDRNOTAVAIL;
-    for (struct addrinfo *a = res; a; a = a->ai_next) {
-        fd = new_socket(a->ai_family, SOCK_STREAM);
-        if (fd < 0) {
-            *err = errno;
-            continue;
-        }
+int cv_connect_new(const cv_sockaddr *addr, int type, int *err) {
+    const struct sockaddr *sa = (const struct sockaddr *)addr->storage;
+    int fd = new_socket(sa->sa_family, type);
+    if (fd < 0) {
+        *err = errno;
+        return -1;
+    }
+    if (type == SOCK_STREAM && sa->sa_family != AF_UNIX) {
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-        if (connect(fd, a->ai_addr, a->ai_addrlen) == 0) {
-            *err = 0;
-            break;
-        }
-        if (errno == EINPROGRESS) {
-            *err = EINPROGRESS;
-            break;
-        }
-        *err = errno;
-        close(fd);
-        fd = -1;
     }
-    freeaddrinfo(res);
-    return fd;
+    if (connect(fd, sa, (socklen_t)addr->len) == 0) {
+        *err = 0;
+        return fd;
+    }
+    if (errno == EINPROGRESS) {
+        *err = EINPROGRESS;
+        return fd;
+    }
+    *err = errno;
+    close(fd);
+    return -1;
 }
 
 static int accept_nb(int fd, int *err) {
@@ -574,14 +569,28 @@ int cv_socket_error(int fd) {
 _Static_assert(sizeof(((cv_sockaddr *)0)->storage) >= sizeof(struct sockaddr_storage),
                "cv_sockaddr too small");
 
-int cv_resolve(const char *host, int port, cv_sockaddr *out) {
-    int err = 0;
-    struct addrinfo *res = resolve(host, port, 0, SOCK_STREAM, &err);
-    if (!res) return err;
-    memcpy(out->storage, res->ai_addr, res->ai_addrlen);
-    out->len = (uint32_t)res->ai_addrlen;
+int cv_resolve_all(const char *host, int port, int numeric_only, cv_sockaddr *out, int max,
+                   int *count) {
+    char service[8];
+    snprintf(service, sizeof service, "%d", port);
+    struct addrinfo hints = {0}, *res = NULL;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM; // one entry per address, not per protocol
+    hints.ai_flags = AI_NUMERICSERV | (numeric_only ? AI_NUMERICHOST : 0);
+    *count = 0;
+    int rc = getaddrinfo(host && *host ? host : NULL, service, &hints, &res);
+    if (rc != 0) {
+        if (numeric_only && rc == EAI_NONAME) return -1;
+        return rc == EAI_SYSTEM ? errno : EADDRNOTAVAIL;
+    }
+    for (struct addrinfo *a = res; a && *count < max; a = a->ai_next) {
+        if (a->ai_addrlen > sizeof out->storage) continue;
+        memcpy(out[*count].storage, a->ai_addr, a->ai_addrlen);
+        out[*count].len = (uint32_t)a->ai_addrlen;
+        ++*count;
+    }
     freeaddrinfo(res);
-    return 0;
+    return *count > 0 ? 0 : EADDRNOTAVAIL;
 }
 
 int cv_sockaddr_family(const cv_sockaddr *a) {
@@ -670,30 +679,6 @@ int cv_udp_bind(const char *host, int port, int reuse_port, int *err) {
         if (reuse_port) setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
 #endif
         if (bind(fd, a->ai_addr, a->ai_addrlen) == 0) {
-            *err = 0;
-            break;
-        }
-        *err = errno;
-        close(fd);
-        fd = -1;
-    }
-    freeaddrinfo(res);
-    return fd;
-}
-
-int cv_udp_connect(const char *host, int port, int *err) {
-    struct addrinfo *res = resolve(host, port, 0, SOCK_DGRAM, err);
-    if (!res) return -1;
-    int fd = -1;
-    *err = EADDRNOTAVAIL;
-    for (struct addrinfo *a = res; a; a = a->ai_next) {
-        fd = new_socket(a->ai_family, SOCK_DGRAM);
-        if (fd < 0) {
-            *err = errno;
-            continue;
-        }
-        // A datagram connect only records the peer: it never blocks.
-        if (connect(fd, a->ai_addr, a->ai_addrlen) == 0) {
             *err = 0;
             break;
         }
@@ -816,3 +801,18 @@ int cv_install_enqueue_global_hook(cv_enqueue_fn fn, void *ctx) {
     __atomic_store_n(slot, enqueue_global, __ATOMIC_RELEASE);
     return 0;
 }
+
+// ---- ThreadSanitizer -----------------------------------------------------
+
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define CV_TSAN 1
+#endif
+#endif
+
+#ifdef CV_TSAN
+void __tsan_acquire(void *addr);
+void cv_tsan_acquire(const void *addr) { __tsan_acquire((void *)addr); }
+#else
+void cv_tsan_acquire(const void *addr) { (void)addr; }
+#endif
