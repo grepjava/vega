@@ -5,6 +5,13 @@ import Synchronization
 /// The work-stealing executor. Internal: a public type may not conform to the
 /// SPI `SchedulingExecutor`, and users reach Vega through `Runtime`.
 final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
+    /// Swift retains the executor all the time (Task.yield reads
+    /// Task.currentExecutor, spawns store the preference, global enqueues
+    /// fetch the default executor), from every worker: the refcount in the
+    /// object header is a contended line. Keep the read-mostly fields that
+    /// workers touch on every loop off it.
+    private let headerPad = Pad112()
+
     /// Strong references, for cold paths (metrics, teardown).
     let workers: [Worker]
     let workerCount: Int
@@ -15,8 +22,15 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     let idle: Idle
     let timers = TimerQueue()
     let isShutdown = Atomic<Bool>(false)
+
+    /// Written fields below, away from the read-mostly ones above.
+    private let writePad = Pad128()
     /// Index of the parked worker sleeping on the next timer deadline, or -1.
     let timerOwner = Atomic<Int>(-1)
+    /// Jobs enqueued from threads that aren't this runtime's workers.
+    let foreignEnqueues = Atomic<UInt64>(0)
+    /// Timed enqueues received (Task.sleep etc.), for tests and metrics.
+    let timedEnqueues = Atomic<UInt64>(0)
 
     init(workers count: Int, name: String, pin: Bool) {
         precondition(count >= 1, "a runtime needs at least one worker")
@@ -66,8 +80,6 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
         }
     }
 
-    /// Jobs enqueued from threads that aren't this runtime's workers.
-    let foreignEnqueues = Atomic<UInt64>(0)
     /// Diagnostics only: called on every foreign enqueue.
     nonisolated(unsafe) static var foreignEnqueueHook: (() -> Void)?
 
@@ -88,9 +100,6 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
         let (ns, overflow) = s.multipliedReportingOverflow(by: 1_000_000_000)
         return overflow ? .max : ns &+ atto / 1_000_000_000
     }
-
-    /// Timed enqueues received (Task.sleep etc.), for tests and metrics.
-    let timedEnqueues = Atomic<UInt64>(0)
 
     func addTimer(_ action: TimerAction, in ns: Int64) {
         timedEnqueues.add(1, ordering: .relaxed)

@@ -83,9 +83,43 @@ static void wake_one(_Atomic uint32_t *addr) {
 #endif
 }
 
-void cv_park(cv_parker *p, int64_t timeout_ns) {
+static inline void cpu_relax(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield");
+#endif
+}
+
+void cv_park(cv_parker *p, int64_t timeout_ns) { cv_park_spin(p, timeout_ns, 0); }
+
+void cv_park_spin(cv_parker *p, int64_t timeout_ns, int64_t spin_ns) {
     uint32_t expected = NOTIFIED;
     if (atomic_compare_exchange_strong(&p->state, &expected, EMPTY)) return;
+    if (spin_ns > 0) {
+        // Stay EMPTY while spinning: an unpark now is a plain store, no syscall
+        // for the waker. Most wake-ups in a burst of work land in this window.
+        if (timeout_ns >= 0 && timeout_ns < spin_ns) spin_ns = timeout_ns;
+        uint64_t start = cv_now_ns();
+        for (uint32_t i = 1;; i++) {
+            cpu_relax();
+            if (atomic_load_explicit(&p->state, memory_order_relaxed) == NOTIFIED) {
+                expected = NOTIFIED;
+                atomic_compare_exchange_strong(&p->state, &expected, EMPTY);
+                return;
+            }
+            if ((i & 63) == 0) {
+                uint64_t spent = cv_now_ns() - start;
+                if (spent >= (uint64_t)spin_ns) {
+                    if (timeout_ns >= 0) {
+                        timeout_ns -= (int64_t)spent;
+                        if (timeout_ns <= 0) return; // timed out while spinning
+                    }
+                    break;
+                }
+            }
+        }
+    }
     expected = EMPTY;
     if (!atomic_compare_exchange_strong(&p->state, &expected, PARKED)) {
         atomic_store(&p->state, EMPTY); // it was NOTIFIED between the two CASes

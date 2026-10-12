@@ -1,5 +1,10 @@
 import CVega
 import Synchronization
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 
 /// One scheduler thread. Everything below the `let`s is touched only by the
 /// worker's own thread.
@@ -13,6 +18,13 @@ final class Worker: @unchecked Sendable {
     static let injectInterval: UInt32 = 31
     /// Check timers every this many ticks while busy.
     static let timerInterval: UInt32 = 61
+    /// How long a worker with nothing to do spins before sleeping in the
+    /// kernel. Work that arrives meanwhile wakes it with a plain store
+    /// instead of a futex syscall on both sides. `VEGA_SPIN_NS` overrides.
+    static let spinNanos: Int64 = {
+        if let v = getenv("VEGA_SPIN_NS"), let n = Int64(String(cString: v)) { return n }
+        return 50_000
+    }()
 
     let index: Int
     let queue = LocalQueue()
@@ -33,7 +45,8 @@ final class Worker: @unchecked Sendable {
     /// The job running right now, to spot `Task.yield` re-enqueuing itself.
     private var running: UnsafeRawPointer?
 
-    /// Jobs this worker has run, stolen; read racily by metrics.
+    /// Jobs this worker has run, stolen. Only this worker writes them (plain
+    /// load + store, no locked add); metrics read them racily.
     let jobsRun = Atomic<UInt64>(0)
     let steals = Atomic<UInt64>(0)
 
@@ -109,7 +122,7 @@ final class Worker: @unchecked Sendable {
         running = Self.identity(job)
         job.runSynchronously(on: executor)
         running = nil
-        jobsRun.add(1, ordering: .relaxed)
+        jobsRun.store(jobsRun.load(ordering: .relaxed) &+ 1, ordering: .relaxed)
     }
 
     private func nextJob(_ s: Scheduler) -> UnownedJob? {
@@ -143,7 +156,7 @@ final class Worker: @unchecked Sendable {
             let victim = (start + i) % n
             if victim == index { continue }
             if let job = s.queues[victim]._withUnsafeGuaranteedRef({ $0.steal(into: queue) }) {
-                steals.add(1, ordering: .relaxed)
+                steals.store(steals.load(ordering: .relaxed) &+ 1, ordering: .relaxed)
                 return job
             }
         }
@@ -171,7 +184,7 @@ final class Worker: @unchecked Sendable {
                 timeout = s.timers.timeout(now: cv_now_ns())
             }
 
-            cv_park(parker, timeout)
+            cv_park_spin(parker, timeout, Self.spinNanos)
 
             var fired = 0
             if ownsTimers {

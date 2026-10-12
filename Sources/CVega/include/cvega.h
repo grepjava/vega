@@ -29,6 +29,9 @@ cv_parker *cv_parker_new(void);
 void cv_parker_free(cv_parker *p);
 /// Block until unparked, or until timeout_ns elapses (timeout_ns < 0: forever).
 void cv_park(cv_parker *p, int64_t timeout_ns);
+/// As cv_park, but first spin for up to spin_ns waiting for an unpark, so a
+/// wake that comes soon costs neither side a syscall.
+void cv_park_spin(cv_parker *p, int64_t timeout_ns, int64_t spin_ns);
 void cv_unpark(cv_parker *p);
 
 // ---- lock ----------------------------------------------------------------
