@@ -11,7 +11,8 @@ let package = Package(
         .library(name: "Vega", targets: ["Vega"]),
     ],
     targets: [
-        .target(name: "CVega", cSettings: [.define("_GNU_SOURCE")]),
+        .target(name: "CVega", cSettings: [.define("_GNU_SOURCE")],
+                linkerSettings: [.linkedLibrary("dl", .when(platforms: [.linux]))]),
         .target(name: "Vega", dependencies: ["CVega"], swiftSettings: swiftSettings),
         .testTarget(name: "VegaTests", dependencies: ["Vega", "CVega"], swiftSettings: swiftSettings),
     ],

@@ -51,6 +51,14 @@ typedef void (*cv_thread_fn)(void *arg);
 /// Returns 0 or an errno value.
 int cv_thread_spawn(cv_thread_fn fn, void *arg, const char *name, int cpu);
 
+// ---- Swift runtime hooks -------------------------------------------------
+typedef void (*cv_enqueue_fn)(void *job, void *ctx);
+/// Route swift_task_enqueueGlobal to fn(job, ctx) through the runtime's
+/// enqueue hook. Swift's own path loads Task.defaultExecutor, an existential
+/// copy that retains the executor on every enqueue; the hook skips that.
+/// Returns 0, or -1 if the runtime has no such hook.
+int cv_install_enqueue_global_hook(cv_enqueue_fn fn, void *ctx);
+
 #ifdef __cplusplus
 }
 #endif

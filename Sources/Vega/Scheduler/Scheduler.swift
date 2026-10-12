@@ -68,7 +68,10 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     }
 
     func enqueue(_ job: consuming ExecutorJob) {
-        let job = UnownedJob(job)
+        enqueueUnowned(UnownedJob(job))
+    }
+
+    @inline(__always) func enqueueUnowned(_ job: UnownedJob) {
         #if VEGA_JOB_AUDIT
         JobAudit.enqueued(job, "enqueue")
         #endif
@@ -181,6 +184,18 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
 // MARK: - global install
 
 nonisolated(unsafe) var installedGlobal: Scheduler?
+
+extension Scheduler {
+    /// Take global enqueues straight from the runtime's hook: Swift's own
+    /// route copies `Task.defaultExecutor` (a retain and release of this
+    /// object, from every worker) and calls through an existential.
+    func installEnqueueGlobalHook() {
+        _ = cv_install_enqueue_global_hook({ job, ctx in
+            let job = unsafeBitCast(job, to: UnownedJob.self)
+            Unmanaged<Scheduler>.fromOpaque(ctx!)._withUnsafeGuaranteedRef { $0.enqueueUnowned(job) }
+        }, Unmanaged.passUnretained(self).toOpaque())
+    }
+}
 
 struct VegaExecutorFactory: ExecutorFactory {
     static var mainExecutor: any MainExecutor { PlatformExecutorFactory.mainExecutor }

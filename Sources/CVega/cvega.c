@@ -3,6 +3,7 @@
 #endif
 #include "cvega.h"
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -212,4 +213,35 @@ int cv_thread_spawn(cv_thread_fn fn, void *arg, const char *name, int cpu) {
     pthread_attr_destroy(&attr);
     if (rc != 0) free(s);
     return rc;
+}
+
+// ---- Swift runtime hooks -------------------------------------------------
+
+static cv_enqueue_fn enqueue_fn;
+static void *enqueue_ctx;
+
+// The hook and the original it is handed are swiftcc. With only pointer
+// arguments that matches the C convention on every target Swift supports,
+// but say so explicitly where clang knows the attribute.
+#if __has_attribute(swiftcall)
+#define CV_SWIFTCC __attribute__((swiftcall))
+#else
+#define CV_SWIFTCC
+#endif
+
+typedef CV_SWIFTCC void (*enqueue_original)(void *job);
+typedef CV_SWIFTCC void (*enqueue_hook)(void *job, enqueue_original original);
+
+static CV_SWIFTCC void enqueue_global(void *job, enqueue_original original) {
+    (void)original;
+    enqueue_fn(job, enqueue_ctx);
+}
+
+int cv_install_enqueue_global_hook(cv_enqueue_fn fn, void *ctx) {
+    enqueue_hook *slot = (enqueue_hook *)dlsym(RTLD_DEFAULT, "swift_task_enqueueGlobal_hook");
+    if (!slot) return -1;
+    enqueue_fn = fn;
+    enqueue_ctx = ctx;
+    __atomic_store_n(slot, enqueue_global, __ATOMIC_RELEASE);
+    return 0;
 }

@@ -118,6 +118,7 @@ public final class Runtime: Sendable {
         let rt = Runtime(workers: workers, name: name)
         installedGlobal = rt.scheduler
         _createExecutors(factory: VegaExecutorFactory.self)
+        rt.scheduler.installEnqueueGlobalHook()
         return rt
     }
 }

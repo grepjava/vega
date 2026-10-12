@@ -1,0 +1,55 @@
+From a1dafc504c81d3194dcfbffbf7355c8511fab2e3 Mon Sep 17 00:00:00 2001
+From: grepjava <grepjava@gmail.com>
+Date: Mon, 12 Oct 2026 12:33:17 +0800
+Subject: [PATCH 3/4] Concurrency: allocate a task and its first allocator slab
+ together
+
+A task created with malloc got its task-allocator slab from a second malloc on its first swift_task_alloc, which nearly every task makes (frames, the executor preference record). Allocate a 512-byte first slab inline, as async let tasks already do: one malloc/free pair per task instead of two, still a small size class.
+---
+ stdlib/public/Concurrency/Task.cpp | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/stdlib/public/Concurrency/Task.cpp b/stdlib/public/Concurrency/Task.cpp
+index bcc5d384..c703ada2 100644
+--- a/stdlib/public/Concurrency/Task.cpp
++++ b/stdlib/public/Concurrency/Task.cpp
+@@ -916,6 +916,7 @@ swift_task_create_commonImpl(size_t rawTaskCreateFlags,
+   unsigned initialSlabSize = 512;
+ 
+   void *allocation = nullptr;
++  bool hasInlineInitialSlab = false;
+   if (asyncLet) {
+     assert(parent);
+ 
+@@ -951,7 +952,13 @@ swift_task_create_commonImpl(size_t rawTaskCreateFlags,
+     allocation = runInlineOption->getAllocation();
+     initialSlabSize = runInlineBufferBytes - amountToAllocate;
+   } else {
+-    allocation = malloc(amountToAllocate);
++    // Allocate the task allocator's first slab together with the task.
++    // Nearly every task allocates (frames, its executor preference record),
++    // and a separate slab is a second malloc/free pair per task, usually
++    // freed on another thread than the one that spawned it. Together they
++    // stay within one small malloc size class.
++    allocation = malloc(amountToAllocate + initialSlabSize);
++    hasInlineInitialSlab = true;
+   }
+   SWIFT_TASK_DEBUG_LOG("allocate task %p, parent = %p, slab %u", allocation,
+                        parent, initialSlabSize);
+@@ -1092,9 +1099,11 @@ swift_task_create_commonImpl(size_t rawTaskCreateFlags,
+ 
+   // Initialize the task-local allocator and our other private runtime
+   // state for the task.
+-  if ((asyncLet || (runInlineOption && runInlineOption->getAllocation())) &&
++  if ((asyncLet || hasInlineInitialSlab ||
++       (runInlineOption && runInlineOption->getAllocation())) &&
+       initialSlabSize > 0) {
+-    assert(parent || (runInlineOption && runInlineOption->getAllocation()));
++    assert(parent || hasInlineInitialSlab ||
++           (runInlineOption && runInlineOption->getAllocation()));
+     void *initialSlab = (char*)allocation + amountToAllocate;
+     task->Private.initializeWithSlab(basePriority, initialSlab,
+                                      initialSlabSize);
+-- 
+2.43.0
+

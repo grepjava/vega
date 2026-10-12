@@ -1,0 +1,54 @@
+From f01c122abf1f4aa056e0f5da787ef38776484ad5 Mon Sep 17 00:00:00 2001
+From: grepjava <grepjava@gmail.com>
+Date: Mon, 12 Oct 2026 12:33:17 +0800
+Subject: [PATCH 1/4] Concurrency: read the task executor preference without
+ the status record lock
+
+getPreferredTaskExecutor runs on every enqueue and executor switch of a task with an executor preference. Its callers are the task itself or a thread holding it suspended, and only the task changes its own record chain, so an acquire load of the status is enough. Taking the lock cost a mutex and two CASes on the status word each time.
+---
+ stdlib/public/Concurrency/TaskStatus.cpp | 27 ++++++++++++++----------
+ 1 file changed, 16 insertions(+), 11 deletions(-)
+
+diff --git a/stdlib/public/Concurrency/TaskStatus.cpp b/stdlib/public/Concurrency/TaskStatus.cpp
+index c4c5d849..627437b2 100644
+--- a/stdlib/public/Concurrency/TaskStatus.cpp
++++ b/stdlib/public/Concurrency/TaskStatus.cpp
+@@ -475,19 +475,24 @@ TaskExecutorRef AsyncTask::getPreferredTaskExecutor(bool assumeHasRecord) {
+     return TaskExecutorRef::undefined(); // "no executor preference"
+   }
+ 
+-  TaskExecutorRef preference = TaskExecutorRef::undefined();
+-  withStatusRecordLock(this, [&](ActiveTaskStatus status) {
+-    for (auto record : status.records()) {
+-      if (record->getKind() == TaskStatusRecordKind::TaskExecutorPreference) {
+-        auto executorPreferenceRecord =
+-            cast<TaskExecutorPreferenceStatusRecord>(record);
+-        preference = executorPreferenceRecord->getPreferredExecutor();
+-        return;
+-      }
++  // No lock: every caller is either the task itself (switching executors,
++  // running on an assumed thread) or holds the task suspended (enqueueing
++  // it, draining it from an actor). Only the task adds or removes its own
++  // records, so the chain cannot change under us; other threads that hold
++  // the status record lock (cancellation, escalation) only read it. The
++  // acquire pairs with the release that publishes a lock-free emplace.
++  // Taking the lock here was two CASes on the status word plus a mutex for
++  // every enqueue of a task that has an executor preference.
++  ActiveTaskStatus status =
++      _private()._status().load(std::memory_order_acquire);
++  for (auto record : status.records()) {
++    if (record->getKind() == TaskStatusRecordKind::TaskExecutorPreference) {
++      return cast<TaskExecutorPreferenceStatusRecord>(record)
++          ->getPreferredExecutor();
+     }
+-  });
++  }
+ 
+-  return preference;
++  return TaskExecutorRef::undefined();
+ }
+ 
+ SWIFT_CC(swift)
+-- 
+2.43.0
+

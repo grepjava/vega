@@ -63,3 +63,38 @@ These are the targets for the patched Linux/Windows runtime (option 2).
 - **A job could run twice.** A batch from the inject queue was sized by "queue looks empty" instead of `remaining_slots` from the steal head. While a thief was still copying, the batch overwrote its slots. `QueueModelTests` reproduces it without Swift tasks.
 - **A worker could sleep with a runnable task.** A worker that fired timers while searching left the woken sleeper in its LIFO slot and parked.
 - **Timers fired together ran newest first,** through the LIFO slot. They now resume in deadline order.
+
+## Option 2 round (2026-10-12): patched Swift runtime, enqueue hook
+
+The patched runtime is Swift 6.3.3's `libswift_Concurrency` with the four patches in `runtime/patches` (see `runtime/README.md`). Both libraries were built the same way (`runtime/build-linux.sh` with and without `--stock`) and run against the same `vega-bench` binary, alternating, two rounds. 8 workers, median of 5 runs, ns/op; the table shows round 2 (round 1 agrees within a few percent).
+
+| Bench | Stock pref | Patched pref | Stock global | Patched global | Tokio |
+|---|---|---|---|---|---|
+| spawn_many | 2,624 | **1,625** | 2,201 | **1,666** | 474 |
+| spawn_discard | 2,299 | **1,844** | 2,234 | **1,730** | — |
+| pool_spawn | 870 | 846 | 862 | 835 | 474 |
+| chained_spawn | 1,341 | 1,318 | 1,309 | 1,289 | 921 |
+| ping_pong | 572 | **427** | 577 | **427** | 369 |
+| ping_pong_notify | 1,651 | **1,048** | 1,650 | **1,076** | 369 |
+| ping_pong_notify_nc | 828 | **536** | 836 | **540** | 369 |
+| yield_many (`Task.yield`) | 137 | **66** | 130 | **66** | 34 |
+| yield_vega (`Runtime.yield`) | 78 | **57** | 79 | **57** | 34 |
+
+**Patches and what they bought:**
+- **Lock-free executor-preference read.** This took the status-record mutex off every resume:
+  - ping_pong is now 427 against 572;
+  - ping_pong_notify_nc is now 536 against 828.
+- **Lockless cancellation-handler removal.** `withTaskCancellationHandler` now costs about 500 ns per round trip instead of about 820 ns.
+- **Task and first slab in one malloc.** spawn_many is now 1,625 against 2,624.
+- **`Task.yield` without the existential.** It no longer retains the executor, so it's twice as fast. It now beats the stock runtime's `Runtime.yield`.
+
+**Vega-side, any runtime: the global enqueue hook.** In global mode Vega now installs `swift_task_enqueueGlobal_hook`, the hook NIO also uses. Global enqueues then skip `Task.defaultExecutor`, an existential copy that retains the scheduler on every enqueue. Before this, on the stock runtime, global yield_many was 296 and yield_vega 134; both now match preference mode.
+
+**Checks with the patched library:**
+- Vega's suite: 8 release runs and 5 debug runs, all passing.
+- `vega-global-check`, run 15 times, all passing. It covers tasks, sleeps, groups, actors, async let, and a cancel-while-notifying stress for patch 0002.
+- The ABI gate in the build script: every export of the toolchain's library is still present.
+
+**What's left in the runtime:**
+- Task creation is still about 1.6 µs. It goes through the task-creation options, the group and status-record attach under the parent's mutex, and the task's malloc and free on different threads.
+- In discarding groups, a finishing child detaches itself under the parent's status-record mutex, by scanning the child list, which is O(n).

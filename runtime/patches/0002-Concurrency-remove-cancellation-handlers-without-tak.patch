@@ -1,0 +1,34 @@
+From 601cc12919af00d9afe73e42c3f77090c67d7a07 Mon Sep 17 00:00:00 2001
+From: grepjava <grepjava@gmail.com>
+Date: Mon, 12 Oct 2026 12:33:17 +0800
+Subject: [PATCH 2/4] Concurrency: remove cancellation handlers without taking
+ the status record lock
+
+The handler record is always the innermost record when withTaskCancellationHandler ends, so removeStatusRecord unlinks it with one CAS unless a canceller holds the lock, in which case it waits as before. popStatusRecordOfType locked every time.
+---
+ stdlib/public/Concurrency/Task.cpp | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/stdlib/public/Concurrency/Task.cpp b/stdlib/public/Concurrency/Task.cpp
+index 740f2664..bcc5d384 100644
+--- a/stdlib/public/Concurrency/Task.cpp
++++ b/stdlib/public/Concurrency/Task.cpp
+@@ -1799,9 +1799,12 @@ static void swift_task_removeCancellationHandlerImpl(
+   auto task = swift_task_getCurrent();
+   assert(task->_private()._status().load(std::memory_order_relaxed).getInnermostRecord() == record &&
+     "We expect that the popped record will be exactly first as well as that it is of the expected type");
+-  if (popStatusRecordOfType<CancellationNotificationStatusRecord>(task)) {
+-    swift_task_dealloc(record);
+-  }
++  // The record is the innermost one, so removeStatusRecord can unlink it
++  // with one CAS when nobody holds the status record lock. If a canceller
++  // holds it (and may be running this handler) it waits for the lock, as
++  // popStatusRecordOfType did; that took the lock every time.
++  removeStatusRecord(task, record);
++  swift_task_dealloc(record);
+ }
+ 
+ SWIFT_CC(swift)
+-- 
+2.43.0
+
