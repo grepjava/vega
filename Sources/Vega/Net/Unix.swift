@@ -82,6 +82,20 @@ public struct UnixStream: ~Copyable, Sendable {
     public func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError) {
         try await reg.write(bytes)
     }
+    /// Write all of `head`, then all of `body`, in one system call where the
+    /// socket has room (a header and a payload, say).
+    public func write(_ head: borrowing IOBuffer, _ body: borrowing IOBuffer) async throws(IOError) {
+        let a = UnsafeRawBufferPointer(start: head.base, count: head.count)
+        let b = UnsafeRawBufferPointer(start: body.base, count: body.count)
+        try await reg.write(parts: 2) { $0 == 0 ? a : b }
+    }
+
+    /// Write all of `parts` in order, gathered into as few system calls as
+    /// possible. They must stay valid until this returns.
+    public func write(vectored parts: UnsafeBufferPointer<UnsafeRawBufferPointer>) async throws(IOError) {
+        try await reg.write(parts: parts.count) { parts[$0] }
+    }
+
 
     /// Stop sending: the peer reads end-of-stream once it has the rest.
     public func shutdownWrite() throws(IOError) { try reg.shutdownWrite() }

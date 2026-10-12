@@ -58,6 +58,54 @@ extension IORegistration {
         await Runtime.consumeBudget()
     }
 
+    /// Write all of `count` buffers, `part(i)` being the i-th, with as few
+    /// sendmsg calls as the kernel allows (up to 64 buffers each).
+    @inline(__always)
+    func write(parts count: Int, _ part: (Int) -> UnsafeRawBufferPointer) async throws(IOError) {
+        var index = 0, offset = 0 // the first unsent buffer, and how much of it went
+        while true {
+            while index < count && offset == part(index).count {
+                index += 1
+                offset = 0
+            }
+            if index == count { break }
+            let n = withUnsafeTemporaryAllocation(of: cv_iovec.self, capacity: 64) { iov in
+                var k = 0, i = index
+                while k < 64 && i < count {
+                    let p = part(i)
+                    let skip = i == index ? offset : 0
+                    if p.count > skip {
+                        iov[k] = cv_iovec(base: p.baseAddress! + skip, len: p.count - skip)
+                        k += 1
+                    }
+                    i += 1
+                }
+                return cv_sendv(fd, iov.baseAddress, Int32(k))
+            }
+            if n >= 0 {
+                var left = n
+                while left > 0 {
+                    let rest = part(index).count - offset
+                    if left < rest {
+                        offset += left
+                        break
+                    }
+                    left -= rest
+                    index += 1
+                    offset = 0
+                }
+                continue
+            }
+            let err = Int32(-n)
+            switch err {
+            case EAGAIN, EWOULDBLOCK: try await wait(CV_IO_WRITE)
+            case EINTR: continue
+            default: throw IOError(code: err)
+            }
+        }
+        await Runtime.consumeBudget()
+    }
+
     /// Accept connections with `accept` (a cv_*_accept), registering each.
     @inline(__always)
     func accept(_ accept: (Int32, UnsafeMutablePointer<Int32>) -> Int32) async throws(IOError) -> IORegistration {
@@ -176,6 +224,20 @@ public struct WriteHalf: ~Copyable, Sendable {
     public func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError) {
         try await reg.write(bytes)
     }
+    /// Write all of `head`, then all of `body`, in one system call where the
+    /// socket has room (a header and a payload, say).
+    public func write(_ head: borrowing IOBuffer, _ body: borrowing IOBuffer) async throws(IOError) {
+        let a = UnsafeRawBufferPointer(start: head.base, count: head.count)
+        let b = UnsafeRawBufferPointer(start: body.base, count: body.count)
+        try await reg.write(parts: 2) { $0 == 0 ? a : b }
+    }
+
+    /// Write all of `parts` in order, gathered into as few system calls as
+    /// possible. They must stay valid until this returns.
+    public func write(vectored parts: UnsafeBufferPointer<UnsafeRawBufferPointer>) async throws(IOError) {
+        try await reg.write(parts: parts.count) { parts[$0] }
+    }
+
 
     /// Stop sending now rather than when the half is dropped.
     public func shutdownWrite() throws(IOError) { try reg.shutdownWrite() }

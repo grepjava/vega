@@ -3,6 +3,7 @@
 #ifndef CVEGA_H
 #define CVEGA_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -238,6 +239,75 @@ int cv_unix_connect(const char *path, int *err);
 int cv_unix_accept(int fd, int *err);
 /// A connected pair of Unix stream sockets. 0 or an errno value.
 int cv_unix_pair(int fds[2]);
+
+// ---- socket options ------------------------------------------------------
+// Portable option ids, mapped to each platform's level and name in cvega.c.
+// An option the platform lacks fails with ENOPROTOOPT.
+enum {
+    CV_OPT_TCP_NODELAY,
+    CV_OPT_KEEPALIVE,
+    CV_OPT_TCP_KEEPIDLE,   // seconds idle before the first probe
+    CV_OPT_TCP_KEEPINTVL,  // seconds between probes
+    CV_OPT_TCP_KEEPCNT,    // unanswered probes before the connection drops
+    CV_OPT_TCP_USER_TIMEOUT, // ms unacknowledged data may wait (Linux)
+    CV_OPT_TCP_QUICKACK,
+    CV_OPT_TCP_FASTOPEN,   // listener: queue length for TFO requests
+    CV_OPT_RCVBUF,
+    CV_OPT_SNDBUF,
+    CV_OPT_REUSEADDR,
+    CV_OPT_REUSEPORT,
+    CV_OPT_BROADCAST,
+    CV_OPT_IPV6_V6ONLY,
+    CV_OPT_IP_TTL,
+    CV_OPT_IP_TOS,
+    CV_OPT_IPV6_UNICAST_HOPS,
+    CV_OPT_IPV6_TCLASS,
+    CV_OPT_IP_MULTICAST_TTL,
+    CV_OPT_IP_MULTICAST_LOOP,
+    CV_OPT_IPV6_MULTICAST_HOPS,
+    CV_OPT_IPV6_MULTICAST_LOOP,
+    CV_OPT_UDP_GRO,        // receive coalesced datagrams (Linux)
+    CV_OPT_LINGER,         // seconds; -1 is off
+};
+/// 0 or an errno value.
+int cv_sockopt_set(int fd, int opt, int value);
+int cv_sockopt_get(int fd, int opt, int *value);
+/// Join (join != 0) or leave an IPv4/IPv6 multicast group on an interface
+/// index (0: the kernel's choice). 0 or an errno value.
+int cv_multicast(int fd, const cv_sockaddr *group, unsigned interface, int join);
+
+// ---- vectored and batched I/O --------------------------------------------
+
+/// Layout of struct iovec.
+typedef struct cv_iovec {
+    const void *base;
+    size_t len;
+} cv_iovec;
+/// sendmsg of count buffers (MSG_NOSIGNAL): bytes sent, or -errno.
+long cv_sendv(int fd, const cv_iovec *iov, int count);
+
+#define CV_DGRAM_TRUNCATED 1u
+/// Receive up to count (at most 64) datagrams, datagram i into
+/// base + i * stride, with recvmmsg where there is one. Fills from[i],
+/// lens[i] and flags[i] (CV_DGRAM_TRUNCATED). Datagrams received, or -errno.
+long cv_recv_batch(int fd, void *base, long stride, int count, cv_sockaddr *from,
+                   uint32_t *lens, uint32_t *flags);
+/// Send up to count (at most 64) datagrams laid out as for cv_recv_batch,
+/// each to to[i] (NULL, or len 0: the connected peer). Datagrams sent, or
+/// -errno.
+long cv_send_batch(int fd, const void *base, long stride, const uint32_t *lens,
+                   const cv_sockaddr *to, int count);
+/// One sendmsg of len bytes that the kernel cuts into datagrams of segment
+/// bytes (UDP GSO, Linux; the last may be shorter). to may be NULL for the
+/// connected peer. Bytes sent, or -errno.
+long cv_send_segments(int fd, const void *buf, long len, int segment, const cv_sockaddr *to);
+/// Whether the kernel takes cv_send_segments with a segment size.
+int cv_udp_gso_supported(int fd);
+/// recvmsg that also reports UDP GRO: with CV_OPT_UDP_GRO on, several
+/// datagrams from one sender may arrive in one buffer, each *segment bytes
+/// (the last may be shorter); *segment is 0 for a single datagram. from may
+/// be NULL. Bytes received, or -errno.
+long cv_recv_segments(int fd, void *buf, long len, cv_sockaddr *from, int *segment);
 
 // ---- Swift runtime hooks -------------------------------------------------
 typedef void (*cv_enqueue_fn)(void *job, void *ctx);

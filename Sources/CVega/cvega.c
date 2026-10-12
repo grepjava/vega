@@ -802,6 +802,299 @@ int cv_install_enqueue_global_hook(cv_enqueue_fn fn, void *ctx) {
     return 0;
 }
 
+
+// ---- socket options ------------------------------------------------------
+
+#include <netinet/udp.h>
+#ifndef SOL_UDP
+#define SOL_UDP IPPROTO_UDP
+#endif
+#if defined(__linux__) && !defined(UDP_SEGMENT)
+#define UDP_SEGMENT 103
+#endif
+#if defined(__linux__) && !defined(UDP_GRO)
+#define UDP_GRO 104
+#endif
+
+static int sockopt_name(int opt, int *level, int *name) {
+    switch (opt) {
+    case CV_OPT_TCP_NODELAY: *level = IPPROTO_TCP; *name = TCP_NODELAY; return 0;
+    case CV_OPT_KEEPALIVE: *level = SOL_SOCKET; *name = SO_KEEPALIVE; return 0;
+#ifdef TCP_KEEPIDLE
+    case CV_OPT_TCP_KEEPIDLE: *level = IPPROTO_TCP; *name = TCP_KEEPIDLE; return 0;
+#elif defined(TCP_KEEPALIVE)
+    case CV_OPT_TCP_KEEPIDLE: *level = IPPROTO_TCP; *name = TCP_KEEPALIVE; return 0;
+#endif
+#ifdef TCP_KEEPINTVL
+    case CV_OPT_TCP_KEEPINTVL: *level = IPPROTO_TCP; *name = TCP_KEEPINTVL; return 0;
+#endif
+#ifdef TCP_KEEPCNT
+    case CV_OPT_TCP_KEEPCNT: *level = IPPROTO_TCP; *name = TCP_KEEPCNT; return 0;
+#endif
+#ifdef TCP_USER_TIMEOUT
+    case CV_OPT_TCP_USER_TIMEOUT: *level = IPPROTO_TCP; *name = TCP_USER_TIMEOUT; return 0;
+#endif
+#ifdef TCP_QUICKACK
+    case CV_OPT_TCP_QUICKACK: *level = IPPROTO_TCP; *name = TCP_QUICKACK; return 0;
+#endif
+#ifdef TCP_FASTOPEN
+    case CV_OPT_TCP_FASTOPEN: *level = IPPROTO_TCP; *name = TCP_FASTOPEN; return 0;
+#endif
+    case CV_OPT_RCVBUF: *level = SOL_SOCKET; *name = SO_RCVBUF; return 0;
+    case CV_OPT_SNDBUF: *level = SOL_SOCKET; *name = SO_SNDBUF; return 0;
+    case CV_OPT_REUSEADDR: *level = SOL_SOCKET; *name = SO_REUSEADDR; return 0;
+#ifdef SO_REUSEPORT
+    case CV_OPT_REUSEPORT: *level = SOL_SOCKET; *name = SO_REUSEPORT; return 0;
+#endif
+    case CV_OPT_BROADCAST: *level = SOL_SOCKET; *name = SO_BROADCAST; return 0;
+    case CV_OPT_IPV6_V6ONLY: *level = IPPROTO_IPV6; *name = IPV6_V6ONLY; return 0;
+    case CV_OPT_IP_TTL: *level = IPPROTO_IP; *name = IP_TTL; return 0;
+    case CV_OPT_IP_TOS: *level = IPPROTO_IP; *name = IP_TOS; return 0;
+    case CV_OPT_IPV6_UNICAST_HOPS: *level = IPPROTO_IPV6; *name = IPV6_UNICAST_HOPS; return 0;
+#ifdef IPV6_TCLASS
+    case CV_OPT_IPV6_TCLASS: *level = IPPROTO_IPV6; *name = IPV6_TCLASS; return 0;
+#endif
+    case CV_OPT_IP_MULTICAST_TTL: *level = IPPROTO_IP; *name = IP_MULTICAST_TTL; return 0;
+    case CV_OPT_IP_MULTICAST_LOOP: *level = IPPROTO_IP; *name = IP_MULTICAST_LOOP; return 0;
+    case CV_OPT_IPV6_MULTICAST_HOPS: *level = IPPROTO_IPV6; *name = IPV6_MULTICAST_HOPS; return 0;
+    case CV_OPT_IPV6_MULTICAST_LOOP: *level = IPPROTO_IPV6; *name = IPV6_MULTICAST_LOOP; return 0;
+#if defined(__linux__)
+    case CV_OPT_UDP_GRO: *level = SOL_UDP; *name = UDP_GRO; return 0;
+#endif
+    default: return ENOPROTOOPT;
+    }
+}
+
+int cv_sockopt_set(int fd, int opt, int value) {
+    if (opt == CV_OPT_LINGER) {
+        struct linger l = {.l_onoff = value >= 0, .l_linger = value >= 0 ? value : 0};
+        return setsockopt(fd, SOL_SOCKET, SO_LINGER, &l, sizeof l) == 0 ? 0 : errno;
+    }
+    int level, name, e = sockopt_name(opt, &level, &name);
+    if (e) return e;
+#if !defined(__linux__)
+    // BSDs take a byte for these; Linux takes either.
+    if (level == IPPROTO_IP && (name == IP_MULTICAST_TTL || name == IP_MULTICAST_LOOP)) {
+        unsigned char b = (unsigned char)value;
+        return setsockopt(fd, level, name, &b, sizeof b) == 0 ? 0 : errno;
+    }
+#endif
+    return setsockopt(fd, level, name, &value, sizeof value) == 0 ? 0 : errno;
+}
+
+int cv_sockopt_get(int fd, int opt, int *value) {
+    if (opt == CV_OPT_LINGER) {
+        struct linger l = {0};
+        socklen_t len = sizeof l;
+        if (getsockopt(fd, SOL_SOCKET, SO_LINGER, &l, &len) != 0) return errno;
+        *value = l.l_onoff ? l.l_linger : -1;
+        return 0;
+    }
+    int level, name, e = sockopt_name(opt, &level, &name);
+    if (e) return e;
+    int v = 0;
+    socklen_t len = sizeof v;
+    if (getsockopt(fd, level, name, &v, &len) != 0) return errno;
+    *value = len == 1 ? (int)*(unsigned char *)&v : v;
+    return 0;
+}
+
+int cv_multicast(int fd, const cv_sockaddr *group, unsigned interface, int join) {
+    const struct sockaddr *sa = (const struct sockaddr *)group->storage;
+    if (sa->sa_family == AF_INET) {
+#if defined(__linux__)
+        struct ip_mreqn m = {0};
+        m.imr_multiaddr = ((const struct sockaddr_in *)sa)->sin_addr;
+        m.imr_ifindex = (int)interface;
+#else
+        struct ip_mreq m = {0};
+        m.imr_multiaddr = ((const struct sockaddr_in *)sa)->sin_addr;
+        (void)interface; // INADDR_ANY: the kernel picks
+#endif
+        int op = join ? IP_ADD_MEMBERSHIP : IP_DROP_MEMBERSHIP;
+        return setsockopt(fd, IPPROTO_IP, op, &m, sizeof m) == 0 ? 0 : errno;
+    }
+    if (sa->sa_family == AF_INET6) {
+        struct ipv6_mreq m = {0};
+        m.ipv6mr_multiaddr = ((const struct sockaddr_in6 *)sa)->sin6_addr;
+        m.ipv6mr_interface = interface;
+        int op = join ? IPV6_JOIN_GROUP : IPV6_LEAVE_GROUP;
+        return setsockopt(fd, IPPROTO_IPV6, op, &m, sizeof m) == 0 ? 0 : errno;
+    }
+    return EAFNOSUPPORT;
+}
+
+// ---- vectored and batched I/O --------------------------------------------
+
+#include <sys/uio.h>
+
+_Static_assert(sizeof(cv_iovec) == sizeof(struct iovec) &&
+                   offsetof(cv_iovec, base) == offsetof(struct iovec, iov_base) &&
+                   offsetof(cv_iovec, len) == offsetof(struct iovec, iov_len),
+               "cv_iovec must match struct iovec");
+
+long cv_sendv(int fd, const cv_iovec *iov, int count) {
+    struct msghdr mh = {0};
+    mh.msg_iov = (struct iovec *)iov;
+    mh.msg_iovlen = count;
+    ssize_t n = sendmsg(fd, &mh, MSG_NOSIGNAL);
+    return n >= 0 ? (long)n : -(long)errno;
+}
+
+enum { CV_BATCH_CHUNK = 64 };
+
+long cv_recv_batch(int fd, void *base, long stride, int count, cv_sockaddr *from,
+                   uint32_t *lens, uint32_t *flags) {
+#if defined(__linux__)
+    if (count > CV_BATCH_CHUNK) count = CV_BATCH_CHUNK;
+    struct mmsghdr hdrs[CV_BATCH_CHUNK];
+    struct iovec iov[CV_BATCH_CHUNK];
+    memset(hdrs, 0, sizeof hdrs[0] * (size_t)count);
+    for (int i = 0; i < count; i++) {
+        iov[i].iov_base = (char *)base + (size_t)i * (size_t)stride;
+        iov[i].iov_len = (size_t)stride;
+        hdrs[i].msg_hdr.msg_name = from[i].storage;
+        hdrs[i].msg_hdr.msg_namelen = sizeof from[i].storage;
+        hdrs[i].msg_hdr.msg_iov = &iov[i];
+        hdrs[i].msg_hdr.msg_iovlen = 1;
+    }
+    int n = recvmmsg(fd, hdrs, (unsigned)count, 0, NULL);
+    if (n < 0) return -(long)errno;
+    for (int i = 0; i < n; i++) {
+        from[i].len = hdrs[i].msg_hdr.msg_namelen;
+        lens[i] = hdrs[i].msg_len;
+        flags[i] = (hdrs[i].msg_hdr.msg_flags & MSG_TRUNC) ? CV_DGRAM_TRUNCATED : 0;
+    }
+    return n;
+#else
+    int got = 0;
+    for (; got < count; got++) {
+        struct iovec v = {(char *)base + (size_t)got * (size_t)stride, (size_t)stride};
+        struct msghdr mh = {0};
+        mh.msg_name = from[got].storage;
+        mh.msg_namelen = sizeof from[got].storage;
+        mh.msg_iov = &v;
+        mh.msg_iovlen = 1;
+        ssize_t n = recvmsg(fd, &mh, 0);
+        if (n < 0) {
+            if (got > 0) break;
+            return -(long)errno;
+        }
+        from[got].len = mh.msg_namelen;
+        lens[got] = (uint32_t)n;
+        flags[got] = (mh.msg_flags & MSG_TRUNC) ? CV_DGRAM_TRUNCATED : 0;
+    }
+    return got;
+#endif
+}
+
+long cv_send_batch(int fd, const void *base, long stride, const uint32_t *lens,
+                   const cv_sockaddr *to, int count) {
+#if defined(__linux__)
+    if (count > CV_BATCH_CHUNK) count = CV_BATCH_CHUNK;
+    struct mmsghdr hdrs[CV_BATCH_CHUNK];
+    struct iovec iov[CV_BATCH_CHUNK];
+    memset(hdrs, 0, sizeof hdrs[0] * (size_t)count);
+    for (int i = 0; i < count; i++) {
+        iov[i].iov_base = (char *)base + (size_t)i * (size_t)stride;
+        iov[i].iov_len = lens[i];
+        if (to && to[i].len) {
+            hdrs[i].msg_hdr.msg_name = (void *)to[i].storage;
+            hdrs[i].msg_hdr.msg_namelen = to[i].len;
+        }
+        hdrs[i].msg_hdr.msg_iov = &iov[i];
+        hdrs[i].msg_hdr.msg_iovlen = 1;
+    }
+    int n = sendmmsg(fd, hdrs, (unsigned)count, MSG_NOSIGNAL);
+    return n >= 0 ? (long)n : -(long)errno;
+#else
+    int sent = 0;
+    for (; sent < count; sent++) {
+        const char *p = (const char *)base + (size_t)sent * (size_t)stride;
+        ssize_t n = to && to[sent].len
+            ? sendto(fd, p, lens[sent], MSG_NOSIGNAL, (const struct sockaddr *)to[sent].storage,
+                     (socklen_t)to[sent].len)
+            : send(fd, p, lens[sent], MSG_NOSIGNAL);
+        if (n < 0) {
+            if (sent > 0) break;
+            return -(long)errno;
+        }
+    }
+    return sent;
+#endif
+}
+
+long cv_send_segments(int fd, const void *buf, long len, int segment, const cv_sockaddr *to) {
+    struct iovec v = {(void *)buf, (size_t)len};
+    struct msghdr mh = {0};
+    if (to && to->len) {
+        mh.msg_name = (void *)to->storage;
+        mh.msg_namelen = to->len;
+    }
+    mh.msg_iov = &v;
+    mh.msg_iovlen = 1;
+#if defined(__linux__)
+    union {
+        char buf[CMSG_SPACE(sizeof(uint16_t))];
+        struct cmsghdr align;
+    } control;
+    if (segment > 0 && len > segment) {
+        memset(&control, 0, sizeof control);
+        mh.msg_control = control.buf;
+        mh.msg_controllen = sizeof control.buf;
+        struct cmsghdr *cm = CMSG_FIRSTHDR(&mh);
+        cm->cmsg_level = SOL_UDP;
+        cm->cmsg_type = UDP_SEGMENT;
+        cm->cmsg_len = CMSG_LEN(sizeof(uint16_t));
+        uint16_t seg = (uint16_t)segment;
+        memcpy(CMSG_DATA(cm), &seg, sizeof seg);
+    }
+#else
+    if (segment > 0 && len > segment) return -(long)EOPNOTSUPP;
+#endif
+    ssize_t n = sendmsg(fd, &mh, MSG_NOSIGNAL);
+    return n >= 0 ? (long)n : -(long)errno;
+}
+
+int cv_udp_gso_supported(int fd) {
+#if defined(__linux__)
+    int size = 0;
+    socklen_t len = sizeof size;
+    return getsockopt(fd, SOL_UDP, UDP_SEGMENT, &size, &len) == 0;
+#else
+    (void)fd;
+    return 0;
+#endif
+}
+
+long cv_recv_segments(int fd, void *buf, long len, cv_sockaddr *from, int *segment) {
+    struct iovec v = {buf, (size_t)len};
+    struct msghdr mh = {0};
+    if (from) {
+        mh.msg_name = from->storage;
+        mh.msg_namelen = sizeof from->storage;
+    }
+    mh.msg_iov = &v;
+    mh.msg_iovlen = 1;
+    union {
+        char buf[CMSG_SPACE(sizeof(int))];
+        struct cmsghdr align;
+    } control;
+    mh.msg_control = control.buf;
+    mh.msg_controllen = sizeof control.buf;
+    ssize_t n = recvmsg(fd, &mh, 0);
+    if (n < 0) return -(long)errno;
+    if (from) from->len = mh.msg_namelen;
+    *segment = 0;
+#if defined(__linux__)
+    for (struct cmsghdr *cm = CMSG_FIRSTHDR(&mh); cm; cm = CMSG_NXTHDR(&mh, cm)) {
+        if (cm->cmsg_level == SOL_UDP && cm->cmsg_type == UDP_GRO) {
+            memcpy(segment, CMSG_DATA(cm), sizeof(int));
+        }
+    }
+#endif
+    return (long)n;
+}
 // ---- ThreadSanitizer -----------------------------------------------------
 
 #if defined(__has_feature)
