@@ -43,6 +43,14 @@ final class LocalQueue: @unchecked Sendable {
 
     var isEmpty: Bool { count == 0 }
 
+    /// Owner only: slots free for `pushUnchecked`. Counted from the *steal*
+    /// head: slots a thief is still copying out are not free yet, even when
+    /// the queue looks empty to its owner (Tokio: `remaining_slots`).
+    var remainingSlots: Int {
+        let (steal, _) = Self.unpack(head.load(ordering: .acquiring))
+        return Int(Self.capacity &- (tail.load(ordering: .relaxed) &- steal))
+    }
+
     /// Owner only. When the ring is full, half of it and `job` move to
     /// `overflow` in one batch.
     func push(_ job: UnownedJob, overflow: InjectQueue) {
@@ -76,8 +84,8 @@ final class LocalQueue: @unchecked Sendable {
         return true
     }
 
-    /// Owner only, and only when there is room for `n` more (e.g. the queue is
-    /// empty). Used to move a batch in from the inject queue.
+    /// Owner only, and only within `remainingSlots`. Used to move a batch in
+    /// from the inject queue.
     func pushUnchecked(_ job: UnownedJob) {
         let t = tail.load(ordering: .relaxed)
         slot(t).initialize(to: job)

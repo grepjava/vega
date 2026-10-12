@@ -69,6 +69,9 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
 
     func enqueue(_ job: consuming ExecutorJob) {
         let job = UnownedJob(job)
+        #if VEGA_JOB_AUDIT
+        JobAudit.enqueued(job, "enqueue")
+        #endif
         if let w = Worker.current,
            w._withUnsafeGuaranteedRef({ $0.owner == Unmanaged.passUnretained(self).toOpaque() }) {
             w._withUnsafeGuaranteedRef { $0.schedule(job, self) }
@@ -142,9 +145,11 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
     func fireDueTimers(on worker: Worker) -> Int {
         let now = cv_now_ns()
         var fired = 0
-        while let action = timers.popDue(now: now) {
-            fire(action, on: worker)
-            fired += 1
+        worker.inOrder {
+            while let action = timers.popDue(now: now) {
+                fire(action, on: worker)
+                fired += 1
+            }
         }
         if fired > 1 { notifyParked() }
         return fired
@@ -155,6 +160,9 @@ final class Scheduler: TaskExecutor, SchedulingExecutor, @unchecked Sendable {
         case .waiter(let w):
             w.takeRetainedValue().fire() // drops the retain the heap held
         case .job(let job):
+            #if VEGA_JOB_AUDIT
+            JobAudit.enqueued(job, "timer")
+            #endif
             if let worker, worker.owner == Unmanaged.passUnretained(self).toOpaque() {
                 worker.pushLocal(job, self)
             } else {

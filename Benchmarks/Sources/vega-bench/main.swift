@@ -125,7 +125,55 @@ let yieldMany = Bench(name: "yield_many", ops: 100_000) { ex in
     }
 }
 
-let benches = [spawnMany, spawnDiscard, chainedSpawn, pingPong, yieldMany].filter { only?.contains($0.name) ?? true }
+/// ping_pong with Vega's Notify: the same shape as Tokio's bench.
+let pingPongNotify = Bench(name: "ping_pong_notify", ops: 100_000) { ex in
+    let a = Notify(), b = Notify()
+    await withTaskGroup(of: Void.self) { g in
+        g.addTask(executorPreference: ex) { for _ in 0..<100_000 { await a.notified(); b.notifyOne() } }
+        g.addTask(executorPreference: ex) { for _ in 0..<100_000 { a.notifyOne(); await b.notified() } }
+        await g.waitForAll()
+    }
+}
+
+/// ping_pong_notify without cancellation support (no status record per wait).
+let pingPongNotifyNC = Bench(name: "ping_pong_notify_nc", ops: 100_000) { ex in
+    let a = Notify(), b = Notify()
+    await withTaskGroup(of: Void.self) { g in
+        g.addTask(executorPreference: ex) { for _ in 0..<100_000 { await a.notifiedIgnoringCancellation(); b.notifyOne() } }
+        g.addTask(executorPreference: ex) { for _ in 0..<100_000 { a.notifyOne(); await b.notifiedIgnoringCancellation() } }
+        await g.waitForAll()
+    }
+}
+
+/// yield_many with Runtime.yield instead of Task.yield.
+let yieldVega = Bench(name: "yield_vega", ops: 100_000) { ex in
+    await withTaskGroup(of: Void.self) { g in
+        for _ in 0..<200 {
+            g.addTask(executorPreference: ex) { for _ in 0..<500 { await Runtime.yield() } }
+        }
+        await g.waitForAll()
+    }
+}
+
+/// spawn_many on a TaskPool: 100k closures, wait for the last one.
+final class PoolDone: @unchecked Sendable {
+    let left = Atomic<Int>(0)
+    let done = Notify()
+}
+/// Not a top-level var: those are main-actor isolated, and the main thread is
+/// blocked while benches run.
+enum Shared { nonisolated(unsafe) static var pool: TaskPool! }
+Shared.pool = TaskPool(runtime: rt)
+let poolSpawn = Bench(name: "pool_spawn", ops: 100_000) { _ in
+    let d = PoolDone()
+    d.left.store(100_000, ordering: .relaxed)
+    for _ in 0..<100_000 {
+        Shared.pool.spawn { if d.left.subtract(1, ordering: .acquiringAndReleasing).newValue == 0 { d.done.notifyOne() } }
+    }
+    await d.done.notified()
+}
+
+let benches = [spawnMany, spawnDiscard, poolSpawn, chainedSpawn, pingPong, pingPongNotify, pingPongNotifyNC, yieldMany, yieldVega].filter { only?.contains($0.name) ?? true }
 
 // MARK: run
 

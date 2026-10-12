@@ -44,6 +44,16 @@ final class Worker: @unchecked Sendable {
     private var rng: UInt32
     /// The job running right now, to spot `Task.yield` re-enqueuing itself.
     private var running: UnsafeRawPointer?
+    /// A task that called `Runtime.yield`, to resume once its job returns.
+    private var deferred: UnsafeContinuation<Void, Never>?
+    /// While set, jobs scheduled here go to the back of the queue instead of
+    /// the LIFO slot: a resumed yielder, or timers fired in deadline order
+    /// (through the LIFO slot a batch of them would run newest first).
+    private var toBack = false
+    /// Cooperative budget left for the running task (`Runtime.consumeBudget`).
+    var budget: Int32 = 0
+    /// Tokio's per-poll budget.
+    static let budgetPerPoll: Int32 = 128
 
     /// Jobs this worker has run, stolen. Only this worker writes them (plain
     /// load + store, no locked add); metrics read them racily.
@@ -76,7 +86,11 @@ final class Worker: @unchecked Sendable {
 
     /// A job became runnable on this worker's thread.
     @inline(__always) func schedule(_ job: UnownedJob, _ s: Scheduler) {
-        if Self.identity(job) == running {
+        #if VEGA_JOB_AUDIT
+        JobAudit.note(job, toBack || Self.identity(job) == running ? "->back" : (lifo == nil ? "->lifo" : "->lifo(displace)"))
+        if let p = lifo { JobAudit.note(p, "displaced->queue") }
+        #endif
+        if toBack || Self.identity(job) == running {
             // Task.yield (or any self-reschedule): go to the back, let others run.
             queue.push(job, overflow: s.inject)
             s.notifyParked()
@@ -96,6 +110,35 @@ final class Worker: @unchecked Sendable {
     @inline(never) func pushLocal(_ job: UnownedJob, _ s: Scheduler) {
         queue.push(job, overflow: s.inject)
     }
+
+    /// Run `body` (which schedules jobs here) with FIFO placement.
+    @inline(__always) func inOrder<R>(_ body: () -> R) -> R {
+        toBack = true
+        defer { toBack = false }
+        return body()
+    }
+
+    /// Park a yielding task's continuation until the running job returns.
+    func deferYield(_ c: UnsafeContinuation<Void, Never>) {
+        // One job can run several tasks (an actor draining its queue); an
+        // earlier yielder in the same job is suspended by now, release it.
+        if let previous = deferred { resumeToBack(previous) }
+        deferred = c
+    }
+
+    /// Resume a suspended task; it is enqueued here, at the back of the queue.
+    private func resumeToBack(_ c: UnsafeContinuation<Void, Never>) {
+        toBack = true
+        c.resume()
+        toBack = false
+    }
+
+    #if VEGA_JOB_AUDIT
+    private var source: StaticString = ""
+    @inline(__always) private func audit(_ s: StaticString) { source = s }
+    #else
+    @inline(__always) private func audit(_ s: StaticString) {}
+    #endif
 
     // MARK: the loop
 
@@ -119,9 +162,21 @@ final class Worker: @unchecked Sendable {
             isSearching = false
             if s.idle.transitionFromSearching() { s.notifyParked() }
         }
+        #if VEGA_JOB_AUDIT
+        JobAudit.running(job, source)
+        #endif
         running = Self.identity(job)
+        budget = Self.budgetPerPoll
         job.runSynchronously(on: executor)
+        #if VEGA_JOB_AUDIT
+        JobAudit.note(job, "done")
+        #endif
         running = nil
+        if let c = deferred {
+            // Runtime.yield: the task has suspended now.
+            deferred = nil
+            resumeToBack(c)
+        }
         jobsRun.store(jobsRun.load(ordering: .relaxed) &+ 1, ordering: .relaxed)
     }
 
@@ -133,14 +188,16 @@ final class Worker: @unchecked Sendable {
             lifo = nil
             if lifoStreak < Self.lifoLimit {
                 lifoStreak += 1
+                audit("lifo")
                 return job
             }
             queue.push(job, overflow: s.inject)
         }
         lifoStreak = 0
 
-        if tick % Self.injectInterval == 0, let job = s.inject.pop() { return job }
-        if let job = queue.pop() { return job }
+        if tick % Self.injectInterval == 0, let job = s.inject.pop() { audit("inject.pop"); return job }
+        if let job = queue.pop() { audit("local.pop"); return job }
+        audit("inject.popBatch")
         return s.inject.popBatch(into: queue, workers: s.workerCount)
     }
 
@@ -157,11 +214,20 @@ final class Worker: @unchecked Sendable {
             if victim == index { continue }
             if let job = s.queues[victim]._withUnsafeGuaranteedRef({ $0.steal(into: queue) }) {
                 steals.store(steals.load(ordering: .relaxed) &+ 1, ordering: .relaxed)
+                audit("steal")
                 return job
             }
         }
-        if let job = s.inject.popBatch(into: queue, workers: n) { return job }
-        return s.fireDueTimers(on: self) > 0 ? queue.pop() : nil
+        if let job = s.inject.popBatch(into: queue, workers: n) { audit("steal.popBatch"); return job }
+        audit("timers")
+        guard s.fireDueTimers(on: self) > 0 else { return nil }
+        // A fired sleeper resumes into the LIFO slot, a fired job onto the
+        // queue: take either, or we would park with work in hand.
+        if let job = lifo {
+            lifo = nil
+            return job
+        }
+        return queue.pop()
     }
 
     private func park(_ s: Scheduler) {
@@ -171,6 +237,11 @@ final class Worker: @unchecked Sendable {
         isSearching = false
 
         while !s.isShutdown.load(ordering: .relaxed) {
+            if lifo != nil {
+                // Never sleep on a runnable job of our own.
+                reclaim(s)
+                return
+            }
             // One parked worker owns the timers and sleeps only until the next deadline.
             let ownsTimers = s.timerOwner.compareExchange(expected: -1, desired: index,
                                                           ordering: .sequentiallyConsistent).exchanged

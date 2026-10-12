@@ -81,13 +81,16 @@ final class InjectQueue: @unchecked Sendable {
     }
 
     /// Take a fair share for one of `workers` workers: return one job and move
-    /// the rest into `local`, which must be empty and owned by the caller.
+    /// the rest into `local`, which must be owned by the caller.
     func popBatch(into local: LocalQueue, workers: Int) -> UnownedJob? {
         if isEmpty { return nil }
         let r = ring.pointer
         return lock.withLock {
             guard let first = r.pointee.pop() else { return nil }
-            let share = min(r.pointee.count / workers + 1, Int(LocalQueue.capacity / 2))
+            // Bounded by the room `local` really has: a thief may still be
+            // copying slots out of it, so "empty" doesn't mean 256 free.
+            let share = min(r.pointee.count / workers + 1, Int(LocalQueue.capacity / 2),
+                            local.remainingSlots + 1)
             var moved = 1
             while moved < share, let job = r.pointee.pop() {
                 local.pushUnchecked(job)
