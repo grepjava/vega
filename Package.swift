@@ -16,6 +16,7 @@ let package = Package(
         .library(name: "VegaTLS", targets: ["VegaTLS"]),
         .library(name: "VegaHTTP1", targets: ["VegaHTTP1"]),
         .library(name: "VegaHTTP2", targets: ["VegaHTTP2"]),
+        .library(name: "VegaWebSocket", targets: ["VegaWebSocket"]),
         .library(name: "VegaTest", targets: ["VegaTest"]),
     ],
     targets: [
@@ -46,7 +47,8 @@ let package = Package(
         .target(name: "VegaTLS", dependencies: ["Vega", "VegaIO", "CVegaTLS"], swiftSettings: swiftSettings),
         .target(name: "VegaHTTP1", dependencies: ["Vega", "VegaIO"], swiftSettings: swiftSettings),
         .target(name: "VegaHTTP2", dependencies: ["Vega", "VegaIO", "VegaHTTP1"], swiftSettings: swiftSettings),
-        .testTarget(name: "VegaTests", dependencies: ["Vega", "VegaIO", "VegaFS", "VegaProcess", "VegaMetrics", "VegaTest", "VegaTLS", "VegaHTTP1", "VegaHTTP2", "CVega"], swiftSettings: swiftSettings),
+        .target(name: "VegaWebSocket", dependencies: ["Vega", "VegaIO", "VegaHTTP1"], swiftSettings: swiftSettings),
+        .testTarget(name: "VegaTests", dependencies: ["Vega", "VegaIO", "VegaFS", "VegaProcess", "VegaMetrics", "VegaTest", "VegaTLS", "VegaHTTP1", "VegaHTTP2", "VegaWebSocket", "CVega"], swiftSettings: swiftSettings),
     ],
     cLanguageStandard: .gnu11
 )
