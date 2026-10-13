@@ -329,6 +329,44 @@ private func get(_ path: String) -> HTTPRequest {
         }
         #expect(bodies == (0..<20).map { "tcp /\($0)" })
     }
+
+    /// Concurrent streams with big bodies both ways over TCP, so each socket
+    /// often has a read and a write waiting at once. On Windows that once
+    /// lost a write's wake-up (two AFD polls on one socket), within a few
+    /// rounds of this.
+    @Test func bothWaysAtOnceOverTCP() throws {
+        for _ in 0..<20 {
+            let rt = Runtime(workers: 4)
+            defer { rt.shutdown() }
+            let sizes = try rt.block { () async throws -> [Int] in
+                let listener = try TCPListener.bind(host: "127.0.0.1", port: 0)
+                let port = listener.localPort
+                rt.spawn(with: listener) { l async in
+                    while let conn = try? await l.accept() {
+                        rt.spawn(with: conn) { conn async in
+                            try? await HTTP2Server.serve(conn) { request in HTTPResponse(body: request.body) }
+                        }
+                    }
+                }
+                let tcp = try await TCPStream.connect(host: "127.0.0.1", port: port)
+                return try await HTTP2Client.withConnection(tcp.halves(), authority: "localhost") { client in
+                    try await withThrowingTaskGroup(of: (Int, Int).self) { group in
+                        for i in 0..<32 {
+                            group.addTask {
+                                let r = try await client.send(HTTPRequest(method: .post, target: "/\(i)",
+                                                                          body: Array(repeating: 7, count: i * 10_000)))
+                                return (i, r.body.count)
+                            }
+                        }
+                        var out = [Int](repeating: -1, count: 32)
+                        for try await (i, n) in group { out[i] = n }
+                        return out
+                    }
+                }
+            }
+            #expect(sizes == (0..<32).map { $0 * 10_000 })
+        }
+    }
 }
 
 /// A raw peer: frames written by hand, frames read back.
