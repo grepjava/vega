@@ -45,6 +45,13 @@ public struct SocketAddress: Sendable, Hashable, CustomStringConvertible {
         }
     }
 
+    /// `host` as an address (`"10.0.0.1"`, `"::1"`), or nil if it's a name.
+    /// Never looks anything up.
+    public init?(numericHost host: String, port: Int) {
+        guard case .success(let all?) = Self.resolve(host, port, numericOnly: true), let first = all.first else { return nil }
+        self = first
+    }
+
     static let maxLookupResults = 16
 
     /// nil when `numericOnly` and `host` is a name.
@@ -60,7 +67,7 @@ public struct SocketAddress: Sendable, Hashable, CustomStringConvertible {
     }
 
     /// An IPv4 (4 bytes) or IPv6 (16 bytes) address in network order.
-    init?(ip: [UInt8], port: Int) {
+    public init?(ip: [UInt8], port: Int) {
         var raw = cv_sockaddr()
         guard ip.withUnsafeBufferPointer({ cv_sockaddr_ip(&raw, $0.baseAddress, Int32($0.count), Int32(port)) }) == 0
         else { return nil }
@@ -68,7 +75,7 @@ public struct SocketAddress: Sendable, Hashable, CustomStringConvertible {
     }
 
     /// The IP address's bytes in network order, or nil for a Unix address.
-    var ipBytes: [UInt8]? {
+    public var ipBytes: [UInt8]? {
         withUnsafePointer(to: raw) { a in
             withUnsafeTemporaryAllocation(of: UInt8.self, capacity: 16) { buf in
                 let n = cv_sockaddr_ip_bytes(a, buf.baseAddress!)
