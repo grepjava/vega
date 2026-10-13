@@ -1,0 +1,214 @@
+// The system OpenSSL: not on iOS, tvOS, watchOS or visionOS.
+#if os(Linux) || os(macOS) || os(Windows)
+import CVegaTLS
+import Vega
+import VegaIO
+
+/// TLS over any Vega byte stream: tokio-rustls's `TlsStream`. It is itself
+/// an `AsyncReader` and `AsyncWriter`, so codecs and `Framed` run over it
+/// unchanged.
+///
+/// ```swift
+/// let tcp = try await TCPStream.connect(host: "example.com", port: 443)
+/// let tls = try await TLSStream.connect(tcp, serverName: "example.com", context: client)
+/// try await tls.write(request)
+///
+/// let conn = try await listener.accept()
+/// let tls = try await TLSStream.accept(conn.stream, context: server)
+/// ```
+///
+/// The TLS library (the system's OpenSSL) never sees the socket: ciphertext
+/// moves through memory, read and written by this value on the transport.
+/// Failures throw `IOError.tls` with OpenSSL's reason as the message; a
+/// peer that closes without close_notify throws `IOError.tlsTruncated` (a
+/// read that returns 0 means a clean close). Not splittable yet: one task
+/// at a time reads and writes.
+public struct TLSStream<Transport: AsyncReader & AsyncWriter & ~Copyable>: ~Copyable {
+    private let transport: Transport
+    private let state: TLSState
+
+    private init(transport: consuming Transport, state: TLSState) {
+        self.transport = transport
+        self.state = state
+    }
+
+    /// Be the client: handshake with the server at the other end of
+    /// `transport`. `serverName` is sent (SNI) and the certificate checked
+    /// against it; an IP address is checked as one and not sent.
+    public static func connect(_ transport: consuming Transport, serverName: String?,
+                               context: TLSContext) async throws(IOError) -> TLSStream {
+        guard context.configuration.role == .client else {
+            throw IOError(code: IOError.tls.code, message: "connect needs a client context")
+        }
+        let stream = TLSStream(transport: transport, state: try TLSState(context, host: serverName))
+        try await stream.handshake()
+        return stream
+    }
+
+    /// Be the server: handshake with the client at the other end.
+    public static func accept(_ transport: consuming Transport, context: TLSContext) async throws(IOError) -> TLSStream {
+        guard context.configuration.role == .server else {
+            throw IOError(code: IOError.tls.code, message: "accept needs a server context")
+        }
+        let stream = TLSStream(transport: transport, state: try TLSState(context, host: nil))
+        try await stream.handshake()
+        return stream
+    }
+
+    // MARK: - What was agreed
+
+    /// The ALPN protocol chosen, if any.
+    public var applicationProtocol: String? { state.string(cv_tls_alpn) }
+    /// The server name the client asked for (SNI), if any.
+    public var serverName: String? { state.string(cv_tls_server_name) }
+    public var version: TLSConfiguration.Version? { TLSConfiguration.Version(rawValue: UInt16(cv_tls_version(state.tls))) }
+    /// Whether an earlier session was resumed (no full handshake).
+    public var isResumed: Bool { cv_tls_resumed(state.tls) != 0 }
+    /// The peer's certificate as DER, if it sent one.
+    public var peerCertificate: [UInt8]? {
+        let n = Int(cv_tls_peer_certificate(state.tls, nil, 0))
+        guard n > 0 else { return nil }
+        var der = [UInt8](repeating: 0, count: n)
+        _ = cv_tls_peer_certificate(state.tls, &der, Int32(n))
+        return der
+    }
+
+    // MARK: - Data
+
+    /// Read plaintext into `buffer`'s spare capacity: the bytes read, or 0
+    /// once the peer has closed with close_notify (or with a full buffer).
+    public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
+        guard buffer.spareCapacity > 0 else { return 0 }
+        while true {
+            let n = cv_tls_read(state.tls, buffer.spareBytes, buffer.spareCapacity)
+            if n < 0 && n != Int(CV_TLS_WANT_READ) {
+                // An alert may be queued for a peer that's gone: best effort.
+                try? await flush()
+            } else {
+                // Reading can answer the peer (a key update): send that first.
+                try await flush()
+            }
+            switch n {
+            case 0...:
+                buffer.count += n
+                return n
+            case Int(CV_TLS_WANT_READ):
+                try await fill()
+            case Int(CV_TLS_TRUNCATED):
+                throw .tlsTruncated
+            default:
+                throw state.error()
+            }
+        }
+    }
+
+    /// Encrypt and send all of `bytes`.
+    public func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError) {
+        guard let base = bytes.baseAddress else { return }
+        var done = 0
+        // In pieces, so the ciphertext of a large write isn't all in memory.
+        while done < bytes.count {
+            let chunk = min(bytes.count - done, TLSState.chunk)
+            if cv_tls_write(state.tls, base + done, chunk) < 0 { throw state.error() }
+            done += chunk
+            try await flush()
+        }
+    }
+
+    public func write(_ buffer: borrowing IOBuffer) async throws(IOError) {
+        try await write(buffer.withUnsafeBytes { $0 })
+    }
+
+    /// Send close_notify, then give back the transport (to shut down or
+    /// close). The peer's reads then return 0.
+    public consuming func close() async throws(IOError) -> Transport {
+        cv_tls_close(state.tls)
+        try await flush()
+        return transport
+    }
+
+    // MARK: - Moving ciphertext
+
+    private func handshake() async throws(IOError) {
+        while true {
+            let r = cv_tls_handshake(state.tls)
+            try await flush() // our flight, or the alert that ends it
+            switch r {
+            case 1: return
+            case CV_TLS_WANT_READ:
+                if try await !fillDuringHandshake() {
+                    throw IOError(code: IOError.tls.code, message: "handshake: the peer closed the connection")
+                }
+            default:
+                throw state.error()
+            }
+        }
+    }
+
+    /// Send whatever ciphertext is waiting.
+    private func flush() async throws(IOError) {
+        while cv_tls_pending(state.tls) > 0 {
+            state.outbound.clear()
+            state.outbound.count = cv_tls_drain(state.tls, state.outbound.spareBytes, state.outbound.spareCapacity)
+            try await transport.write(state.outbound)
+        }
+    }
+
+    /// Read ciphertext from the transport into the engine; its end, too.
+    private func fill() async throws(IOError) {
+        if try await !fillDuringHandshake() { cv_tls_feed_eof(state.tls) }
+    }
+
+    /// false at the transport's end.
+    private func fillDuringHandshake() async throws(IOError) -> Bool {
+        state.inbound.clear()
+        let n = try await transport.read(into: &state.inbound)
+        guard n > 0 else { return false }
+        let tls = state.tls
+        state.inbound.withUnsafeBytes { cv_tls_feed(tls, $0.baseAddress, $0.count) }
+        return true
+    }
+}
+
+extension TLSStream: AsyncReader, AsyncWriter where Transport: ~Copyable {}
+
+/// One connection's engine and ciphertext buffers. A class so the stream's
+/// non-mutating reads and writes can use the buffers; only one task uses
+/// it at a time.
+final class TLSState: @unchecked Sendable {
+    /// Plaintext per record write: four full records.
+    static let chunk = 64 * 1024
+
+    let tls: OpaquePointer
+    let context: TLSContext // keeps OpenSSL's context alive
+    var inbound = IOBuffer(capacity: 32 * 1024)
+    var outbound = IOBuffer(capacity: 80 * 1024)
+
+    init(_ context: TLSContext, host: String?) throws(IOError) {
+        var raw: OpaquePointer?
+        if let e = TLSContext.call({ err, len in
+            raw = cv_tls_new(context.raw, host, err, len)
+            return raw == nil ? -1 : 0
+        }) {
+            throw e
+        }
+        tls = raw!
+        self.context = context
+    }
+
+    deinit { cv_tls_free(tls) }
+
+    func error() -> IOError {
+        IOError(code: IOError.tls.code, message: String(cString: cv_tls_error(tls)))
+    }
+
+    func string(_ get: (OpaquePointer?, UnsafeMutablePointer<CChar>?, Int32) -> Int32) -> String? {
+        var buf = [CChar](repeating: 0, count: 256)
+        let n = Int(get(tls, &buf, Int32(buf.count)))
+        guard n > 0 else { return nil }
+        return String(decoding: buf.prefix(n).map(UInt8.init(bitPattern:)), as: UTF8.self)
+    }
+}
+
+extension TLSStream: Sendable where Transport: Sendable & ~Copyable {}
+#endif

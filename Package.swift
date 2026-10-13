@@ -13,6 +13,7 @@ let package = Package(
         .library(name: "VegaFS", targets: ["VegaFS"]),
         .library(name: "VegaProcess", targets: ["VegaProcess"]),
         .library(name: "VegaMetrics", targets: ["VegaMetrics"]),
+        .library(name: "VegaTLS", targets: ["VegaTLS"]),
         .library(name: "VegaTest", targets: ["VegaTest"]),
     ],
     targets: [
@@ -29,7 +30,18 @@ let package = Package(
         .target(name: "VegaProcess", dependencies: ["Vega", "VegaIO", "CVega"], swiftSettings: swiftSettings),
         .target(name: "VegaMetrics", dependencies: ["Vega"], swiftSettings: swiftSettings),
         .target(name: "VegaTest", dependencies: ["Vega", "VegaIO", "CVega"], swiftSettings: swiftSettings),
-        .testTarget(name: "VegaTests", dependencies: ["Vega", "VegaIO", "VegaFS", "VegaProcess", "VegaMetrics", "VegaTest", "CVega"], swiftSettings: swiftSettings),
+        // TLS on the system's OpenSSL (3.0+): libssl-dev on Linux, Homebrew's
+        // openssl@3 on macOS; on Windows, an OpenSSL whose include and lib
+        // directories are on INCLUDE and LIB. Only the C target sees its headers.
+        .systemLibrary(name: "COpenSSL", pkgConfig: "openssl",
+                       providers: [.apt(["libssl-dev"]), .brew(["openssl@3"]), .yum(["openssl-devel"])]),
+        .target(name: "CVegaTLS", dependencies: ["COpenSSL"],
+                linkerSettings: [.linkedLibrary("ssl", .when(platforms: [.linux, .macOS])),
+                                 .linkedLibrary("crypto", .when(platforms: [.linux, .macOS])),
+                                 .linkedLibrary("libssl", .when(platforms: [.windows])),
+                                 .linkedLibrary("libcrypto", .when(platforms: [.windows])),
+                                 .linkedLibrary("crypt32", .when(platforms: [.windows]))]),
+        .target(name: "VegaTLS", dependencies: ["Vega", "VegaIO", "CVegaTLS"], swiftSettings: swiftSettings),
     ],
     cLanguageStandard: .gnu11
 )
