@@ -19,6 +19,9 @@ static inline void cv_current_set(void *worker) { cv_current_tls = worker; }
 // ---- clock ---------------------------------------------------------------
 /// CLOCK_MONOTONIC in nanoseconds (same base as Swift's ContinuousClock on Linux).
 uint64_t cv_now_ns(void);
+/// A cheaper monotonic clock, to within a few ms (the scheduler tick):
+/// for metrics. Not comparable with cv_now_ns.
+uint64_t cv_now_coarse_ns(void);
 /// Online CPUs.
 int cv_cpu_count(void);
 

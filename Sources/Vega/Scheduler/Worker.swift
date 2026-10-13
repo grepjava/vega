@@ -129,15 +129,17 @@ final class Worker: @unchecked Sendable {
         }
     }
 
-    /// Park, counting it and the busy stretch it ends.
+    /// Park, counting it and the busy stretch it ends. On the coarse clock:
+    /// busy time is read over seconds, and a precise clock read on each
+    /// side of every park showed in ping-pong.
     @inline(__always) private func parkCounted(_ s: Scheduler) {
-        let start = cv_now_ns()
+        let start = cv_now_coarse_ns()
         let since = activeSince.load(ordering: .relaxed)
         if since != 0 { busyNanos.store(busyNanos.load(ordering: .relaxed) &+ (start &- since), ordering: .relaxed) }
         activeSince.store(0, ordering: .relaxed)
         parks.store(parks.load(ordering: .relaxed) &+ 1, ordering: .relaxed)
         park(s)
-        activeSince.store(cv_now_ns(), ordering: .relaxed)
+        activeSince.store(cv_now_coarse_ns(), ordering: .relaxed)
     }
 
     /// The worker running on this thread, unretained.
@@ -256,7 +258,7 @@ final class Worker: @unchecked Sendable {
             precondition(e == 0, "vega: cannot enable io_uring (errno \(e))")
         }
         #endif
-        activeSince.store(cv_now_ns(), ordering: .relaxed)
+        activeSince.store(cv_now_coarse_ns(), ordering: .relaxed)
         while !s.isShutdown.load(ordering: .relaxed) {
             if let job = nextJob(s) ?? ringJob() ?? steal(s) {
                 runJob(job, s, executor)
@@ -277,7 +279,7 @@ final class Worker: @unchecked Sendable {
         cv_current_set(Unmanaged.passUnretained(self).toOpaque())
         let s = scheduler.unsafelyUnwrapped
         let executor = s.asUnownedTaskExecutor()
-        activeSince.store(cv_now_ns(), ordering: .relaxed)
+        activeSince.store(cv_now_coarse_ns(), ordering: .relaxed)
         while !s.isShutdown.load(ordering: .relaxed) && !driveDone.load(ordering: .acquiring) {
             if let job = nextJob(s) ?? steal(s) {
                 runJob(job, s, executor)
@@ -287,7 +289,7 @@ final class Worker: @unchecked Sendable {
         }
         // Out of `block`: not busy, as far as metrics go.
         let since = activeSince.load(ordering: .relaxed)
-        busyNanos.store(busyNanos.load(ordering: .relaxed) &+ (cv_now_ns() &- since), ordering: .relaxed)
+        busyNanos.store(busyNanos.load(ordering: .relaxed) &+ (cv_now_coarse_ns() &- since), ordering: .relaxed)
         activeSince.store(0, ordering: .relaxed)
         driveDone.store(false, ordering: .relaxed)
         cv_current_set(nil)

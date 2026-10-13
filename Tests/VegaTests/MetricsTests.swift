@@ -14,6 +14,7 @@ import Darwin
         let before = rt.metrics
         try rt.block { () async throws in
             for _ in 0..<200 { await Runtime.yield() }
+            usleep(20_000)          // busy past the coarse clock's tick
             try await Runtime.sleep(for: .milliseconds(20))
         }
         let m = rt.metrics

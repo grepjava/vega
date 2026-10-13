@@ -210,11 +210,11 @@ public final class Runtime: Sendable {
     /// to sample every second; counters are read without stopping the
     /// workers, so they're consistent only to within a few jobs.
     public var metrics: RuntimeMetrics {
-        let now = cv_now_ns()
+        let now = cv_now_ns(), coarse = cv_now_coarse_ns()
         let timing = scheduler.pollTiming.load(ordering: .relaxed)
         let workers = scheduler.workers.map { w -> RuntimeMetrics.Worker in
             let since = w.activeSince.load(ordering: .relaxed)
-            let busy = w.busyNanos.load(ordering: .relaxed) &+ (since != 0 && now > since ? now - since : 0)
+            let busy = w.busyNanos.load(ordering: .relaxed) &+ (since != 0 && coarse > since ? coarse - since : 0)
             var histogram: [UInt64] = []
             if timing || w.longestPoll.load(ordering: .relaxed) > 0 {
                 histogram = (0..<Worker.pollBuckets).map { (w.pollHistogram + $0).pointee.load(ordering: .relaxed) }
