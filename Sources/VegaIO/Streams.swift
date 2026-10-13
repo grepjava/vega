@@ -28,6 +28,8 @@ extension TCPStream: AsyncReader, AsyncWriter {}
 extension UnixStream: AsyncReader, AsyncWriter {}
 extension ReadHalf: AsyncReader {}
 extension WriteHalf: AsyncWriter {}
+extension PipeReader: AsyncReader {}
+extension PipeWriter: AsyncWriter {}
 #endif
 
 /// Read until `buffer` holds `n` bytes or the stream ends; returns the bytes

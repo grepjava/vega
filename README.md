@@ -4,7 +4,7 @@ A high-speed I/O engine for Swift, meant to fully replace SwiftNIO. It provides 
 
 Vega aims for feature parity with Tokio and SwiftNIO. It can be swapped in for SwiftNIO through the `VegaNIO` package, and it will become the engine under [Garuda](https://github.com/grepjava/garuda), succeeding [aviancore](https://github.com/grepjava/aviancore).
 
-**Status:** pre-alpha. v0.1 is feature-complete: the work-stealing and current-thread runtimes, the blocking pool, timers and paused time, io_uring (the Linux default), epoll and kqueue drivers, TCP/UDP/Unix sockets, and the sync primitives. v0.2 is in progress (VegaIO codecs and framing, Happy Eyeballs, an async DNS resolver, in-memory test streams, server and client bootstraps, VegaFS file I/O). See [docs/PLAN.md](docs/PLAN.md) for the design, the parity matrix and the milestones, and [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for measurements against SwiftNIO and Tokio.
+**Status:** pre-alpha. v0.1 is feature-complete: the work-stealing and current-thread runtimes, the blocking pool, timers and paused time, io_uring (the Linux default), epoll and kqueue drivers, TCP/UDP/Unix sockets, and the sync primitives. v0.2 is in progress (VegaIO codecs and framing, Happy Eyeballs, an async DNS resolver, in-memory test streams, server and client bootstraps, VegaFS file I/O, VegaProcess child processes and pipes). See [docs/PLAN.md](docs/PLAN.md) for the design, the parity matrix and the milestones, and [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for measurements against SwiftNIO and Tokio.
 
 ## Layout
 
@@ -13,6 +13,7 @@ Vega aims for feature parity with Tokio and SwiftNIO. It can be swapped in for S
 | `Sources/Vega` | runtime, scheduler, I/O drivers, sockets, DNS resolver, timers, sync primitives |
 | `Sources/VegaIO` | stream protocols, `Framed`, codecs (length-delimited, lines, bytes) |
 | `Sources/VegaFS` | files and paths: `File` (io_uring-native reads, writes, syncs and opens; the blocking pool elsewhere), `FileSystem` |
+| `Sources/VegaProcess` | child processes: `Command`, `Child` (exit watched through a pidfd on Linux), `Output`; pipes (`makePipe()`) live in Vega |
 | `Sources/VegaTest` | test support: `MockClock` (paused time), `duplex()` (in-memory byte streams) |
 | `Sources/CVega` | C shim: parking, threads, the epoll/kqueue/io_uring drivers, sockets |
 | `Tests/VegaTests` | swift-testing suite |

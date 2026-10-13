@@ -220,6 +220,35 @@ long cv_read_small_file(const char *path, void *buf, long max);
 /// Copy everything from in's position to out's: the bytes copied, or
 /// -errno. Uses copy_file_range on Linux where it can.
 long long cv_copy_fd(int in, int out);
+
+/// pipe(2) with both ends close-on-exec. 0 or an errno value.
+int cv_pipe(int fds[2]);
+/// Make a pipe end the parent keeps non-blocking and close-on-exec (and,
+/// on Darwin, free of SIGPIPE). 0 or an errno value.
+int cv_pipe_prepare(int fd);
+/// read(2): bytes, or -errno.
+long cv_fd_read(int fd, void *buf, long len);
+/// write(2) to a pipe without SIGPIPE: bytes, or -errno (-EPIPE once the
+/// reader is gone).
+long cv_pipe_write(int fd, const void *buf, long len);
+
+#define CV_STDIO_INHERIT (-1)
+#define CV_STDIO_NULL (-2)
+/// posix_spawn `path`. stdio[i] is an fd to give the child as fd i,
+/// CV_STDIO_INHERIT or CV_STDIO_NULL. cwd may be NULL; pgroup < 0 keeps the
+/// parent's process group. The child's signal mask is cleared and SIGPIPE
+/// reset. 0 (with *pid) or an errno value.
+int cv_spawn(const char *path, char *const argv[], char *const envp[], const char *cwd,
+             const int stdio[3], int pgroup, int *pid);
+/// The process environment.
+char **cv_environ(void);
+/// pidfd_open(2) (Linux 5.3+): the fd, or -errno (-ENOSYS elsewhere).
+int cv_pidfd_open(int pid);
+/// pidfd_send_signal(2): 0 or an errno value.
+int cv_pidfd_signal(int pidfd, int sig);
+/// waitpid, retrying EINTR: 1 reaped (*status set), 0 still running
+/// (nohang), or -errno.
+int cv_waitpid(int pid, int nohang, int *status);
 /// getsockname / getpeername. 0 or an errno value.
 int cv_local_address(int fd, cv_sockaddr *out);
 int cv_peer_address(int fd, cv_sockaddr *out);

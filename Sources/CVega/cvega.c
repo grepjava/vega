@@ -19,9 +19,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+#include <spawn.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -841,6 +844,145 @@ long long cv_copy_fd(int in, int out) {
     }
     free(buf);
     return total;
+}
+
+// MARK: - Pipes and processes
+
+int cv_pipe(int fds[2]) {
+#if defined(__linux__)
+    if (pipe2(fds, O_CLOEXEC) != 0) return errno;
+#else
+    if (pipe(fds) != 0) return errno;
+    for (int i = 0; i < 2; i++) {
+        if (fcntl(fds[i], F_SETFD, FD_CLOEXEC) != 0) {
+            int e = errno;
+            close(fds[0]);
+            close(fds[1]);
+            return e;
+        }
+    }
+#endif
+    return 0;
+}
+
+int cv_pipe_prepare(int fd) {
+    int fl = fcntl(fd, F_GETFL);
+    if (fl < 0 || fcntl(fd, F_SETFL, fl | O_NONBLOCK) != 0) return errno;
+    int fdfl = fcntl(fd, F_GETFD);
+    if (fdfl < 0 || fcntl(fd, F_SETFD, fdfl | FD_CLOEXEC) != 0) return errno;
+#ifdef F_SETNOSIGPIPE
+    (void)fcntl(fd, F_SETNOSIGPIPE, 1); // a pipe end; harmless to fail on others
+#endif
+    return 0;
+}
+
+long cv_fd_read(int fd, void *buf, long len) {
+    ssize_t n = read(fd, buf, (size_t)len);
+    return n >= 0 ? (long)n : -(long)errno;
+}
+
+long cv_pipe_write(int fd, const void *buf, long len) {
+#if defined(F_SETNOSIGPIPE)
+    ssize_t n = write(fd, buf, (size_t)len);
+    return n >= 0 ? (long)n : -(long)errno;
+#else
+    // No per-fd switch: block SIGPIPE on this thread for the write, and
+    // swallow the one a closed reader raises (it is thread-directed).
+    sigset_t pipe_set, old, pending;
+    sigemptyset(&pipe_set);
+    sigaddset(&pipe_set, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &pipe_set, &old);
+    int was_pending = sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE);
+    ssize_t n = write(fd, buf, (size_t)len);
+    int err = errno;
+    if (n < 0 && err == EPIPE && !was_pending) {
+        struct timespec zero = {0, 0};
+        while (sigtimedwait(&pipe_set, NULL, &zero) < 0 && errno == EINTR) {}
+    }
+    if (!sigismember(&old, SIGPIPE)) pthread_sigmask(SIG_SETMASK, &old, NULL);
+    return n >= 0 ? (long)n : -(long)err;
+#endif
+}
+
+int cv_spawn(const char *path, char *const argv[], char *const envp[], const char *cwd,
+             const int stdio[3], int pgroup, int *pid) {
+    posix_spawn_file_actions_t fa;
+    posix_spawnattr_t attr;
+    int rc = posix_spawn_file_actions_init(&fa);
+    if (rc != 0) return rc;
+    rc = posix_spawnattr_init(&attr);
+    if (rc != 0) {
+        posix_spawn_file_actions_destroy(&fa);
+        return rc;
+    }
+    for (int i = 0; i < 3 && rc == 0; i++) {
+        if (stdio[i] == CV_STDIO_NULL)
+            rc = posix_spawn_file_actions_addopen(&fa, i, "/dev/null", i == 0 ? O_RDONLY : O_WRONLY, 0);
+        else if (stdio[i] >= 0)
+            rc = posix_spawn_file_actions_adddup2(&fa, stdio[i], i);
+    }
+    if (rc == 0 && cwd) rc = posix_spawn_file_actions_addchdir_np(&fa, cwd);
+    // The child starts with no signals blocked (a worker thread may block
+    // some) and SIGPIPE at its default.
+    sigset_t none, def;
+    sigemptyset(&none);
+    sigemptyset(&def);
+    sigaddset(&def, SIGPIPE);
+    short flags = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF;
+    if (rc == 0) rc = posix_spawnattr_setsigmask(&attr, &none);
+    if (rc == 0) rc = posix_spawnattr_setsigdefault(&attr, &def);
+    if (rc == 0 && pgroup >= 0) {
+        flags |= POSIX_SPAWN_SETPGROUP;
+        rc = posix_spawnattr_setpgroup(&attr, pgroup);
+    }
+    if (rc == 0) rc = posix_spawnattr_setflags(&attr, flags);
+    if (rc == 0) {
+        pid_t child = 0;
+        rc = posix_spawn(&child, path, &fa, &attr, argv, envp);
+        if (rc == 0) *pid = child;
+    }
+    posix_spawnattr_destroy(&attr);
+    posix_spawn_file_actions_destroy(&fa);
+    return rc;
+}
+
+char **cv_environ(void) {
+#if defined(__APPLE__)
+    extern char ***_NSGetEnviron(void);
+    return *_NSGetEnviron();
+#else
+    extern char **environ;
+    return environ;
+#endif
+}
+
+int cv_pidfd_open(int pid) {
+#if defined(__linux__) && defined(SYS_pidfd_open)
+    long fd = syscall(SYS_pidfd_open, pid, 0);
+    return fd >= 0 ? (int)fd : -errno;
+#else
+    (void)pid;
+    return -ENOSYS;
+#endif
+}
+
+int cv_pidfd_signal(int pidfd, int sig) {
+#if defined(__linux__) && defined(SYS_pidfd_send_signal)
+    return syscall(SYS_pidfd_send_signal, pidfd, sig, NULL, 0) == 0 ? 0 : errno;
+#else
+    (void)pidfd;
+    (void)sig;
+    return ENOSYS;
+#endif
+}
+
+int cv_waitpid(int pid, int nohang, int *status) {
+    for (;;) {
+        int r = waitpid(pid, status, nohang ? WNOHANG : 0);
+        if (r > 0) return 1;
+        if (r == 0) return 0;
+        if (errno != EINTR) return -errno;
+    }
 }
 
 int cv_sockaddr_port(const cv_sockaddr *a) {

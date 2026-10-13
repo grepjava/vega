@@ -1,0 +1,133 @@
+#if os(Linux) || canImport(Darwin)
+import CVega
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
+
+/// The read end of a pipe (or a FIFO, or a terminal): Tokio's
+/// `pipe::Receiver`. A child process's stdout and stderr are these.
+public struct PipeReader: ~Copyable, Sendable {
+    let reg: IORegistration
+
+    /// Take ownership of `descriptor`, making it non-blocking. Call from a
+    /// task on a Vega runtime.
+    public init(adopting descriptor: Int32) throws(IOError) {
+        let driver = try IODriver.current()
+        let e = cv_pipe_prepare(descriptor)
+        if e != 0 {
+            closeDescriptor(descriptor)
+            throw IOError(code: e)
+        }
+        reg = try IORegistration(fd: descriptor, driver: driver)
+    }
+
+    deinit { reg.close() }
+
+    /// The file descriptor, still owned by this value.
+    public var descriptor: Int32 { reg.fd }
+
+    /// Read into `buffer`'s spare capacity. Returns the bytes read: 0 once
+    /// every writer has closed (or with a full buffer).
+    public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
+        guard buffer.spareCapacity > 0 else { return 0 }
+        let fd = reg.fd
+        let n = try await reg.perform(CV_IO_READ) {
+            cv_fd_read(fd, buffer.base + buffer.count, buffer.spareCapacity)
+        }
+        buffer.count += n
+        return n
+    }
+}
+
+/// The write end of a pipe: Tokio's `pipe::Sender`. A child process's
+/// stdin is one. Writing after the reader has gone throws `.brokenPipe`
+/// (never SIGPIPE).
+public struct PipeWriter: ~Copyable, Sendable {
+    let reg: IORegistration
+
+    /// Take ownership of `descriptor`, making it non-blocking. Call from a
+    /// task on a Vega runtime.
+    public init(adopting descriptor: Int32) throws(IOError) {
+        let driver = try IODriver.current()
+        let e = cv_pipe_prepare(descriptor)
+        if e != 0 {
+            closeDescriptor(descriptor)
+            throw IOError(code: e)
+        }
+        reg = try IORegistration(fd: descriptor, driver: driver)
+    }
+
+    deinit { reg.close() }
+
+    /// The file descriptor, still owned by this value.
+    public var descriptor: Int32 { reg.fd }
+
+    /// Write all of `bytes`. They must stay valid until this returns.
+    public func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError) {
+        guard let base = bytes.baseAddress else { return }
+        let fd = reg.fd
+        var done = 0
+        while done < bytes.count {
+            done += try await reg.perform(CV_IO_WRITE) {
+                cv_pipe_write(fd, base + done, bytes.count - done)
+            }
+        }
+    }
+
+    /// Write all of `buffer`'s readable bytes.
+    public func write(_ buffer: borrowing IOBuffer) async throws(IOError) {
+        try await write(UnsafeRawBufferPointer(start: buffer.base, count: buffer.count))
+    }
+
+    /// Close the pipe: the reader sees end of stream once it has the rest.
+    public consuming func close() {}
+}
+
+/// A connected pipe (Swift has no tuples of `~Copyable` values).
+@frozen
+public struct PipePair: ~Copyable, Sendable {
+    public var reader: PipeReader
+    public var writer: PipeWriter
+}
+
+/// A new pipe, between tasks or to hand one end to a child process. Call
+/// from a task on a Vega runtime.
+public func makePipe() throws(IOError) -> PipePair {
+    var fds: (Int32, Int32) = (-1, -1)
+    let e = withUnsafeMutablePointer(to: &fds) {
+        $0.withMemoryRebound(to: Int32.self, capacity: 2) { cv_pipe($0) }
+    }
+    guard e == 0 else { throw IOError(code: e) }
+    let reader: PipeReader
+    do {
+        reader = try PipeReader(adopting: fds.0)
+    } catch {
+        closeDescriptor(fds.1)
+        throw error
+    }
+    return PipePair(reader: reader, writer: try PipeWriter(adopting: fds.1))
+}
+
+/// An fd whose readability a task can wait for, for VegaProcess's pidfds.
+/// Owns and closes the fd.
+package struct ReadinessWatch: ~Copyable, Sendable {
+    let reg: IORegistration
+
+    /// Off a Vega runtime: `IOError.notOnRuntime`, and the fd is not taken.
+    package init(adopting fd: Int32) throws(IOError) {
+        let driver = try IODriver.current()
+        reg = try IORegistration(fd: fd, driver: driver)
+    }
+
+    deinit { reg.close() }
+
+    package var descriptor: Int32 { reg.fd }
+
+    /// Wait until the fd reports readable (or an error or hang-up).
+    package func readable() async throws(IOError) {
+        try await reg.wait(CV_IO_READ)
+    }
+}
+#endif
