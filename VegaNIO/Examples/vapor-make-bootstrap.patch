@@ -1,0 +1,45 @@
+diff --git a/Sources/Vapor/HTTP/Server/HTTPServer.swift b/Sources/Vapor/HTTP/Server/HTTPServer.swift
+index 603385e..92810f3 100644
+--- a/Sources/Vapor/HTTP/Server/HTTPServer.swift
++++ b/Sources/Vapor/HTTP/Server/HTTPServer.swift
+@@ -140,6 +140,11 @@ public final class HTTPServer: Server, Sendable {
+         /// idle-pool timeout to avoid the upstream reusing a connection the server has already closed.
+         public var idleTimeout: TimeAmount?
+ 
++        /// Makes the bootstrap the server listens with, for an event loop
++        /// group that NIOPosix's `ServerBootstrap` doesn't take. nil, or
++        /// returning nil, uses `ServerBootstrap`.
++        public var makeBootstrap: (@Sendable (any EventLoopGroup) -> (any HTTPServerBootstrap)?)? = nil
++
+         public init(
+             hostname: String = Self.defaultHostname,
+             port: Int = Self.defaultPort,
+@@ -517,7 +522,8 @@ private final class HTTPServerConnection: Sendable {
+         on eventLoopGroup: EventLoopGroup
+     ) -> EventLoopFuture<HTTPServerConnection> {
+         let quiesce = ServerQuiescingHelper(group: eventLoopGroup)
+-        let bootstrap = ServerBootstrap(group: eventLoopGroup)
++        let base: any HTTPServerBootstrap = configuration.makeBootstrap?(eventLoopGroup) ?? ServerBootstrap(group: eventLoopGroup)
++        let bootstrap = base
+             /// Specify accepts per loop and backlog, and enable `SO_REUSEADDR` for the server itself.
+             .serverChannelOption(ChannelOptions.maxMessagesPerRead, value: configuration.connectionsPerServerTick)
+             .serverChannelOption(ChannelOptions.backlog, value: Int32(configuration.backlog))
+@@ -845,3 +851,18 @@ extension HTTPServer.Configuration.ResponseCompressionConfiguration {
+         }
+     }
+ }
++
++
++/// What `HTTPServer` needs of a server bootstrap. NIOPosix's
++/// `ServerBootstrap` conforms; conform another transport's and return it
++/// from ``HTTPServer/Configuration/makeBootstrap`` to serve on that transport.
++public protocol HTTPServerBootstrap {
++    func serverChannelOption<Option: ChannelOption>(_ option: Option, value: Option.Value) -> Self
++    func childChannelOption<Option: ChannelOption>(_ option: Option, value: Option.Value) -> Self
++    func serverChannelInitializer(_ initializer: @escaping @Sendable (any Channel) -> EventLoopFuture<Void>) -> Self
++    func childChannelInitializer(_ initializer: @escaping @Sendable (any Channel) -> EventLoopFuture<Void>) -> Self
++    func bind(host: String, port: Int) -> EventLoopFuture<any Channel>
++    func bind(unixDomainSocketPath: String) -> EventLoopFuture<any Channel>
++}
++
++extension ServerBootstrap: HTTPServerBootstrap {}

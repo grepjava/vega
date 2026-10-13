@@ -37,7 +37,7 @@ let server = try await VegaServerBootstrap(group: group)
 
 - Only TCP so far. UDP (`DatagramBootstrap`), Unix domain sockets and `NIOPipeBootstrap` are still to come.
 - Writing a `FileRegion` fails with `ChannelError.operationUnsupported`.
-- Libraries that build `NIOPosix.ServerBootstrap` or `ClientBootstrap` themselves need a way to accept a different bootstrap, as they already do for NIOTransportServices.
+- Libraries that build `NIOPosix.ServerBootstrap` or `ClientBootstrap` themselves need a way to accept a different bootstrap, as they already do for NIOTransportServices. Hummingbird 2 and Vapor 4 each need a small patch for this; see [HUMMINGBIRD2.md](../docs/HUMMINGBIRD2.md) and [VAPOR.md](../docs/VAPOR.md), with working examples in `Examples/`.
 - Linux and macOS. NIO's Windows support is partial, so Windows is not covered yet.
 
 ## Testing

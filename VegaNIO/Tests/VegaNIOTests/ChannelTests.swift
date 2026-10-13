@@ -324,3 +324,18 @@ private final class Collector: ChannelInboundHandler, @unchecked Sendable {
         #expect(!client.isActive)
     }
 }
+
+@Suite struct AddressTests {
+    @Test func hostIsKept() throws {
+        let group = VegaEventLoopGroup(loops: 1)
+        defer { try? group.syncShutdownGracefully() }
+        let server = try VegaServerBootstrap(group: group).bind(host: "127.0.0.1", port: 0).wait()
+        #expect(server.localAddress?.ipAddress == "127.0.0.1")
+        guard case .v4(let a) = server.localAddress else {
+            Issue.record("not IPv4")
+            return
+        }
+        #expect(a.host == "127.0.0.1")
+        try server.close().wait()
+    }
+}

@@ -70,6 +70,11 @@ public final class VegaServerBootstrap {
         return bind(to: address)
     }
 
+    /// Not yet: fails with `ChannelError.operationUnsupported`.
+    public func bind(unixDomainSocketPath: String) -> EventLoopFuture<Channel> {
+        group.next().makeFailedFuture(ChannelError.operationUnsupported)
+    }
+
     public func bind(to address: SocketAddress) -> EventLoopFuture<Channel> {
         let loop = group.next() as! VegaEventLoop
         let serverChannel = VegaServerSocketChannel(loop: loop, childGroup: childGroup)

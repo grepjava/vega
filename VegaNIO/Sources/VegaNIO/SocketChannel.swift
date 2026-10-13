@@ -674,6 +674,12 @@ extension VegaAddress {
 
 extension NIOCore.SocketAddress {
     init(_ address: VegaAddress) throws {
-        try self.init(ipAddress: address.host, port: address.port ?? 0)
+        let host = address.host
+        // Keep the text form as the host, as NIOPosix's addresses do.
+        switch try NIOCore.SocketAddress(ipAddress: host, port: address.port ?? 0) {
+        case .v4(let a): self.init(a.address, host: host)
+        case .v6(let a): self.init(a.address, host: host)
+        case let other: self = other
+        }
     }
 }
