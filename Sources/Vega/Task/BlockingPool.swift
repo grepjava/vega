@@ -155,7 +155,14 @@ extension Runtime {
                 c.resume(returning: r)
                 // Only once the resume has made the caller runnable: paused
                 // time must see one or the other, or it could jump ahead.
-                scheduler?.blockingInFlight.subtract(1, ordering: .sequentiallyConsistent)
+                if let scheduler,
+                   scheduler.blockingInFlight.subtract(1, ordering: .sequentiallyConsistent).oldValue == 1,
+                   scheduler.clock.isPaused {
+                    // The workers may all have parked while this job was
+                    // out, the timer owner seeing it and declining to
+                    // advance: have it look again.
+                    scheduler.clockAdvanced()
+                }
             }
         }
         // A quick job can resume us before we suspend; see cv_tsan_acquire.
