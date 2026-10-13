@@ -313,7 +313,7 @@ UDP echo, datagrams per second:
   - Vega is 1.6–1.8× faster on hand-offs (ping-pong, mpsc ping-pong, chained spawn), 2.5–2.9× on the semaphore and 4× on `yield_vega`.
   - It is level on `spawn_many`, `pool_spawn` and `mpsc_fan_in`.
   - It is slower on `spawn_discard` (0.6–0.7×) and `sleep_many` (0.5–0.6×). `sleep_many` is the bench that spin 0 slowed down in the spin analysis above (2,585 ns at 50 µs).
-- **Against Tokio:** Vega is 1.3× slower on the semaphore, 2.8× on fan-in, 3.6–4.6× on spawning and ping-pong, 6.4× on `yield_many` (2.2× with `Runtime.yield`) and 9× on mpsc ping-pong. Most of that is the Swift task and continuation machinery, as on the box. These gaps are wider than the box's, and the box remains the reference.
+- **Against Tokio:** Vega is 1.3× slower on the semaphore, 2.8× on fan-in, 3.6–4.6× on spawning and ping-pong, 6.4× on `yield_many` (2.2× with `Runtime.yield`) and 9× on mpsc ping-pong. Most of that is the Swift task and continuation machinery. On the box, Vega beats Tokio on ping-pong and the semaphore and is 2× behind on mpsc ping-pong, but there it runs on the patched Swift runtime (the Option 2 and Round 3 sections); macOS runs Apple's stock runtime. `spawn_many` is about 3.5× behind on both.
 
 ## Sync primitives (2026-10-12)
 
