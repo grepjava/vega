@@ -4,14 +4,16 @@ A high-speed I/O engine for Swift, meant to fully replace SwiftNIO. It provides 
 
 Vega aims for feature parity with Tokio and SwiftNIO. It can be swapped in for SwiftNIO through the `VegaNIO` package, and it will become the engine under [Garuda](https://github.com/grepjava/garuda), succeeding [aviancore](https://github.com/grepjava/aviancore).
 
-**Status:** pre-alpha. Phase 0 spikes are done, and Phase 1 (the scheduler) is in progress. See [docs/PLAN.md](docs/PLAN.md) for the design, the parity matrix and the milestones.
+**Status:** pre-alpha. v0.1 is feature-complete: the work-stealing and current-thread runtimes, the blocking pool, timers and paused time, io_uring (the Linux default), epoll and kqueue drivers, TCP/UDP/Unix sockets, and the sync primitives. v0.2 is in progress (VegaIO codecs and framing, Happy Eyeballs). See [docs/PLAN.md](docs/PLAN.md) for the design, the parity matrix and the milestones, and [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for measurements against SwiftNIO and Tokio.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `Sources/Vega` | runtime and scheduler (Phase 1) |
-| `Sources/CVega` | C shim: futex parking, threads, thread-local, clock |
+| `Sources/Vega` | runtime, scheduler, I/O drivers, sockets, timers, sync primitives |
+| `Sources/VegaIO` | stream protocols, `Framed`, codecs (length-delimited, lines, bytes) |
+| `Sources/VegaTest` | test support: `MockClock` (paused time) |
+| `Sources/CVega` | C shim: parking, threads, the epoll/kqueue/io_uring drivers, sockets |
 | `Tests/VegaTests` | swift-testing suite |
 | `Benchmarks/` | separate package, so Vega itself keeps zero dependencies |
 | `Spikes/executor` | Phase 0: which Swift 6.3 executor hooks reach a custom executor |

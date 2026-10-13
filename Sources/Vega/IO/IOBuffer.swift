@@ -1,5 +1,6 @@
-/// A fixed-capacity byte buffer with one owner: no reference counting, no
-/// copy-on-write. Bytes `0..<count` are readable; reads append after them.
+/// A byte buffer with one owner: no reference counting, no copy-on-write.
+/// Bytes `0..<count` are readable; reads append after them. The capacity is
+/// fixed unless you call `reserveCapacity(_:)`.
 ///
 /// ```swift
 /// var buf = IOBuffer(capacity: 4096)
@@ -9,8 +10,8 @@
 /// }
 /// ```
 public struct IOBuffer: ~Copyable, @unchecked Sendable {
-    @usableFromInline let base: UnsafeMutableRawPointer
-    public let capacity: Int
+    @usableFromInline private(set) var base: UnsafeMutableRawPointer
+    public private(set) var capacity: Int
     /// Readable bytes, at the start of the buffer.
     public var count: Int
 
@@ -22,6 +23,17 @@ public struct IOBuffer: ~Copyable, @unchecked Sendable {
     }
 
     deinit { base.deallocate() }
+
+    /// Make room for at least `capacity` bytes in all, keeping the readable
+    /// ones. Moves the storage, so pointers into it from before are invalid.
+    public mutating func reserveCapacity(_ capacity: Int) {
+        guard capacity > self.capacity else { return }
+        let bigger = UnsafeMutableRawPointer.allocate(byteCount: capacity, alignment: 16)
+        if count > 0 { bigger.copyMemory(from: base, byteCount: count) }
+        base.deallocate()
+        base = bigger
+        self.capacity = capacity
+    }
 
     /// Room left after the readable bytes.
     @inlinable public var spareCapacity: Int { capacity - count }
