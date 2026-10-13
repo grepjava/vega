@@ -72,6 +72,9 @@ final class Worker: @unchecked Sendable {
     /// Jobs this worker has run, stolen. Only this worker writes them (plain
     /// load + store, no locked add); metrics read them racily.
     let jobsRun = Atomic<UInt64>(0)
+    /// Current-thread runtimes: set when `drive`'s caller has what it waited
+    /// for, so the loop returns (from `park` too) instead of sleeping on.
+    let driveDone = Atomic<Bool>(false)
     let steals = Atomic<UInt64>(0)
 
     init(index: Int) {
@@ -214,6 +217,23 @@ final class Worker: @unchecked Sendable {
         Unmanaged.passUnretained(s).release() // the retain Scheduler.init took for this thread
     }
 
+    /// A current-thread runtime's loop, run by the thread in `Runtime.block`
+    /// until `driveDone` is set (then cleared again for the next call).
+    func drive() {
+        cv_current_set(Unmanaged.passUnretained(self).toOpaque())
+        let s = scheduler.unsafelyUnwrapped
+        let executor = s.asUnownedTaskExecutor()
+        while !s.isShutdown.load(ordering: .relaxed) && !driveDone.load(ordering: .acquiring) {
+            if let job = nextJob(s) ?? steal(s) {
+                runJob(job, s, executor)
+            } else {
+                park(s)
+            }
+        }
+        driveDone.store(false, ordering: .relaxed)
+        cv_current_set(nil)
+    }
+
     @inline(__always) private func runJob(_ job: UnownedJob, _ s: Scheduler, _ executor: UnownedTaskExecutor) {
         if isSearching {
             isSearching = false
@@ -332,7 +352,7 @@ final class Worker: @unchecked Sendable {
         // Paused time: the last round polled I/O and found nothing to do.
         var idleChecked = false
         while !s.isShutdown.load(ordering: .relaxed) {
-            if lifo != nil {
+            if lifo != nil || driveDone.load(ordering: .acquiring) {
                 // Never sleep on a runnable job of our own.
                 reclaim(s)
                 return

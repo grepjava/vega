@@ -34,6 +34,9 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     #endif
     /// Whether each worker has an io_uring (the uring driver).
     let usesRings: Bool
+    /// A current-thread runtime: one worker and no thread of its own; the
+    /// thread in `Runtime.block` runs its loop.
+    let isCurrentThread: Bool
     /// Open sockets under the uring driver (C atomics; for tests).
     let socketCount = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
     let isShutdown = Atomic<Bool>(false)
@@ -51,10 +54,15 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     /// `Runtime.blocking` jobs running or queued: paused time must not jump
     /// past what one of them is about to do.
     let blockingInFlight = Atomic<Int>(0)
+    /// A current-thread runtime: a thread is inside `block`.
+    let driving = Atomic<Bool>(false)
 
     init(workers count: Int, name: String, pin: Bool, io: IOBackend = .automatic,
+         currentThread: Bool = false,
          blockingThreads: Int = 512, blockingKeepAlive: Duration = .seconds(10)) {
         precondition(count >= 1, "a runtime needs at least one worker")
+        precondition(!currentThread || count == 1, "a current-thread runtime has one worker")
+        isCurrentThread = currentThread
         socketCount.initialize(to: 0)
         idle = Idle(workers: count)
         workerCount = count
@@ -67,7 +75,9 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
         // All workers get a ring or none does: without one, fall back to
         // epoll (ring memory counts against RLIMIT_MEMLOCK, and closed rings
         // are torn down asynchronously, so runtime churn can run out).
-        var rings = URing.wanted(io) && URing.supported
+        // A ring takes submissions from one thread only, and a current-thread
+        // runtime is driven by whichever thread calls block.
+        var rings = !currentThread && URing.wanted(io) && URing.supported
         if rings {
             for w in workers {
                 w.ring = cv_uring_new(w.parker)
@@ -105,7 +115,7 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
         }
 
         let cpus = Int(cv_cpu_count())
-        for w in workers {
+        for w in workers where !currentThread {
             _ = Unmanaged.passRetained(self) // released by the thread when it exits
             let arg = Unmanaged.passRetained(w).toOpaque()
             let rc = cv_thread_spawn({ raw in

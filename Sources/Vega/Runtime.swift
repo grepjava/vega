@@ -37,6 +37,28 @@ public final class Runtime: Sendable {
                               blockingKeepAlive: blockingKeepAlive)
     }
 
+    /// A runtime with no threads of its own (Tokio's `current_thread`): its
+    /// tasks run only while some thread is inside ``block(_:)``, on that
+    /// thread. For tests, clients and command-line tools that want
+    /// everything on one thread; spawned tasks wait for the next `block`.
+    ///
+    /// One `block` at a time. It uses the readiness driver (epoll, kqueue):
+    /// an io_uring takes submissions from a single thread, and `block` may
+    /// be called from different ones.
+    public static func currentThread(name: String = "vega",
+                                     blockingThreads: Int = 512,
+                                     blockingKeepAlive: Duration = .seconds(10)) -> Runtime {
+        Runtime(scheduler: Scheduler(workers: 1, name: name, pin: false, io: .readiness, currentThread: true,
+                                     blockingThreads: blockingThreads, blockingKeepAlive: blockingKeepAlive))
+    }
+
+    init(scheduler: Scheduler) {
+        self.scheduler = scheduler
+    }
+
+    /// Whether this is a ``currentThread(name:blockingThreads:blockingKeepAlive:)`` runtime.
+    public var isCurrentThread: Bool { scheduler.isCurrentThread }
+
     /// The I/O driver running: `.ioUring` or `.readiness`.
     public var ioBackend: IOBackend { scheduler.usesRings ? .ioUring : .readiness }
 
@@ -83,6 +105,7 @@ public final class Runtime: Sendable {
         _ operation: sending @escaping () async throws(E) -> T
     ) throws(E) -> T {
         precondition(Worker.current == nil, "Runtime.block called on a Vega worker thread")
+        if scheduler.isCurrentThread { return try blockDriving(operation) }
         let waiter = BlockWaiter<T, E>()
         Task(executorPreference: scheduler) {
             let result: Result<T, E>
@@ -94,6 +117,34 @@ public final class Runtime: Sendable {
             waiter.finish(result)
         }
         return try waiter.wait().get()
+    }
+
+    /// `block` on a current-thread runtime: run the worker's loop here until
+    /// the operation's task has finished.
+    private func blockDriving<T: Sendable, E: Error>(
+        _ operation: sending @escaping () async throws(E) -> T
+    ) throws(E) -> T {
+        let worker = scheduler.workers[0]
+        precondition(scheduler.driving.exchange(true, ordering: .acquiring) == false,
+                     "Runtime.block: a current-thread runtime runs one block at a time")
+        defer { scheduler.driving.store(false, ordering: .releasing) }
+        let result = DriveResult<T, E>()
+        Task(executorPreference: scheduler) {
+            let r: Result<T, E>
+            do throws(E) {
+                r = .success(try await operation())
+            } catch {
+                r = .failure(error)
+            }
+            result.value.withLock { $0 = r }
+            worker.driveDone.store(true, ordering: .releasing)
+            cv_unpark(worker.parker)
+        }
+        worker.drive()
+        guard let r = result.value.withLock({ $0.take() }) else {
+            preconditionFailure("Runtime.block: the runtime was shut down first")
+        }
+        return try r.get()
     }
 
     /// Stop the workers. Jobs still queued are dropped, so shut down only
@@ -222,6 +273,11 @@ private final class Handoff<Value: ~Copyable>: @unchecked Sendable {
 }
 
 /// Hands a result from a task to a blocked plain thread.
+/// The outcome of a current-thread `block`'s operation.
+private final class DriveResult<T: Sendable, E: Error>: Sendable {
+    let value = Mutex<Result<T, E>?>(nil)
+}
+
 private final class BlockWaiter<T: Sendable, E: Error>: @unchecked Sendable {
     private let parker = cv_parker_new()!
     private let result = Mutex<Result<T, E>?>(nil)
