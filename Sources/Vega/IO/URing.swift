@@ -6,7 +6,8 @@ import Glibc
 
 /// Which I/O driver a runtime uses.
 public enum IOBackend: Sendable, Equatable {
-    /// `.ioUring` if `VEGA_DRIVER=uring`, else `.readiness`.
+    /// `.ioUring` where the kernel can run it, else `.readiness`.
+    /// `VEGA_DRIVER=epoll` (or `uring`) overrides.
     case automatic
     /// One edge-triggered epoll (kqueue on Darwin) per runtime.
     case readiness
@@ -45,8 +46,8 @@ enum URing {
         case .readiness: return false
         case .ioUring: return true
         case .automatic:
-            guard let v = getenv("VEGA_DRIVER") else { return false }
-            return String(cString: v) == "uring"
+            guard let v = getenv("VEGA_DRIVER") else { return true }
+            return String(cString: v) != "epoll"
         }
     }
 

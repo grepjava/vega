@@ -13,9 +13,9 @@ PORT=7100
 start() {
     local lib="LD_LIBRARY_PATH=$PWD/lib"
     case "$1" in
-    vega-single) exec env $lib taskset -c 0,1,4,5 ./vega-udp --port $PORT --workers 4 --mode single ;;
-    vega-batch) exec env $lib taskset -c 0,1,4,5 ./vega-udp --port $PORT --workers 4 --mode batch ;;
-    vega-gso) exec env $lib taskset -c 0,1,4,5 ./vega-udp --port $PORT --workers 4 --mode gso ;;
+    vega-single) exec env $lib VEGA_DRIVER=epoll taskset -c 0,1,4,5 ./vega-udp --port $PORT --workers 4 --mode single ;;
+    vega-batch) exec env $lib VEGA_DRIVER=epoll taskset -c 0,1,4,5 ./vega-udp --port $PORT --workers 4 --mode batch ;;
+    vega-gso) exec env $lib VEGA_DRIVER=epoll taskset -c 0,1,4,5 ./vega-udp --port $PORT --workers 4 --mode gso ;;
     vega-uring-single) exec env $lib VEGA_DRIVER=uring taskset -c 0,1,4,5 ./vega-udp --port $PORT --workers 4 --mode single ;;
     vega-uring-batch) exec env $lib VEGA_DRIVER=uring taskset -c 0,1,4,5 ./vega-udp --port $PORT --workers 4 --mode batch ;;
     tokio) exec taskset -c 0,1,4,5 ./tokio-bench/target/release/udp-echo --port $PORT --workers 4 ;;

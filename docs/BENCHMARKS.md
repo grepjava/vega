@@ -198,7 +198,7 @@ Requests per second, with p99 round-trip latency (epoll, SwiftNIO and Tokio reru
 | 256 | **295,347** (1.42 ms) | 288,843 (1.54 ms) | 223,970 (2.22 ms) | 270,295 (1.60 ms) |
 | 1,024 | 222,146 (6.8 ms) | 241,321 (7.9 ms) | 206,207 (5.4 ms) | **254,966** (7.7 ms) |
 
-io_uring matches epoll at 64 connections, is 2% behind at 256, and is 9% ahead at 1,024, closing half the gap to Tokio there. The default stays epoll for now.
+io_uring matches epoll at 64 connections, is 2% behind at 256, and is 9% ahead at 1,024, closing half the gap to Tokio there. With the UDP results below (20–25% ahead with one flow), it became the default on 2026-10-13, where the kernel can run it. `VEGA_DRIVER=epoll` opts out.
 
 **How it works.**
 - A task submits on the ring of the worker running it. That worker reaps the completion and resumes the task, so the task's next step runs where its data is hot.
@@ -248,7 +248,9 @@ Datagrams per second:
 - **Batching** gives 1.75× Tokio's datagrams per second with one flow and 1.5–1.6× with four, on io_uring. Most of that comes from cutting syscalls from two per datagram to two per batch. Tokio has no batched UDP API; quinn-udp adds one.
 - **Single datagrams** match Tokio on io_uring.
   - On epoll, a single flow is 19% behind (158k against 195k), and four flows are level.
-  - Profiling this is next. With one flow, one worker does all the work, and the gap is likely per-datagram overhead in Vega's wait path: a failed `recvfrom` that says `EAGAIN` before each wait.
+  - It isn't the wait path: under `strace`, no `recvfrom` failed, and Vega made the same syscalls per datagram as Tokio. Each made one `recvfrom`, one `sendto`, and about two epoll waits (the parked owner of the edge-triggered driver wakes for each arriving datagram).
+  - It isn't the idle workers' spin before parking either. On the hyperthread siblings it shows as 7% of cycles, but `VEGA_SPIN_NS=0` measured 153k against 156k.
+  - What's left is on the kernel side of the epoll registration, and io_uring (no registration, workers parked in their own rings) doesn't have it. io_uring is now the default.
 - **GSO/GRO** gains nothing here and costs a little: GRO's control message on each receive. Loopback coalesces only datagrams that were sent with GSO, and the client sends with `sendmmsg`. The GSO path pays off for bulk senders (QUIC, media) on real NICs, and it needs a GSO client to measure.
 
 ## macOS (kqueue), indicative (2026-10-13)
