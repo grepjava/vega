@@ -160,7 +160,7 @@ import Testing
         let rt = Runtime(workers: 4)
         defer { rt.shutdown() }
         let barrier = Barrier(count: 4)
-        let leaders = try rt.block { () async -> Int in
+        let leaders = rt.block { () async -> Int in
             await withTaskGroup(of: Int.self) { g in
                 for _ in 0..<12 {
                     g.addTask { await barrier.wait() ? 1 : 0 }
@@ -317,9 +317,9 @@ import Testing
         defer { rt.shutdown() }
         let cell = OnceCell<Int>()
         let runs = Atomic<Int>(0)
-        let values = try withUnsafePointer(to: runs) { p in
+        let values = withUnsafePointer(to: runs) { p in
             nonisolated(unsafe) let runs = p
-            return try rt.block { () async -> [Int] in
+            return rt.block { () async -> [Int] in
                 await withTaskGroup(of: Int.self) { g in
                     for _ in 0..<32 {
                         g.addTask {
@@ -347,7 +347,7 @@ import Testing
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
         let cell = OnceCell<String>()
-        let (first, second) = try rt.block { () async -> (Bool, String?) in
+        let (first, second) = rt.block { () async -> (Bool, String?) in
             let failed: Bool
             do {
                 _ = try await cell.getOrInit { () async throws(Failed) -> String in throw Failed() }
