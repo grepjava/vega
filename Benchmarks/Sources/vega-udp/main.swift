@@ -10,6 +10,8 @@
 //   single  one receiveFrom and one send per datagram
 //   batch   DatagramBatch: recvmmsg up to 64, then sendmmsg them back
 //   gso     UDP GRO receive, UDP GSO send: one syscall per coalesced burst
+//           (without GSO/GRO, as on macOS: one datagram per receive, and
+//           the send split into a batch)
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
@@ -60,7 +62,7 @@ let listenPort = port, echoMode = mode
 }
 
 @Sendable func serveSegments(_ socket: borrowing UDPSocket) async throws(IOError) {
-    try socket.setOption(.udpGRO, to: true)
+    _ = try? socket.setOption(.udpGRO, to: true) // none off Linux: a datagram per receive
     var buf = IOBuffer(capacity: 65_536)
     // The storage doesn't move while buf lives.
     let base = buf.withUnsafeBytes { UnsafeRawPointer($0.baseAddress!) }

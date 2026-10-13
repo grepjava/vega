@@ -5,7 +5,11 @@
 //
 // --stats prints, every 2 s to stderr, the jobs each worker ran and what the
 // I/O driver did over the interval.
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 import Vega
 
 var port = 7000

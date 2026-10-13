@@ -194,7 +194,7 @@ Requests per second, with p99 round-trip latency (epoll, SwiftNIO and Tokio reru
 
 | Connections | Vega, epoll | Vega, io_uring | SwiftNIO | Tokio |
 |---|---|---|---|---|
-| 64 | **308,302** (327 µs) | 308,220 (348 µs) | 226,125 (533 µs) | 268,284 (403 µs) |
+| 64 | **308,302** (327 Âµs) | 308,220 (348 Âµs) | 226,125 (533 Âµs) | 268,284 (403 Âµs) |
 | 256 | **295,347** (1.42 ms) | 288,843 (1.54 ms) | 223,970 (2.22 ms) | 270,295 (1.60 ms) |
 | 1,024 | 222,146 (6.8 ms) | 241,321 (7.9 ms) | 206,207 (5.4 ms) | **254,966** (7.7 ms) |
 
@@ -226,9 +226,9 @@ io_uring matches epoll at 64 connections, is 2% behind at 256, and is 9% ahead a
 
 Datagrams per second through a UDP echo server, measured with `Benchmarks/udp-on-box.sh`.
 
-**Setup.** Each server runs 4 workers on physical cores 0–1 and has one socket per worker, on consecutive ports. Client flow *i* goes to port + *i* mod 4, so flows land the same way on every server. A first run used one SO_REUSEPORT port instead, and the kernel's hash put two of four flows on one socket differently from run to run, so it couldn't compare servers at 4 flows.
+**Setup.** Each server runs 4 workers on physical cores 0â€“1 and has one socket per worker, on consecutive ports. Client flow *i* goes to port + *i* mod 4, so flows land the same way on every server. A first run used one SO_REUSEPORT port instead, and the kernel's hash put two of four flows on one socket differently from run to run, so it couldn't compare servers at 4 flows.
 
-The client, `tokio-bench`'s `udp-load`, runs on cores 2–3. Each flow has its own connected socket and thread, keeps 256 datagrams in flight, and sends and receives through `sendmmsg` / `recvmmsg`. That way the client isn't the limit. No run lost datagrams.
+The client, `tokio-bench`'s `udp-load`, runs on cores 2â€“3. Each flow has its own connected socket and thread, keeps 256 datagrams in flight, and sends and receives through `sendmmsg` / `recvmmsg`. That way the client isn't the limit. No run lost datagrams.
 
 - **single:** a `receiveFrom` and a `send(to:)` per datagram, the same shape as Tokio's `recv_from` / `send_to`.
 - **batch:** `DatagramBatch`, up to 64 datagrams per `recvmmsg`, sent back with one `sendmmsg`.
@@ -245,11 +245,38 @@ Datagrams per second:
 | Vega gso, epoll | 142,003 | 143,733 | 363,386 | 354,952 |
 | Tokio (`recv_from` / `send_to`) | 195,122 | 182,762 | 462,687 | 439,971 |
 
-- **Batching** gives 1.75× Tokio's datagrams per second with one flow and 1.5–1.6× with four, on io_uring. Most of that comes from cutting syscalls from two per datagram to two per batch. Tokio has no batched UDP API; quinn-udp adds one.
+- **Batching** gives 1.75Ã— Tokio's datagrams per second with one flow and 1.5â€“1.6Ã— with four, on io_uring. Most of that comes from cutting syscalls from two per datagram to two per batch. Tokio has no batched UDP API; quinn-udp adds one.
 - **Single datagrams** match Tokio on io_uring.
   - On epoll, a single flow is 19% behind (158k against 195k), and four flows are level.
   - Profiling this is next. With one flow, one worker does all the work, and the gap is likely per-datagram overhead in Vega's wait path: a failed `recvfrom` that says `EAGAIN` before each wait.
 - **GSO/GRO** gains nothing here and costs a little: GRO's control message on each receive. Loopback coalesces only datagrams that were sent with GSO, and the client sends with `sendmmsg`. The GSO path pays off for bulk senders (QUIC, media) on real NICs, and it needs a GSO client to measure.
+
+## macOS (kqueue), indicative (2026-10-13)
+
+The TCP and UDP echo runs above, repeated on a laptop to catch kqueue-specific regressions: **not the bench box, and not comparable with its numbers.** Apple M1 (4 performance + 4 efficiency cores, 16 GB), macOS 26.6.2, Swift 6.4 (Xcode 26.6), Tokio 1.x. macOS can't pin threads, so the 4-worker server and the 4-thread load share all 8 cores, and run-to-run noise is several percent. Two runs of `Benchmarks/macos-local.sh`, 10 s each after a 2 s warm-up; the second started with a load average of 6.6 from other work. Each cell gives run 1 / run 2.
+
+On macOS, `udp-load` sends and receives one datagram per call (no `sendmmsg` / `recvmmsg`). There is no GSO or GRO either, so `vega-udp --mode gso` measures the fallback: one datagram per receive, and each echo sent through `cv_send_segments_split`.
+
+TCP echo, requests per second (p99 from run 1):
+
+| Connections | Vega (kqueue) | Tokio |
+|---|---|---|
+| 64 | 182,149 / 183,169 (672 Âµs) | **201,419 / 197,731** (593 Âµs) |
+| 256 | 193,476 / 194,687 (2.68 ms) | 196,444 / 195,990 (2.56 ms) |
+| 1,024 | **197,627 / 195,487** (12.3 ms) | 194,855 / 193,750 (11.5 ms) |
+
+UDP echo, datagrams per second:
+
+| Server | 1 flow, 64 B | 1 flow, 1,200 B | 4 flows, 64 B | 4 flows, 1,200 B |
+|---|---|---|---|---|
+| Vega single | 176,155 / 165,973 | 170,387 / 160,486 | 291,536 / 281,432 | 284,568 / 267,746 |
+| Vega batch | **230,592 / 207,979** | **220,780 / 200,676** | **305,750 / 295,346** | **293,062 / 281,550** |
+| Vega gso (fallback) | 166,110 / 157,451 | 159,181 / 153,218 | 278,521 / 274,336 | 270,604 / 264,600 |
+| Tokio (`recv_from` / `send_to`) | 185,753 / 181,599 | 179,615 / 174,954 | 288,672 / 283,115 | 277,675 / 271,902 |
+
+- **No kqueue-specific regression.** The shape matches epoll on the box: batching leads (1.2Ã— Tokio with one flow), single datagrams are level with Tokio at four flows and a few percent behind with one, and TCP is level at 256 and 1,024 connections.
+- **One difference to look into.** At 64 connections Vega is about 8% behind Tokio here, where on the box it leads by 11%. Possible causes, none checked yet: the cost of a `kevent` turn against `epoll_wait`, the efficiency cores, or the shared cores.
+- Batch at 4 flows needed 1â€“3 window refills per run (a few datagrams dropped on loopback); no other run lost any.
 
 ## Sync primitives (2026-10-12)
 

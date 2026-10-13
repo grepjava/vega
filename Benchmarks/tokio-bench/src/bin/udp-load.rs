@@ -1,8 +1,9 @@
 //! Closed-loop UDP load: each flow (its own connected socket and thread)
 //! keeps `window` datagrams in flight against an echo server, sending more
 //! as replies come back. Sends and receives go through sendmmsg/recvmmsg, up
-//! to 64 a call, so the client isn't what limits a fast server. The same
-//! client drives every server.
+//! to 64 a call, so the client isn't what limits a fast server (elsewhere,
+//! macOS for one, they are loops of send/recv). The same client drives every
+//! server.
 //!
 //!   udp-load [--addr 127.0.0.1:7100] [--ports 4] [--flows 4] [--size 64]
 //!            [--window 256] [--secs 10] [--warmup 2]
@@ -74,6 +75,7 @@ fn main() {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn run_flow(fd: i32, size: usize, window: usize, stop: &AtomicBool, received: &AtomicU64, lost: &AtomicU64) {
     let payload = vec![b'u'; size];
     let mut recv_bufs = vec![0u8; CHUNK * 2048];
@@ -115,6 +117,44 @@ fn run_flow(fd: i32, size: usize, window: usize, stop: &AtomicBool, received: &A
             let n = libc::recvmmsg(fd, recv_hdrs.as_mut_ptr(), CHUNK as u32, libc::MSG_WAITFORONE, std::ptr::null_mut());
             if n > 0 {
                 in_flight = in_flight.saturating_sub(n as usize);
+                total += n as u64;
+                received.store(total, Ordering::Relaxed);
+            } else {
+                // Timed out: what is still out was dropped. Refill.
+                in_flight = 0;
+                lost.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// Without sendmmsg/recvmmsg: the same window, one datagram per call. The
+/// first receive blocks (up to the 20 ms timeout), the rest of a chunk takes
+/// only what is already queued, as MSG_WAITFORONE does.
+#[cfg(not(target_os = "linux"))]
+fn run_flow(fd: i32, size: usize, window: usize, stop: &AtomicBool, received: &AtomicU64, lost: &AtomicU64) {
+    let payload = vec![b'u'; size];
+    let mut buf = vec![0u8; 2048];
+    let mut in_flight = 0usize;
+    let mut total = 0u64;
+    unsafe {
+        while !stop.load(Ordering::Relaxed) {
+            while in_flight < window {
+                if libc::send(fd, payload.as_ptr() as *const _, size, 0) < 0 {
+                    break; // ENOBUFS: the interface queue is full for now
+                }
+                in_flight += 1;
+            }
+            let mut n = 0usize;
+            while n < CHUNK {
+                let flags = if n == 0 { 0 } else { libc::MSG_DONTWAIT };
+                if libc::recv(fd, buf.as_mut_ptr() as *mut _, buf.len(), flags) < 0 {
+                    break;
+                }
+                n += 1;
+            }
+            if n > 0 {
+                in_flight = in_flight.saturating_sub(n);
                 total += n as u64;
                 received.store(total, Ordering::Relaxed);
             } else {
