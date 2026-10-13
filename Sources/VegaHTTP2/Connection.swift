@@ -13,7 +13,7 @@ import VegaHTTP1
 /// }
 /// ```
 ///
-/// Over TLS, offer "h2" with ALPN and serve the halves of the split stream.
+/// Over TLS, offer "h2" with ALPN and serve `tls.halves()`.
 public enum HTTP2Server {
     /// Serve the connection until the client closes it or breaks the
     /// protocol (answered with GOAWAY, then thrown). A handler that throws
@@ -105,11 +105,18 @@ public enum HTTP2Server {
         if let failure { throw failure }
     }
 
+    /// Serve the halves of a split stream (`stream.halves()`).
+    public static func serve<Reader: AsyncReader & ~Copyable & Sendable, Writer: AsyncWriter & ~Copyable>(
+        _ halves: consuming StreamHalves<Reader, Writer>, configuration: HTTP2Configuration = .init(),
+        _ handler: @escaping @Sendable (HTTPRequest) async throws -> HTTPResponse
+    ) async throws(HTTP2Error) {
+        try await serve(reader: halves.reader, writer: halves.writer, configuration: configuration, handler)
+    }
+
     /// Serve a TCP connection.
     public static func serve(_ stream: consuming TCPStream, configuration: HTTP2Configuration = .init(),
                              _ handler: @escaping @Sendable (HTTPRequest) async throws -> HTTPResponse) async throws(HTTP2Error) {
-        let halves = stream.split()
-        try await serve(reader: halves.reader, writer: halves.writer, configuration: configuration, handler)
+        try await serve(stream.halves(), configuration: configuration, handler)
     }
 }
 
@@ -136,7 +143,7 @@ public final class HTTP2Client: Sendable {
     ///
     /// ```swift
     /// let tcp = try await TCPStream.connect(host: "127.0.0.1", port: 8080)
-    /// let response = try await HTTP2Client.withConnection(tcp, scheme: "http") { client in
+    /// let response = try await HTTP2Client.withConnection(tcp.halves(), scheme: "http") { client in
     ///     try await client.send(HTTPRequest(target: "/", fields: ["host": "localhost"]))
     /// }
     /// ```
@@ -179,16 +186,17 @@ public final class HTTP2Client: Sendable {
         return try result.get()
     }
 
-    /// `withConnection` over TCP.
-    public static func withConnection<T>(
-        _ stream: consuming TCPStream,
-        scheme: String = "http",
+    /// `withConnection` over the halves of a split stream
+    /// (`stream.halves()`): scheme "https" for TLS.
+    public static func withConnection<Reader: AsyncReader & ~Copyable & Sendable,
+                                      Writer: AsyncWriter & ~Copyable & Sendable, T>(
+        _ halves: consuming StreamHalves<Reader, Writer>,
+        scheme: String = "https",
         authority: String? = nil,
         configuration: HTTP2Configuration = .init(),
         _ body: (HTTP2Client) async throws -> T
     ) async throws -> T {
-        let halves = stream.split()
-        return try await withConnection(reader: halves.reader, writer: halves.writer, scheme: scheme,
+        try await withConnection(reader: halves.reader, writer: halves.writer, scheme: scheme,
                                         authority: authority, configuration: configuration, body)
     }
 

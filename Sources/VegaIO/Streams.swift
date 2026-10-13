@@ -23,7 +23,36 @@ extension AsyncWriter where Self: ~Copyable {
     }
 }
 
+/// A stream split into a read half and a write half, for two tasks to use
+/// at once: what `halves()` returns on TCP, Unix, duplex and TLS streams.
+@frozen
+public struct StreamHalves<Reader: AsyncReader & ~Copyable, Writer: AsyncWriter & ~Copyable>: ~Copyable {
+    public var reader: Reader
+    public var writer: Writer
+
+    public init(reader: consuming Reader, writer: consuming Writer) {
+        self.reader = reader
+        self.writer = writer
+    }
+}
+
 #if os(Linux) || canImport(Darwin) || os(Windows)
+extension TCPStream {
+    /// `split()`, as `StreamHalves`.
+    public consuming func halves() -> StreamHalves<ReadHalf, WriteHalf> {
+        let split = split()
+        return StreamHalves(reader: split.reader, writer: split.writer)
+    }
+}
+
+extension UnixStream {
+    /// `split()`, as `StreamHalves`.
+    public consuming func halves() -> StreamHalves<ReadHalf, WriteHalf> {
+        let split = split()
+        return StreamHalves(reader: split.reader, writer: split.writer)
+    }
+}
+
 extension TCPStream: AsyncReader, AsyncWriter {}
 extension UnixStream: AsyncReader, AsyncWriter {}
 extension ReadHalf: AsyncReader {}

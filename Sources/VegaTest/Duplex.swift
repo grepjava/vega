@@ -88,6 +88,14 @@ public struct DuplexStream: ~Copyable, Sendable, AsyncReader, AsyncWriter {
     }
 }
 
+extension DuplexStream {
+    /// `split()`, as `StreamHalves`.
+    public consuming func halves() -> StreamHalves<DuplexReader, DuplexWriter> {
+        let split = split()
+        return StreamHalves(reader: split.reader, writer: split.writer)
+    }
+}
+
 /// The read side of a split `DuplexStream`.
 public struct DuplexReader: ~Copyable, Sendable, AsyncReader {
     private let pipe: Pipe

@@ -319,7 +319,7 @@ private func get(_ path: String) -> HTTPRequest {
                 }
             }
             let tcp = try await TCPStream.connect(host: "127.0.0.1", port: port)
-            return try await HTTP2Client.withConnection(tcp) { client in
+            return try await HTTP2Client.withConnection(tcp.halves(), scheme: "http") { client in
                 var out: [String] = []
                 for i in 0..<20 {
                     out.append(try await client.send(HTTPRequest(target: "/\(i)", fields: ["host": "localhost"])).text)
