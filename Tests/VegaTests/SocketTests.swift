@@ -236,7 +236,8 @@ private func drain(_ conn: borrowing TCPStream) async -> [UInt8] {
             var buf = IOBuffer(capacity: 65_536)
             var received = 0
             while received < 1_000 {
-                let (n, segment, _) = try await server.receiveSegments(into: &buf)
+                let (n, segment, _, truncated) = try await server.receiveSegments(into: &buf)
+                #expect(!truncated)
                 #expect(segment == 0 || segment == 100)
                 received += n
                 buf.clear()

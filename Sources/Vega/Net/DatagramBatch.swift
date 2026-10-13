@@ -152,41 +152,54 @@ extension UDPSocket {
         }
     }
 
-    /// Whether the kernel can split one send into datagrams
-    /// (`send(segments:segmentSize:to:)`); Linux 4.18 and later.
+    /// Whether the kernel splits a segmented send itself (UDP GSO; Linux
+    /// 4.18 and later). Without it, `send(segments:segmentSize:to:)` still
+    /// works, one datagram per segment.
     public var supportsSegmentation: Bool { cv_udp_gso_supported(reg.fd) != 0 }
 
     /// Send `bytes` as datagrams of `segmentSize` bytes each (the last may
-    /// be shorter) with one system call: UDP GSO. The kernel splits them
-    /// below the socket, so a burst costs one syscall and one route lookup.
-    /// To `address`, or the connected peer if nil. At most 64 segments, and
-    /// 64 KB in all. Returns the bytes sent.
+    /// be shorter). With UDP GSO it is one system call: the kernel splits
+    /// them below the socket, so a burst costs one syscall and one route
+    /// lookup. Where the kernel or the route can't, the segments go out as a
+    /// batch instead. To `address`, or the connected peer if nil. At most 64
+    /// segments, and 64 KB in all. Returns the bytes sent.
     @discardableResult
     public func send(segments bytes: UnsafeRawBufferPointer, segmentSize: Int,
                      to address: SocketAddress? = nil) async throws(IOError) -> Int {
         precondition(segmentSize > 0 && segmentSize <= Int(UInt16.max), "bad UDP segment size")
-        let fd = reg.fd
+        precondition((bytes.count + segmentSize - 1) / segmentSize <= 64, "more than 64 UDP segments")
+        let fd = reg.fd, base = bytes.baseAddress, total = bytes.count
         var to = address?.raw ?? cv_sockaddr()
-        return try await reg.perform(CV_IO_WRITE) {
-            cv_send_segments(fd, bytes.baseAddress, bytes.count, Int32(segmentSize), &to)
-        }
+        // A batch that fills the socket stops after whole segments: go on
+        // from there.
+        var sent = 0
+        repeat {
+            let from = sent
+            sent += try await reg.perform(CV_IO_WRITE) {
+                cv_send_segments(fd, base.map { $0 + from }, total - from, Int32(segmentSize), &to)
+            }
+        } while sent < total
+        return sent
     }
 
     /// Receive into `buffer`'s spare capacity with UDP GRO: once
     /// `SocketOption.udpGRO` is set, several datagrams from one sender can
     /// arrive together, each `segmentSize` bytes (the last may be shorter).
-    /// `segmentSize` is 0 when one datagram came alone.
+    /// `segmentSize` is 0 when one datagram came alone. The kernel coalesces
+    /// up to 64 KB, so leave that much room: `truncated` says the arrival
+    /// was longer than the spare capacity and its tail was lost.
     public func receiveSegments(into buffer: inout IOBuffer) async throws(IOError)
-        -> (count: Int, segmentSize: Int, from: SocketAddress)
+        -> (count: Int, segmentSize: Int, from: SocketAddress, truncated: Bool)
     {
         precondition(buffer.spareCapacity > 0, "receive into a full IOBuffer")
         let fd = reg.fd
         let at = buffer.base + buffer.count, room = buffer.spareCapacity
         var from = cv_sockaddr()
         var segment: Int32 = 0
-        let n = try await reg.perform(CV_IO_READ) { cv_recv_segments(fd, at, room, &from, &segment) }
+        var flags: UInt32 = 0
+        let n = try await reg.perform(CV_IO_READ) { cv_recv_segments(fd, at, room, &from, &segment, &flags) }
         buffer.count += n
-        return (n, Int(segment), SocketAddress(raw: from))
+        return (n, Int(segment), SocketAddress(raw: from), flags & CV_DGRAM_TRUNCATED != 0)
     }
 
     /// Join the multicast group `group` (IPv4 or IPv6) on the interface with

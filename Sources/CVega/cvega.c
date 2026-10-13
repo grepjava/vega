@@ -1143,7 +1143,45 @@ long cv_send_batch(int fd, const void *base, long stride, const uint32_t *lens,
 #endif
 }
 
+long cv_send_segments_split(int fd, const void *buf, long len, int segment, const cv_sockaddr *to) {
+    // The segments already lie back to back, segment bytes apart: send them
+    // as a batch over the same memory, one datagram each.
+    if (segment <= 0 || len <= segment) segment = len > 0 ? (int)len : 1;
+    int have_to = to && to->len;
+    uint32_t lens[CV_BATCH_CHUNK];
+    cv_sockaddr tos[CV_BATCH_CHUNK];
+    long done = 0;
+    do {
+        int k = 0;
+        for (long off = done; k < CV_BATCH_CHUNK && (off < len || (len == 0 && k == 0)); k++) {
+            long l = len - off < segment ? len - off : segment;
+            lens[k] = (uint32_t)l;
+            off += l;
+            if (have_to) tos[k] = *to;
+        }
+        long n = cv_send_batch(fd, (const char *)buf + done, segment, lens, have_to ? tos : NULL, k);
+        if (n < 0) return done > 0 ? done : n; // the next call reports the error
+        for (long i = 0; i < n; i++) done += lens[i];
+        if (n < k) break; // the socket filled up: whole segments sent so far
+    } while (done < len);
+    return done;
+}
+
 long cv_send_segments(int fd, const void *buf, long len, int segment, const cv_sockaddr *to) {
+#if defined(__linux__)
+    if (segment <= 0 || len <= segment)
+        return cv_send_segments_split(fd, buf, len, segment, to);
+    // Whether the kernel knows UDP_SEGMENT (4.18+): the same for every
+    // socket, so asked once. An older kernel ignores the cmsg and would
+    // send one large datagram instead.
+    static _Atomic int gso; // 0 unknown, 1 yes, -1 no
+    int known = atomic_load_explicit(&gso, memory_order_relaxed);
+    if (known == 0) {
+        known = cv_udp_gso_supported(fd) ? 1 : -1;
+        atomic_store_explicit(&gso, known, memory_order_relaxed);
+    }
+    if (known < 0) return cv_send_segments_split(fd, buf, len, segment, to);
+
     struct iovec v = {(void *)buf, (size_t)len};
     struct msghdr mh = {0};
     if (to && to->len) {
@@ -1152,27 +1190,28 @@ long cv_send_segments(int fd, const void *buf, long len, int segment, const cv_s
     }
     mh.msg_iov = &v;
     mh.msg_iovlen = 1;
-#if defined(__linux__)
     union {
         char buf[CMSG_SPACE(sizeof(uint16_t))];
         struct cmsghdr align;
     } control;
-    if (segment > 0 && len > segment) {
-        memset(&control, 0, sizeof control);
-        mh.msg_control = control.buf;
-        mh.msg_controllen = sizeof control.buf;
-        struct cmsghdr *cm = CMSG_FIRSTHDR(&mh);
-        cm->cmsg_level = SOL_UDP;
-        cm->cmsg_type = UDP_SEGMENT;
-        cm->cmsg_len = CMSG_LEN(sizeof(uint16_t));
-        uint16_t seg = (uint16_t)segment;
-        memcpy(CMSG_DATA(cm), &seg, sizeof seg);
-    }
-#else
-    if (segment > 0 && len > segment) return -(long)EOPNOTSUPP;
-#endif
+    memset(&control, 0, sizeof control);
+    mh.msg_control = control.buf;
+    mh.msg_controllen = sizeof control.buf;
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&mh);
+    cm->cmsg_level = SOL_UDP;
+    cm->cmsg_type = UDP_SEGMENT;
+    cm->cmsg_len = CMSG_LEN(sizeof(uint16_t));
+    uint16_t seg = (uint16_t)segment;
+    memcpy(CMSG_DATA(cm), &seg, sizeof seg);
     ssize_t n = sendmsg(fd, &mh, MSG_NOSIGNAL);
-    return n >= 0 ? (long)n : -(long)errno;
+    if (n >= 0) return (long)n;
+    // EIO: this route can't offload the checksum (IPsec, for one).
+    if (errno == EIO || errno == EOPNOTSUPP || errno == ENOPROTOOPT)
+        return cv_send_segments_split(fd, buf, len, segment, to);
+    return -(long)errno;
+#else
+    return cv_send_segments_split(fd, buf, len, segment, to);
+#endif
 }
 
 int cv_udp_gso_supported(int fd) {
@@ -1186,7 +1225,8 @@ int cv_udp_gso_supported(int fd) {
 #endif
 }
 
-long cv_recv_segments(int fd, void *buf, long len, cv_sockaddr *from, int *segment) {
+long cv_recv_segments(int fd, void *buf, long len, cv_sockaddr *from, int *segment,
+                      uint32_t *flags) {
     struct iovec v = {buf, (size_t)len};
     struct msghdr mh = {0};
     if (from) {
@@ -1205,6 +1245,9 @@ long cv_recv_segments(int fd, void *buf, long len, cv_sockaddr *from, int *segme
     if (n < 0) return -(long)errno;
     if (from) from->len = mh.msg_namelen;
     *segment = 0;
+    // A coalesced burst longer than the buffer loses its tail, as a single
+    // datagram does.
+    *flags = (mh.msg_flags & MSG_TRUNC) ? CV_DGRAM_TRUNCATED : 0;
 #if defined(__linux__)
     for (struct cmsghdr *cm = CMSG_FIRSTHDR(&mh); cm; cm = CMSG_NXTHDR(&mh, cm)) {
         if (cm->cmsg_level == SOL_UDP && cm->cmsg_type == UDP_GRO) {

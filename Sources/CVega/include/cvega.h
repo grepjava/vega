@@ -300,17 +300,25 @@ long cv_recv_batch(int fd, void *base, long stride, int count, cv_sockaddr *from
 /// -errno.
 long cv_send_batch(int fd, const void *base, long stride, const uint32_t *lens,
                    const cv_sockaddr *to, int count);
-/// One sendmsg of len bytes that the kernel cuts into datagrams of segment
-/// bytes (UDP GSO, Linux; the last may be shorter). to may be NULL for the
-/// connected peer. Bytes sent, or -errno.
+/// Send len bytes as datagrams of segment bytes each (the last may be
+/// shorter): one sendmsg that the kernel cuts up (UDP GSO) where it can, else
+/// cv_send_segments_split (Darwin, Linux before 4.18, a route that can't
+/// offload: EIO). to may be NULL for the connected peer. Bytes sent: a split
+/// send that fills the socket returns the whole segments sent so far.
+/// Or -errno.
 long cv_send_segments(int fd, const void *buf, long len, int segment, const cv_sockaddr *to);
+/// cv_send_segments without GSO: the segments as one datagram each, through
+/// cv_send_batch over the same memory.
+long cv_send_segments_split(int fd, const void *buf, long len, int segment, const cv_sockaddr *to);
 /// Whether the kernel takes cv_send_segments with a segment size.
 int cv_udp_gso_supported(int fd);
 /// recvmsg that also reports UDP GRO: with CV_OPT_UDP_GRO on, several
 /// datagrams from one sender may arrive in one buffer, each *segment bytes
-/// (the last may be shorter); *segment is 0 for a single datagram. from may
-/// be NULL. Bytes received, or -errno.
-long cv_recv_segments(int fd, void *buf, long len, cv_sockaddr *from, int *segment);
+/// (the last may be shorter); *segment is 0 for a single datagram. *flags
+/// gets CV_DGRAM_TRUNCATED if what arrived was longer than len (its tail is
+/// lost). from may be NULL. Bytes received, or -errno.
+long cv_recv_segments(int fd, void *buf, long len, cv_sockaddr *from, int *segment,
+                      uint32_t *flags);
 
 // ---- io_uring driver (Linux) ---------------------------------------------
 // The completion driver: one ring per worker (SINGLE_ISSUER, DEFER_TASKRUN),
