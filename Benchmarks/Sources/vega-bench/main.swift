@@ -5,7 +5,12 @@
 // Without --global: Vega (executor preference) vs Swift's default executor.
 // With --global:    Vega installed as the process's global executor, so even
 //                   plain Task {} and Task.sleep run on it.
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
+import Dispatch
 import Synchronization
 import Vega
 
@@ -32,20 +37,20 @@ let rt = global ? Runtime.installGlobal(workers: workers) : Runtime(workers: wor
 
 /// Run `op` as a task on `executor` (nil = Swift's default) and block this
 /// thread until it returns.
+/// DispatchSemaphore, not sem_t: macOS has no unnamed POSIX semaphores
+/// (sem_init fails with ENOSYS, and the wait never returned).
 final class BlockBox<T>: @unchecked Sendable {
     var value: T?
-    var sem = sem_t()
+    let done = DispatchSemaphore(value: 0)
 }
 
 func blockOn<T: Sendable>(_ executor: (any TaskExecutor)?, _ op: @escaping @Sendable () async -> T) -> T {
     let box = BlockBox<T>()
-    sem_init(&box.sem, 0, 0)
     Task.detached(executorPreference: executor) {
         box.value = await op()
-        sem_post(&box.sem)
+        box.done.signal()
     }
-    while sem_wait(&box.sem) != 0 {}
-    sem_destroy(&box.sem)
+    box.done.wait()
     return box.value!
 }
 

@@ -277,7 +277,15 @@ UDP echo, datagrams per second:
 | Tokio (`recv_from` / `send_to`) | 185,753 / 181,599 | 179,615 / 174,954 | 288,672 / 283,115 | 277,675 / 271,902 |
 
 - **No kqueue-specific regression.** The shape matches epoll on the box: batching leads (1.2× Tokio with one flow), single datagrams are level with Tokio at four flows and a few percent behind with one, and TCP is level at 256 and 1,024 connections.
-- **One difference to look into.** At 64 connections Vega is about 8% behind Tokio here, where on the box it leads by 11%. Possible causes, none checked yet: the cost of a `kevent` turn against `epoll_wait`, the efficiency cores, or the shared cores.
+- **The 64-connection gap is the park spin, not kqueue.** At 64 connections Vega is about 8% behind Tokio here, where on the box it leads by 11%. Profiles (`sample`, 3 s under load) show the same time in `kevent`, `recvfrom` and `sendto` for both servers. Vega's extra CPU is `cv_park_spin` and the clock reads it makes, about 1,300 samples, plus about 250 of Swift concurrency's signpost tracing (Darwin only). A worker spins 50 µs before it parks (`VEGA_SPIN_NS`). On the box the load runs on other cores, so that is free; here server and load share cores, and the spin takes time from the load generator. The gap is not about core type: it stays at 7% with 2 workers, widens to 13% with 8, and to 20% with the load forced onto the efficiency cores (`taskpolicy -c utility`).
+
+  `VEGA_SPIN_NS` at 64 connections, two runs each:
+
+  | Spin | 0 | 5 µs | 20 µs | 50 µs (default) | Tokio |
+  |---|---|---|---|---|---|
+  | req/s | 198,020 / 195,963 | 193,551 / 190,017 | 187,374 / 184,479 | 184,358 / 181,422 | 201,549 / 196,915 |
+
+  With spin 0, Vega is also ahead of the default at 256 connections (198.6k against 196.3k, Tokio 196.0k) and at 1,024 (198.2k against 195.7k, Tokio 193.7k), and with 8 workers it does 189k against 170k (Tokio 193k). On `vega-bench` (8 workers, median of 5 runs), spin 0 is level on ping-pong, faster on `spawn_many` (863 against 1,071 ns), `pool_spawn` (495 against 801), `mpsc_fan_in` (337 against 618) and `sleep_cancel` (1,733 against 1,986), and slower on `sleep_many` (3,117 against 2,585 ns). Whether Darwin should default to spin 0 is still open.
 - Batch at 4 flows needed 1–3 window refills per run (a few datagrams dropped on loopback); no other run lost any.
 
 ## Sync primitives (2026-10-12)
