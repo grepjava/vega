@@ -36,7 +36,7 @@ let package = Package(
         // directories are on INCLUDE and LIB. Only the C target sees its headers.
         .systemLibrary(name: "COpenSSL", pkgConfig: "openssl",
                        providers: [.apt(["libssl-dev"]), .brew(["openssl@3"]), .yum(["openssl-devel"])]),
-        .target(name: "CVegaTLS", dependencies: ["COpenSSL"],
+        .target(name: "CVegaTLS", dependencies: [.target(name: "COpenSSL", condition: .when(platforms: [.linux, .macOS, .windows]))],
                 linkerSettings: [.linkedLibrary("ssl", .when(platforms: [.linux, .macOS])),
                                  .linkedLibrary("crypto", .when(platforms: [.linux, .macOS])),
                                  .linkedLibrary("libssl", .when(platforms: [.windows])),
