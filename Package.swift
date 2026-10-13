@@ -46,10 +46,15 @@ let package = Package(
                                  .linkedLibrary("libcrypto", .when(platforms: [.windows])),
                                  .linkedLibrary("crypt32", .when(platforms: [.windows]))]),
         .target(name: "VegaTLS", dependencies: ["Vega", "VegaIO", "CVegaTLS"], swiftSettings: swiftSettings),
+        // gzip and deflate on the system's zlib; brotli and zstd loaded with
+        // dlopen when there. None yet on Windows (no zlib in its SDK).
+        .target(name: "CVegaCompress",
+                linkerSettings: [.linkedLibrary("z", .when(platforms: [.linux, .macOS, .iOS])),
+                                 .linkedLibrary("dl", .when(platforms: [.linux]))]),
         .target(name: "VegaHTTP1", dependencies: ["Vega", "VegaIO"], swiftSettings: swiftSettings),
         .target(name: "VegaHTTP2", dependencies: ["Vega", "VegaIO", "VegaHTTP1"], swiftSettings: swiftSettings),
         .target(name: "VegaWebSocket", dependencies: ["Vega", "VegaIO", "VegaHTTP1"], swiftSettings: swiftSettings),
-        .target(name: "VegaExtras", dependencies: ["Vega", "VegaIO", "VegaHTTP1"], swiftSettings: swiftSettings),
+        .target(name: "VegaExtras", dependencies: ["Vega", "VegaIO", "VegaHTTP1", "CVegaCompress"], swiftSettings: swiftSettings),
         .testTarget(name: "VegaTests", dependencies: ["Vega", "VegaIO", "VegaFS", "VegaProcess", "VegaMetrics", "VegaTest", "VegaTLS", "VegaHTTP1", "VegaHTTP2", "VegaWebSocket", "VegaExtras", "CVega"], swiftSettings: swiftSettings),
     ],
     cLanguageStandard: .gnu11
