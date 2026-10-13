@@ -27,6 +27,15 @@ let package = Package(
                 .product(name: "Vapor", package: "vapor"),
             ]
         ),
+        // the-benchmarker's Vapor entry; VEGANIO=1 serves it on VegaNIO.
+        .executableTarget(
+            name: "server",
+            dependencies: [
+                "VaporVega",
+                .product(name: "VegaNIO", package: "veganio"),
+                .product(name: "Vapor", package: "vapor"),
+            ]
+        ),
         .testTarget(
             name: "VaporHelloTests",
             dependencies: [

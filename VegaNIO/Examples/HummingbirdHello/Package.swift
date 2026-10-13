@@ -27,6 +27,15 @@ let package = Package(
                 .product(name: "Hummingbird", package: "hummingbird"),
             ]
         ),
+        // the-benchmarker's Hummingbird entry; VEGANIO=1 serves it on VegaNIO.
+        .executableTarget(
+            name: "server",
+            dependencies: [
+                "HummingbirdVega",
+                .product(name: "VegaNIO", package: "veganio"),
+                .product(name: "Hummingbird", package: "hummingbird"),
+            ]
+        ),
         .testTarget(
             name: "HummingbirdHelloTests",
             dependencies: [

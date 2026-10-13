@@ -65,6 +65,10 @@ public final class VegaEventLoop: EventLoop, @unchecked Sendable {
     // MARK: Running
 
     /// Wait until there is work and nobody running it; then the loop is ours.
+    // Not inlined: Swift 6.3.3's optimizer miscompiles a continuation stored
+    // under a pthread lock (NIOLock) once this is inlined into a loop whose
+    // body also awaits; resuming it then jumps to address 0 (release only).
+    @inline(never)
     private func park() async -> Bool {
         await withUnsafeContinuation { (c: UnsafeContinuation<Bool, Never>) in
             let now: Bool? = state.withLockedValue { s in

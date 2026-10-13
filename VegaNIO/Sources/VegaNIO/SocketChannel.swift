@@ -551,6 +551,10 @@ final class StreamIO: Sendable {
     }
 
     /// Wait for the loop to want a read: false once closed.
+    // Not inlined: Swift 6.3.3's optimizer miscompiles a continuation stored
+    // under a pthread lock (NIOLock) once this is inlined into a loop whose
+    // body also awaits; resuming it then jumps to address 0 (release only).
+    @inline(never)
     private func waitToRead() async -> Bool {
         await withUnsafeContinuation { (c: UnsafeContinuation<Bool, Never>) in
             let now: Bool? = shared.withLockedValue { s in
@@ -568,6 +572,10 @@ final class StreamIO: Sendable {
 
     /// Wait for flushed writes: an empty batch without `shutdown` once
     /// closed with nothing left to send.
+    // Not inlined: Swift 6.3.3's optimizer miscompiles a continuation stored
+    // under a pthread lock (NIOLock) once this is inlined into a loop whose
+    // body also awaits; resuming it then jumps to address 0 (release only).
+    @inline(never)
     private func waitToWrite() async -> (batch: [ByteBuffer], shutdown: Bool) {
         _ = await withUnsafeContinuation { (c: UnsafeContinuation<Bool, Never>) in
             let now: Bool = shared.withLockedValue { s in

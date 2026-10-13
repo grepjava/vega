@@ -266,6 +266,10 @@ final class Acceptor: Sendable {
         self.task.withLockedValue { $0 = task }
     }
 
+    // Not inlined: Swift 6.3.3's optimizer miscompiles a continuation stored
+    // under a pthread lock (NIOLock) once this is inlined into a loop whose
+    // body also awaits; resuming it then jumps to address 0 (release only).
+    @inline(never)
     private func waitToAccept() async -> Bool {
         await withUnsafeContinuation { (c: UnsafeContinuation<Bool, Never>) in
             let now: Bool? = shared.withLockedValue { s in
