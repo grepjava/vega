@@ -53,7 +53,7 @@ let package = Package(
                                  .linkedLibrary("dl", .when(platforms: [.linux]))]),
         .target(name: "VegaHTTP1", dependencies: ["Vega", "VegaIO"], swiftSettings: swiftSettings),
         .target(name: "VegaHTTP2", dependencies: ["Vega", "VegaIO", "VegaHTTP1"], swiftSettings: swiftSettings),
-        .target(name: "VegaWebSocket", dependencies: ["Vega", "VegaIO", "VegaHTTP1"], swiftSettings: swiftSettings),
+        .target(name: "VegaWebSocket", dependencies: ["Vega", "VegaIO", "VegaHTTP1", "CVegaCompress"], swiftSettings: swiftSettings),
         .target(name: "VegaExtras", dependencies: ["Vega", "VegaIO", "VegaHTTP1", "CVegaCompress"], swiftSettings: swiftSettings),
         .testTarget(name: "VegaTests", dependencies: ["Vega", "VegaIO", "VegaFS", "VegaProcess", "VegaMetrics", "VegaTest", "VegaTLS", "VegaHTTP1", "VegaHTTP2", "VegaWebSocket", "VegaExtras", "CVega"], swiftSettings: swiftSettings),
     ],

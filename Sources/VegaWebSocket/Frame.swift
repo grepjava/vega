@@ -2,7 +2,8 @@
 // let a peer desynchronise the stream:
 //   * a client's frames must be masked and a server's must not be
 //   * a control frame is at most 125 bytes and never fragmented
-//   * RSV bits must be clear (no extension is negotiated)
+//   * RSV bits must be clear, but RSV1 on a message's first frame once
+//     permessage-deflate is agreed
 //   * an unknown opcode is a protocol error, not something to skip
 //   * lengths must use their shortest encoding
 
@@ -56,11 +57,14 @@ public struct WebSocketFrame: Sendable, Equatable {
     public var fin: Bool
     public var opcode: WebSocketOpcode
     public var payload: [UInt8]
+    /// RSV1: the message this frame starts is compressed (permessage-deflate).
+    public var compressed: Bool
 
-    public init(fin: Bool = true, opcode: WebSocketOpcode, payload: [UInt8] = []) {
+    public init(fin: Bool = true, opcode: WebSocketOpcode, payload: [UInt8] = [], compressed: Bool = false) {
         self.fin = fin
         self.opcode = opcode
         self.payload = payload
+        self.compressed = compressed
     }
 }
 
@@ -77,18 +81,27 @@ public struct WebSocketFrameCodec: Decoder, Encoder, Sendable {
     public var role: WebSocketRole
     /// A longer frame fails with `.messageTooBig` before it's buffered.
     public var maxFrameSize: Int
+    /// Whether RSV1 may mark a message's first frame compressed: once
+    /// permessage-deflate is agreed.
+    public var acceptsCompressed: Bool
 
-    public init(role: WebSocketRole, maxFrameSize: Int = 16 << 20) {
+    public init(role: WebSocketRole, maxFrameSize: Int = 16 << 20, acceptsCompressed: Bool = false) {
         self.role = role
         self.maxFrameSize = maxFrameSize
+        self.acceptsCompressed = acceptsCompressed
     }
 
     /// The next frame, or nil if `b` doesn't hold all of it.
     public func decodeFrame(_ b: UnsafeRawBufferPointer) throws(WebSocketError) -> (item: WebSocketFrame, consumed: Int)? {
         guard b.count >= 2 else { return nil }
         let b0 = b[0], b1 = b[1]
-        // No extension is negotiated, so every RSV bit must be clear.
-        guard b0 & 0x70 == 0, let opcode = WebSocketOpcode(rawValue: b0 & 0x0F) else {
+        // RSV2 and RSV3 are no extension's; RSV1 is permessage-deflate's,
+        // on the first frame of a data message.
+        guard b0 & 0x30 == 0, let opcode = WebSocketOpcode(rawValue: b0 & 0x0F) else {
+            throw .protocolViolation(.protocolError)
+        }
+        let compressed = b0 & 0x40 != 0
+        if compressed && (!acceptsCompressed || opcode.isControl || opcode == .continuation) {
             throw .protocolViolation(.protocolError)
         }
         let fin = b0 & 0x80 != 0
@@ -125,7 +138,7 @@ public struct WebSocketFrameCodec: Decoder, Encoder, Sendable {
         guard b.count - offset >= length else { return nil }
         var payload = Array(b[offset..<offset + length])
         if masked { applyMask(mask, to: &payload) }
-        return (WebSocketFrame(fin: fin, opcode: opcode, payload: payload), offset + length)
+        return (WebSocketFrame(fin: fin, opcode: opcode, payload: payload, compressed: compressed), offset + length)
     }
 
     public mutating func decode(_ bytes: UnsafeRawBufferPointer) throws(CodecError) -> (item: WebSocketFrame, consumed: Int)? {
@@ -138,7 +151,7 @@ public struct WebSocketFrameCodec: Decoder, Encoder, Sendable {
     }
 
     func write(_ frame: WebSocketFrame, into buffer: inout IOBuffer) {
-        var header: [UInt8] = [(frame.fin ? 0x80 : 0) | frame.opcode.rawValue]
+        var header: [UInt8] = [(frame.fin ? 0x80 : 0) | (frame.compressed ? 0x40 : 0) | frame.opcode.rawValue]
         let n = frame.payload.count
         let maskBit: UInt8 = role == .client ? 0x80 : 0
         if n < 126 {

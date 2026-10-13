@@ -1,3 +1,4 @@
+import CVegaCompress
 import Vega
 import VegaIO
 import VegaHTTP1
@@ -39,11 +40,17 @@ public struct WebSocketConfiguration: Sendable {
     public var maxFrameSize: Int
     /// Limits on the HTTP handshake.
     public var limits: HTTP1Limits
+    /// Offer (client) or accept (server) permessage-deflate (RFC 7692), so
+    /// messages of 64 bytes or more go compressed. Needs zlib: never on
+    /// Windows yet.
+    public var compression: Bool
 
-    public init(maxMessageSize: Int = 16 << 20, maxFrameSize: Int = 16 << 20, limits: HTTP1Limits = .init()) {
+    public init(maxMessageSize: Int = 16 << 20, maxFrameSize: Int = 16 << 20, limits: HTTP1Limits = .init(),
+                compression: Bool = false) {
         self.maxMessageSize = maxMessageSize
         self.maxFrameSize = maxFrameSize
         self.limits = limits
+        self.compression = compression && cv_ws_available() == 1
     }
 }
 
@@ -70,8 +77,12 @@ public struct WebSocket<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~Copyabl
     /// The upgrade request (server) or the 101 response (client).
     public let request: HTTPRequestHead?
     public let response: HTTPResponseHead?
+    /// What permessage-deflate was agreed as, if it was.
+    public let deflate: PerMessageDeflate?
 
     private var codec: WebSocketFrameCodec
+    private let compressor: DeflateContext?
+    private var fragmentCompressed = false
     private var buffer: IOBuffer
     private var start = 0
     private var output = IOBuffer(capacity: 4096)
@@ -88,17 +99,23 @@ public struct WebSocket<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~Copyabl
     /// was read past it.
     public init(_ stream: consuming Stream, role: WebSocketRole, leftover: [UInt8] = [],
                 configuration: WebSocketConfiguration = .init()) {
-        self.init(stream, role: role, leftover: leftover, configuration: configuration, request: nil, response: nil)
+        self.init(stream, role: role, leftover: leftover, configuration: configuration, request: nil, response: nil,
+                  deflate: nil)
     }
 
     private init(_ stream: consuming Stream, role: WebSocketRole, leftover: [UInt8],
-                 configuration: WebSocketConfiguration, request: HTTPRequestHead?, response: HTTPResponseHead?) {
+                 configuration: WebSocketConfiguration, request: HTTPRequestHead?, response: HTTPResponseHead?,
+                 deflate: PerMessageDeflate?) {
         self.stream = stream
         self.role = role
         self.configuration = configuration
         self.request = request
         self.response = response
-        codec = WebSocketFrameCodec(role: role, maxFrameSize: configuration.maxFrameSize)
+        let compressor = deflate.flatMap { DeflateContext($0, role: role) }
+        self.compressor = compressor
+        self.deflate = compressor == nil ? nil : deflate
+        codec = WebSocketFrameCodec(role: role, maxFrameSize: configuration.maxFrameSize,
+                                    acceptsCompressed: compressor != nil)
         buffer = IOBuffer(capacity: max(16 * 1024, leftover.count))
         leftover.withUnsafeBytes { buffer.write($0) }
     }
@@ -148,9 +165,14 @@ public struct WebSocket<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~Copyabl
             try await refuse(status, on: stream, fields: status == 426 ? ["sec-websocket-version": "13"] : [:])
             throw .handshake(reason)
         }
-        guard let fields = await accept(head) else {
+        guard var fields = await accept(head) else {
             try await refuse(403, on: stream)
             throw .handshake("refused")
+        }
+        var deflate: PerMessageDeflate?
+        if configuration.compression {
+            deflate = PerMessageDeflate.negotiate(head.fields.values(for: "sec-websocket-extensions"))
+            if let deflate { fields["sec-websocket-extensions"] = deflate.headerValue }
         }
         var encoder = HTTP1ResponseEncoder()
         var out = IOBuffer(capacity: 512)
@@ -164,7 +186,7 @@ public struct WebSocket<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~Copyabl
         let start = used
         let leftover = input.withUnsafeBytes { Array($0[start...]) }
         return WebSocket(stream, role: .server, leftover: leftover, configuration: configuration,
-                         request: head, response: nil)
+                         request: head, response: nil, deflate: deflate)
     }
 
     /// Ask the server at the other end of `stream` to upgrade `target`.
@@ -176,6 +198,8 @@ public struct WebSocket<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~Copyabl
         configuration: WebSocketConfiguration = .init()
     ) async throws(WebSocketError) -> WebSocket {
         let key = WebSocketHandshake.makeKey()
+        var fields = fields
+        if configuration.compression { fields["sec-websocket-extensions"] = PerMessageDeflate.clientOffer }
         let request = WebSocketHandshake.request(host: host, target: target, key: key, fields: fields)
         var encoder = HTTP1RequestEncoder()
         var out = IOBuffer(capacity: 512)
@@ -207,9 +231,14 @@ public struct WebSocket<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~Copyabl
                 guard WebSocketHandshake.accepts(head, key: key) else {
                     throw .handshake("the server answered \(head.status) \(head.reason)")
                 }
+                let extensions = head.fields.values(for: "sec-websocket-extensions")
+                guard configuration.compression || extensions.isEmpty else {
+                    throw .handshake("an extension that wasn't offered")
+                }
+                let deflate = try PerMessageDeflate.accepted(extensions)
                 let leftover = input.withUnsafeBytes { Array($0[n...]) }
                 return WebSocket(stream, role: .client, leftover: leftover, configuration: configuration,
-                                 request: nil, response: head)
+                                 request: nil, response: head, deflate: deflate)
             }
             if input.spareCapacity == 0 { input.reserveCapacity(input.capacity * 2) }
             let n: Int
@@ -268,18 +297,31 @@ public struct WebSocket<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~Copyabl
             // A new message while another is unfinished.
             guard fragmentOpcode == nil else { try await fail(.protocolError) }
             fragmentOpcode = frame.opcode
+            fragmentCompressed = frame.compressed
             utf8 = UTF8Validator()
         }
         guard fragments.count + frame.payload.count <= configuration.maxMessageSize else {
             try await fail(.messageTooBig)
         }
-        if fragmentOpcode == .text && !utf8.feed(frame.payload) { try await fail(.invalidPayload) }
+        // Compressed text is checked once it's inflated.
+        if fragmentOpcode == .text && !fragmentCompressed && !utf8.feed(frame.payload) { try await fail(.invalidPayload) }
         fragments += frame.payload
         guard frame.fin else { return nil }
         let opcode = fragmentOpcode
-        let payload = fragments
+        var payload = fragments
         fragmentOpcode = nil
         fragments = []
+        if fragmentCompressed, let compressor {
+            let inflated: [UInt8]?
+            do throws(WebSocketError) {
+                inflated = try compressor.decompress(payload, limit: configuration.maxMessageSize)
+            } catch {
+                try await fail(.invalidPayload)
+            }
+            guard let inflated else { try await fail(.messageTooBig) }
+            payload = inflated
+            if opcode == .text && !utf8.feed(payload) { try await fail(.invalidPayload) }
+        }
         if opcode == .text {
             guard utf8.isComplete else { try await fail(.invalidPayload) }
             return .text(String(decoding: payload, as: UTF8.self))
@@ -324,9 +366,14 @@ public struct WebSocket<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~Copyabl
 
     public mutating func send(_ message: WebSocketMessage) async throws(WebSocketError) {
         guard !sentClose else { throw .closed }
-        switch message {
-        case .text(let text): try await send(WebSocketFrame(opcode: .text, payload: Array(text.utf8)))
-        case .binary(let bytes): try await send(WebSocketFrame(opcode: .binary, payload: bytes))
+        let (opcode, payload): (WebSocketOpcode, [UInt8]) = switch message {
+        case .text(let text): (.text, Array(text.utf8))
+        case .binary(let bytes): (.binary, bytes)
+        }
+        if let compressed = compressor?.compress(payload) {
+            try await send(WebSocketFrame(opcode: opcode, payload: compressed, compressed: true))
+        } else {
+            try await send(WebSocketFrame(opcode: opcode, payload: payload))
         }
     }
 
