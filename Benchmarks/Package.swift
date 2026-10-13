@@ -25,6 +25,14 @@ let package = Package(
                            .product(name: "VegaHTTP1", package: "vega")],
             swiftSettings: [.swiftLanguageMode(.v6), .unsafeFlags(["-enforce-exclusivity=unchecked"])]
         ),
+        // vega-http over VegaTLS, for comparing TLS libraries.
+        .executableTarget(
+            name: "vega-https",
+            dependencies: [.product(name: "Vega", package: "vega"),
+                           .product(name: "VegaHTTP1", package: "vega"),
+                           .product(name: "VegaTLS", package: "vega")],
+            swiftSettings: [.swiftLanguageMode(.v6), .unsafeFlags(["-enforce-exclusivity=unchecked"])]
+        ),
         // UDP echo server, driven by tokio-bench's udp-load.
         .executableTarget(
             name: "vega-udp",

@@ -469,6 +469,42 @@ Closed-loop p50 at 512 connections was 8.5 ms for Hummingbird on both groups, an
 - **NIO's profile, for comparison:** kernel 41%, libswiftCore 27% (`swift_retain` and `swift_release` alone are 12.8%), plus `tryCast` and exclusivity checks (`swift_beginAccess`).
 - **Next for Vega's HTTP/1 path:** header names as bytes and allocation-free lookups of `content-length` and `connection`; fewer String allocations per response; and sending through io_uring, or coalescing pipelined responses.
 
+## TLS: OpenSSL against BoringSSL under vega-https (2026-10-14)
+
+`Benchmarks/Sources/vega-https` is vega-http over `TLSStream`. It is built twice:
+
+- **OpenSSL:** the normal build, linked against the box's system OpenSSL 3.5.5.
+- **BoringSSL:** built by `Benchmarks/tls-boringssl.sh`, which compiles the same VegaTLS shim against aviancore's vendored BoringSSL (817ab07, through swift-nio-ssl 2.37.4). The shim's few OpenSSL-3-only calls have adapters behind `OPENSSL_IS_BORINGSSL`, and VegaTLS's TLS tests pass on both libraries.
+
+**Setup.**
+- **Certificate:** both builds use the same ECDSA P-256 certificate, and both negotiate TLS 1.3 with `TLS_AES_256_GCM_SHA384`.
+- **Key exchange:** OpenSSL 3.5's defaults pick the post-quantum hybrid **X25519MLKEM768** whenever the client offers it, as oha 1.16 does. BoringSSL at this revision picks X25519. So OpenSSL runs twice: with its defaults, and limited to X25519 through `OPENSSL_CONF` (`Groups = X25519:P-256`).
+- **CPU split:** the server runs 4 workers on physical cores 0–1, and oha runs on cores 2–3 with `--insecure`.
+- **Measurement:** 15 s per run, 2 rounds, no errors. Server CPU is read from `/proc/<pid>/stat` across each run.
+
+**Keep-alive** (512 connections, so mostly record encryption):
+
+| Library | req/s | p50 | p99 | Server CPU per request |
+|---|---|---|---|---|
+| OpenSSL, default (X25519MLKEM768) | 86,205 / 78,715 | 2.6–2.8 ms | 17.4–19.9 ms | 46.2 / 50.6 µs |
+| OpenSSL, X25519 | 86,850 / 80,098 | 2.1–2.3 ms | 18.1–19.9 ms | 45.9 / 49.8 µs |
+| **BoringSSL** | **89,184 / 88,779** | 5.3–5.4 ms | **8.2–8.5 ms** | **44.6 / 44.8 µs** |
+
+**A new connection per request** (`--disable-keepalive`, 128 connections, so mostly handshakes):
+
+| Library | Handshakes/s | p50 | p99 | Server CPU per connection | Server cores busy |
+|---|---|---|---|---|---|
+| OpenSSL, default (X25519MLKEM768) | 2,972 / 2,964 | 42.4–42.7 ms | 57.8–58.2 ms | 891 / 893 µs | 2.6 |
+| OpenSSL, X25519 | 4,184 / 4,171 | 30.1 ms | 38.4–38.6 ms | 810 / 808 µs | 3.4 |
+| **BoringSSL** | **5,648 / 5,634** | **22.6 ms** | **25.3–26.1 ms** | **648 / 649 µs** | 3.7 |
+
+- **Handshakes:** BoringSSL completes 1.35× as many handshakes as OpenSSL on the same X25519, at 20% less server CPU per connection. Against OpenSSL's defaults it does 1.9×, at 27% less CPU.
+  - Some of the default's lower rate is the client's: the server was only 2.6 of 4 cores busy, because oha does the ML-KEM half too. CPU per connection is the server-only figure.
+  - aviancore, which picked BoringSSL for this reason, measured about 40% less per handshake. The gap here is smaller, perhaps because the figure also counts each connection's TCP setup and HTTP exchange. This run didn't profile where OpenSSL's extra time goes.
+- **Keep-alive:** BoringSSL uses 3–11% less CPU per request, and its throughput is the steadiest across rounds. Its p99 is less than half of OpenSSL's (8.3 ms against 17–20 ms). Its p50 is higher (5.4 ms against 2.1–2.8 ms): OpenSSL serves most requests quickly and a tail slowly, while BoringSSL is more even.
+- **The key exchange doesn't matter on keep-alive** (OpenSSL default against X25519 is level), because a key exchange happens once per connection.
+- **The cost of TLS:** keep-alive TLS costs about 45 µs of server CPU per request, against about 32 µs for plain vega-http in the same setup (sweep 5: 4 cores, 123k req/s).
+
 ## Measurement notes
 
 - **Wi-Fi can't drive the HTTP benchmarks.** A load generator on the dev machine reaches the box only over Wi-Fi, with a 7–80 ms round trip. Over Wi-Fi at 512 connections, vega-http and nio-http both measured 15–21k req/s, with no consistent order between rounds, and both measured about 6.4k at 64 connections: the round trip sets the rate. A second machine needs a wired gigabit link.

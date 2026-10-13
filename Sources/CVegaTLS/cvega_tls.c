@@ -8,19 +8,92 @@
 #endif
 #include "cvega_tls.h"
 
-#if __has_include(<openssl/ssl.h>) // none on iOS and the like: VegaTLS is empty there
+#if defined(VEGA_TLS_BORINGSSL)
+// Only for comparing TLS libraries (Benchmarks/tls-boringssl.sh): aviancore's
+// vendored BoringSSL, whose public names carry the CAvianSSL prefix.
+#include "CAvianSSL_err.h"
+#include "CAvianSSL_evp.h"
+#include "CAvianSSL_pem.h"
+#include "CAvianSSL_ssl.h"
+#include "CAvianSSL_x509v3.h"
+#define CV_HAVE_TLS 1
+#elif __has_include(<openssl/ssl.h>) // none on iOS and the like: VegaTLS is empty there
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
+#define CV_HAVE_TLS 1
+#endif
+
+#if CV_HAVE_TLS
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(OPENSSL_IS_BORINGSSL)
+#include <pthread.h>
+// OpenSSL 3 calls BoringSSL doesn't have.
+#define CRYPTO_RWLOCK pthread_mutex_t
+static pthread_mutex_t *cv_lock_new(void) {
+    pthread_mutex_t *m = malloc(sizeof *m);
+    if (m) pthread_mutex_init(m, NULL);
+    return m;
+}
+static void cv_lock_free(pthread_mutex_t *m) {
+    pthread_mutex_destroy(m);
+    free(m);
+}
+#define CRYPTO_THREAD_lock_new cv_lock_new
+#define CRYPTO_THREAD_lock_free cv_lock_free
+#define CRYPTO_THREAD_write_lock pthread_mutex_lock
+#define CRYPTO_THREAD_unlock pthread_mutex_unlock
+#define SSL_R_UNEXPECTED_EOF_WHILE_READING (-1) // BoringSSL reports SSL_ERROR_SYSCALL
+static EVP_PKEY *cv_keygen_p256(void) {
+    EC_KEY *ec = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+    EVP_PKEY *key = EVP_PKEY_new();
+    if (!ec || !key || !EC_KEY_generate_key(ec) || !EVP_PKEY_assign_EC_KEY(key, ec)) {
+        EC_KEY_free(ec);
+        EVP_PKEY_free(key);
+        return NULL;
+    }
+    return key;
+}
+#define EVP_PKEY_Q_keygen(lib, props, type, curve) cv_keygen_p256()
+// SSL_get_error needs SSL_read's own result in BoringSSL: 0 is a close
+// (close_notify or EOF), -1 is "retry" or an error.
+static _Thread_local int cv_last_read;
+static int cv_read_ex(SSL *ssl, void *buf, size_t len, size_t *n) {
+    int r = SSL_read(ssl, buf, len > INT_MAX ? INT_MAX : (int)len);
+    cv_last_read = r;
+    if (r <= 0) return 0;
+    *n = (size_t)r;
+    return 1;
+}
+static int cv_write_ex(SSL *ssl, const void *buf, size_t len, size_t *n) {
+    int r = SSL_write(ssl, buf, len > INT_MAX ? INT_MAX : (int)len);
+    if (r <= 0) return 0;
+    *n = (size_t)r;
+    return 1;
+}
+#define SSL_read_ex cv_read_ex
+#define SSL_write_ex cv_write_ex
+#define SSL_get1_peer_certificate SSL_get_peer_certificate // a new reference in BoringSSL too
+// BoringSSL's sessions are immutable once made, so sharing one is a copy.
+static SSL_SESSION *cv_session_dup(SSL_SESSION *s) {
+    SSL_SESSION_up_ref(s);
+    return s;
+}
+#define SSL_SESSION_dup cv_session_dup
+#define CV_READ_FAILED cv_last_read // OpenSSL wants 0 after SSL_read_ex
+// The vendored copy's prefix list misses X509V3_EXT_conf_nid, a wrapper.
+#define X509V3_EXT_conf_nid(conf, ctx, nid, value) X509V3_EXT_nconf_nid(NULL, ctx, nid, value)
+#else
 #if OPENSSL_VERSION_NUMBER < 0x30000000L
 #error "VegaTLS needs OpenSSL 3.0 or later"
+#endif
+#define CV_READ_FAILED 0
 #endif
 
 #if defined(_WIN32)
@@ -195,7 +268,7 @@ cv_tls_ctx *cv_tls_ctx_new(int server, char *err, int errlen) {
 void cv_tls_ctx_free(cv_tls_ctx *c) {
     if (!c) return;
     for (int i = 0; i < c->name_count; i++) {
-        free(c->names[i].name);
+        OPENSSL_free(c->names[i].name); // OPENSSL_strdup's
         SSL_CTX_free(c->names[i].ssl);
     }
     for (int i = 0; i < c->cache_size; i++) {
@@ -261,6 +334,11 @@ int cv_tls_ctx_add_trust(cv_tls_ctx *c, const char *pem, int len, char *err, int
         snprintf(err, (size_t)errlen, "trust roots: no certificate in the PEM data");
         return -1;
     }
+#if defined(OPENSSL_IS_BORINGSSL)
+    // Trust a given leaf itself, as OpenSSL does: BoringSSL otherwise looks
+    // for its issuer, and a self-signed leaf can't sign certificates.
+    X509_STORE_set_flags(store, X509_V_FLAG_PARTIAL_CHAIN);
+#endif
     return 0;
 }
 
@@ -489,7 +567,7 @@ intptr_t cv_tls_read(cv_tls *t, void *buf, intptr_t len) {
     ERR_clear_error();
     size_t n = 0;
     if (SSL_read_ex(t->ssl, buf, (size_t)len, &n) == 1) return (intptr_t)n;
-    int e = SSL_get_error(t->ssl, 0);
+    int e = SSL_get_error(t->ssl, CV_READ_FAILED);
     switch (e) {
     case SSL_ERROR_ZERO_RETURN: return 0;
     case SSL_ERROR_WANT_READ:
