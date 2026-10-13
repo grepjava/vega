@@ -306,16 +306,16 @@ private struct BoundPair: ~Copyable {
     var udp: UDPSocket
 }
 
-private func bindPair() throws -> BoundPair {
+private func bindPair(host: String, port: Int) throws -> BoundPair {
     var attempts = 0
     while true {
-        let udp = try UDPSocket.bind(host: "127.0.0.1", port: 0)
+        let udp = try UDPSocket.bind(host: host, port: port)
         do {
-            let listener = try TCPListener.bind(host: "127.0.0.1", port: try udp.localAddress.port ?? 0)
+            let listener = try TCPListener.bind(host: host, port: try udp.localAddress.port ?? 0)
             return BoundPair(listener: listener, udp: udp)
         } catch {
             attempts += 1
-            if attempts >= 250 { throw error }
+            if port != 0 || attempts >= 250 { throw error }
         }
     }
 }
@@ -482,8 +482,9 @@ private final class FakeNameserver: @unchecked Sendable {
 
     var questions: [String] { lock.withLock { log } }
 
-    init(_ rt: Runtime, answer: @escaping @Sendable (String, UInt16) -> Reply) throws {
-        let pair = try bindPair()
+    init(_ rt: Runtime, host: String = "127.0.0.1", port wanted: Int = 0,
+         answer: @escaping @Sendable (String, UInt16) -> Reply) throws {
+        let pair = try bindPair(host: host, port: wanted)
         port = pair.listener.localPort
         let listener = pair.listener
         let udp = pair.udp
@@ -699,6 +700,32 @@ private let v6: [UInt8] = [0x20, 0x01, 0x0d, 0xb8] + Array(repeating: 0, count: 
             return try await Resolver(config: c, hostsPath: nil).lookupIPv4(host: "svc.test", port: 1)
         }
         #expect(found.map(\.host) == ["10.1.2.3"])
+    }
+
+    /// After a dead server's timeout, lookups start with the one that answered.
+    @Test func theServerThatAnsweredIsTriedFirst() throws {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let (first, second) = try rt.block { () async throws -> (Duration, Duration) in
+            // Two loopback addresses with one port: a server that never
+            // answers (a refused port would fail at once), then a good one.
+            let good = try FakeNameserver(rt, host: "::1") { _, _ in .addresses([v4]) }
+            let silent = try FakeNameserver(rt, host: "127.0.0.1", port: good.port) { _, _ in .silent }
+            defer { good.stop(); silent.stop() }
+            var c = config(good, timeout: .milliseconds(300))
+            c.nameservers = ["127.0.0.1", "::1"]
+            let r = Resolver(config: c, hostsPath: nil)
+            var start = ContinuousClock.now
+            _ = try await r.lookupIPv4(host: "one.test", port: 1)
+            let first = ContinuousClock.now - start
+            start = ContinuousClock.now
+            _ = try await r.lookupIPv4(host: "two.test", port: 1) // not cached
+            let second = ContinuousClock.now - start
+            #expect(silent.questions.count == 1)
+            return (first, second)
+        }
+        #expect(first >= .milliseconds(250))
+        #expect(second < .milliseconds(150))
     }
 
     @Test func cancellingALookupEndsIt() throws {

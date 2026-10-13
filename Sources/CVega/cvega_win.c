@@ -8,6 +8,7 @@
 #include <afunix.h>
 #include <mstcpip.h>
 #include <mswsock.h>
+#include <iphlpapi.h>
 #include <windows.h>
 #include <errno.h>
 #include <limits.h>
@@ -377,6 +378,71 @@ void cv_uring_io_release(cv_io *io) {
     if (io->fd >= 0) closesocket(as_socket(io->fd));
     free(io);
     __atomic_sub_fetch(count, 1, __ATOMIC_RELEASE);
+}
+
+// ---- system DNS configuration ---------------------------------------------
+
+static void append(char *out, int len, int *used, const char *s) {
+    int n = (int)strlen(s);
+    if (*used + n + 1 > len) return;
+    memcpy(out + *used, s, (size_t)n);
+    *used += n;
+    out[*used] = 0;
+}
+
+int cv_system_dns_config(char *out, int len) {
+    if (len < 1) return -1;
+    out[0] = 0;
+    ULONG size = 16 * 1024;
+    IP_ADAPTER_ADDRESSES *list = NULL;
+    ULONG rc = ERROR_BUFFER_OVERFLOW;
+    for (int tries = 0; tries < 3 && rc == ERROR_BUFFER_OVERFLOW; tries++) {
+        free(list);
+        list = malloc(size);
+        if (!list) return -1;
+        rc = GetAdaptersAddresses(AF_UNSPEC,
+                                  GAA_FLAG_SKIP_UNICAST | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                      GAA_FLAG_SKIP_FRIENDLY_NAME,
+                                  NULL, list, &size);
+    }
+    if (rc != NO_ERROR) {
+        free(list);
+        return -1;
+    }
+    int used = 0;
+    char search[1024] = "";
+    int search_used = 0;
+    for (IP_ADAPTER_ADDRESSES *a = list; a; a = a->Next) {
+        if (a->OperStatus != IfOperStatusUp || a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+        for (IP_ADAPTER_DNS_SERVER_ADDRESS *d = a->FirstDnsServerAddress; d; d = d->Next) {
+            const struct sockaddr *sa = d->Address.lpSockaddr;
+            char host[INET6_ADDRSTRLEN] = "";
+            const void *src = sa->sa_family == AF_INET ? (const void *)&((const struct sockaddr_in *)sa)->sin_addr
+                            : sa->sa_family == AF_INET6 ? (const void *)&((const struct sockaddr_in6 *)sa)->sin6_addr
+                            : NULL;
+            if (!src || !inet_ntop(sa->sa_family, src, host, sizeof host)) continue;
+            // Windows' placeholder for "ask by site-local anycast": never answers.
+            if (strncmp(host, "fec0:0:0:ffff::", 15) == 0) continue;
+            char line[INET6_ADDRSTRLEN + 16];
+            snprintf(line, sizeof line, "nameserver %s\n", host);
+            if (!strstr(out, line)) append(out, len, &used, line);
+        }
+        if (a->DnsSuffix && a->DnsSuffix[0]) {
+            char suffix[256];
+            if (WideCharToMultiByte(CP_UTF8, 0, a->DnsSuffix, -1, suffix, sizeof suffix, NULL, NULL) > 0 &&
+                !strstr(search, suffix)) {
+                append(search, sizeof search, &search_used, " ");
+                append(search, sizeof search, &search_used, suffix);
+            }
+        }
+    }
+    free(list);
+    if (search_used > 0) {
+        append(out, len, &used, "search");
+        append(out, len, &used, search);
+        append(out, len, &used, "\n");
+    }
+    return used;
 }
 
 // ---- Unix domain sockets (AF_UNIX, Windows 10 1803 and later) -------------

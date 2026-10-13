@@ -51,10 +51,24 @@ public struct ResolverConfig: Sendable, Equatable {
 }
 
 extension ResolverConfig {
-    /// The system's configuration, from `path`. A missing or unreadable file
-    /// gives the defaults, and no nameserver gives `fallbackNameserver`.
-    public static func system(path: String = "/etc/resolv.conf") -> ResolverConfig {
-        var config = readSmallFile(path).map(parse) ?? ResolverConfig()
+    /// The system's configuration: from `path` in resolv.conf form, or, with
+    /// nil, the platform's own (/etc/resolv.conf; on Windows, the DNS servers
+    /// and suffixes of the network adapters that are up). A missing or
+    /// unreadable file gives the defaults, and no nameserver gives
+    /// `fallbackNameserver`.
+    public static func system(path: String? = nil) -> ResolverConfig {
+        var config: ResolverConfig
+        if let path {
+            config = readSmallFile(path).map(parse) ?? ResolverConfig()
+        } else {
+            #if os(Windows)
+            var buf = [CChar](repeating: 0, count: 8192)
+            let n = cv_system_dns_config(&buf, Int32(buf.count))
+            config = n > 0 ? parse(String(cString: buf)) : ResolverConfig()
+            #else
+            config = readSmallFile("/etc/resolv.conf").map(parse) ?? ResolverConfig()
+            #endif
+        }
         if config.nameservers.isEmpty { config.nameservers = [fallbackNameserver] }
         return config
     }

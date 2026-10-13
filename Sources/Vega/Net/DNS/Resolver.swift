@@ -1,5 +1,6 @@
 #if os(Linux) || canImport(Darwin) || os(Windows)
 import CVega
+import Synchronization
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
@@ -64,18 +65,32 @@ public enum ResolveError: Error, Sendable, Hashable, CustomStringConvertible {
 /// name" and "no address" for 30 s, so a typo can't become a query storm.
 /// Unlike `getaddrinfo` it doesn't consult nsswitch, mDNS or other sources.
 public final class Resolver: Sendable {
-    /// The system's configuration (/etc/resolv.conf and /etc/hosts), read
-    /// once on first use.
+    /// The system's configuration (/etc/resolv.conf and /etc/hosts; on
+    /// Windows the adapters' DNS servers and the hosts file under
+    /// %SystemRoot%), read once on first use.
     public static let system = Resolver()
+
+    /// The platform's hosts file.
+    public static var defaultHostsPath: String {
+        #if os(Windows)
+        let root = getenv("SystemRoot").map { String(cString: $0) } ?? #"C:\Windows"#
+        return root + #"\System32\drivers\etc\hosts"#
+        #else
+        return "/etc/hosts"
+        #endif
+    }
 
     public let config: ResolverConfig
     let hosts: HostsFile
     let cache: ResolverCache
+    /// The server that last gave a definite answer: lookups start there, so
+    /// a dead server early in the list costs one timeout, not one per lookup.
+    private let preferred = Atomic<Int>(0)
 
     /// - Parameters:
     ///   - hostsPath: a hosts file to consult first, or nil for none.
     ///   - cacheLimit: the most answers kept.
-    public init(config: ResolverConfig = .system(), hostsPath: String? = "/etc/hosts",
+    public init(config: ResolverConfig = .system(), hostsPath: String? = Resolver.defaultHostsPath,
                 cacheLimit: Int = 512) {
         self.config = config
         hosts = hostsPath.map(HostsFile.read) ?? HostsFile()
@@ -158,12 +173,21 @@ public final class Resolver: Sendable {
             guard case .success(let a?) = SocketAddress.resolve(server, config.port, numericOnly: true) else { return nil }
             return a.first
         }
+        let first = servers.isEmpty ? 0 : preferred.load(ordering: .relaxed) % servers.count
         candidates: for candidate in config.candidates(for: name) {
-            for server in servers {
+            for k in servers.indices {
+                let index = (first + k) % servers.count
+                let server = servers[index]
                 for _ in 0..<max(config.attempts, 1) {
                     var answer = await ask(candidate, type, server, overTCP: false)
                     // Truncated means "ask me over TCP": the same server holds the answer.
                     if case .truncated = answer { answer = await ask(candidate, type, server, overTCP: true) }
+                    switch answer {
+                    case .addresses, .noSuchName, .empty:
+                        if index != first { preferred.store(index, ordering: .relaxed) }
+                    default:
+                        break
+                    }
                     switch answer {
                     case .addresses(let found, let ttl):
                         let r = Result<[[UInt8]], ResolveError>.success(found)

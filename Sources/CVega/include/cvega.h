@@ -200,6 +200,9 @@ void cv_driver_want(cv_io *io, int dir);
 void cv_close_socket(int fd);
 /// 0 or an errno value.
 int cv_shutdown_write(int fd);
+/// The system's DNS servers and search suffixes (adapters that are up), as
+/// resolv.conf text in out. Its length, or -1.
+int cv_system_dns_config(char *out, int len);
 #endif
 
 // ---- sockets -------------------------------------------------------------

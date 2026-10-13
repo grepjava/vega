@@ -73,10 +73,15 @@ import ucrt
         let rt = Runtime(workers: 1, blockingThreads: 1)
         defer { rt.shutdown() }
         let (threads, queued) = try rt.block { () async throws -> (Int, Int) in
-            let first = rt.spawn { await Runtime.blocking { _ = usleep(100_000) } }
-            let second = rt.spawn { await Runtime.blocking { _ = usleep(100_000) } }
-            try await Runtime.sleep(for: .milliseconds(30))
-            let m = rt.metrics
+            let first = rt.spawn { await Runtime.blocking { _ = usleep(300_000) } }
+            let second = rt.spawn { await Runtime.blocking { _ = usleep(300_000) } }
+            // Until the one thread has taken a job (it can be slow to start).
+            var m = rt.metrics
+            let deadline = ContinuousClock.now + .seconds(2)
+            while m.blockingQueueDepth != 1 && ContinuousClock.now < deadline {
+                try await Runtime.sleep(for: .milliseconds(5))
+                m = rt.metrics
+            }
             await first.value
             await second.value
             return (m.blockingThreads, m.blockingQueueDepth)
