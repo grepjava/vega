@@ -166,7 +166,10 @@ enum NetworkIO {
     static func listen(host: String, port: Int, backlog: Int, reusePort: Bool,
                        connectionOptions: [SocketOption: Int] = [:]) throws(IOError) -> IORegistration {
         guard port >= 0, port <= 65535 else { throw IOError(code: EINVAL) }
-        let params = try parameters(connectionOptions, reuse: reusePort)
+        // Always, as cv_tcp_listen sets SO_REUSEADDR: without it Network.framework
+        // refuses a second listener on the port even on another address (::1
+        // after 127.0.0.1). An exact duplicate is still EADDRINUSE.
+        let params = try parameters(connectionOptions, reuse: true)
         let p = port == 0 ? NWEndpoint.Port.any : NWEndpoint.Port(rawValue: UInt16(port))!
         if !host.isEmpty { params.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(host), port: p) }
         let listener: NWListener

@@ -134,6 +134,25 @@ import Testing
         #expect(error == .connectionRefused)
     }
 
+    /// As with sockets: one port on two loopback addresses is fine, the same
+    /// address twice is not.
+    @Test func listenersShareAPortAcrossAddresses() throws {
+        let rt = runtime()
+        defer { rt.shutdown() }
+        let (port, second, duplicate) = try rt.block { () async throws(IOError) -> (Int, Int, IOError?) in
+            let v6 = try TCPListener.bind(host: "::1", port: 0)
+            let v4 = try TCPListener.bind(host: "127.0.0.1", port: v6.localPort)
+            do throws(IOError) {
+                _ = try TCPListener.bind(host: "127.0.0.1", port: v6.localPort)
+                return (v6.localPort, v4.localPort, nil)
+            } catch {
+                return (v6.localPort, v4.localPort, error)
+            }
+        }
+        #expect(second == port)
+        #expect(duplicate == IOError(code: EADDRINUSE))
+    }
+
     /// Everything but TCP keeps the kqueue driver.
     @Test func pipesStillWork() throws {
         let rt = runtime()
