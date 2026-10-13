@@ -115,6 +115,16 @@ public struct Framed<C: Codec>: ~Copyable { /* AsyncSequence of C.Item + send(_:
 | `iocp` | Windows | AFD poll for readiness-style sockets plus native overlapped I/O (`AcceptEx`, `WSARecv`, `TransmitFile`); this is what Tokio's mio uses. Needs a Winsock layer in CAvian; BoringSSL already has Windows defines |
 | `network` | iOS, tvOS, watchOS, visionOS, and optionally macOS clients | `NWConnection` and `NWListener`, with TLS handled by Network.framework; current-thread or multi-thread runtime, no shards |
 
+**The `network` driver, as built (v0.3).** TCP only. In a runtime with `IOBackend.network`, `TCPStream` and `TCPListener` run over `NWConnection` and `NWListener`, and kqueue stays for UDP, Unix sockets, pipes and processes. Measured costs are in [BENCHMARKS.md](BENCHMARKS.md). The gaps:
+
+- **UDP.** `UDPSocket` stays on kqueue, which works on every Apple platform but doesn't get Network.framework's cellular and VPN bring-up or interface choice.
+  - `NWConnection` over UDP is connected, one peer per connection. An unconnected `UDPSocket` (`send(to:)` / `receive(from:)`) would need `NWConnectionGroup`, or an `NWListener` for UDP plus one connection per peer.
+  - Raw UDP isn't what Apple clients need from it. QUIC and HTTP/3 are (v0.5), and there `NWProtocolQUIC`, Network.framework's own QUIC with its own UDP, is likely the better route than Vega's QUIC over raw Network.framework datagrams.
+  - So UDP waits for that decision rather than getting an adapter that would be replaced.
+- **Socket options** are fixed when Network.framework makes a connection. `TCPClient.options` and `TCPServer.connectionOptions` are applied then. Setting an option on an open socket throws `.unsupported`, unless it already has that value.
+- **One listener per port.** Several `TCPServer` accept loops share one `NWListener`.
+- **No processes and no shards** on iOS, tvOS, watchOS or visionOS. Apps there may not fork or spawn. `Command.spawn` throws `ENOTSUP`, and `Runtime.sharded` and its types are unavailable at compile time.
+
 - **Selection.** The driver is a closed `enum`, switched in `@inlinable` code, never an existential.
 - **The io_uring rule:** submit on the local ring, complete on the local ring, resume on any thread.
 - **In-flight operations.** Each lives in an `OpSlab` slot that keeps its buffer alive until the kernel's completion arrives, including after cancellation.

@@ -19,7 +19,7 @@ public enum IOBackend: Sendable, Equatable {
     case ioUring
     /// Apple's Network.framework (`NWConnection`, `NWListener`) for TCP; the
     /// readiness driver (kqueue) stays for everything else (UDP, Unix
-    /// sockets, pipes, processes). The default on iOS-family platforms,
+    /// sockets, pipes, processes): see docs/PLAN.md for why UDP waits. The default on iOS-family platforms,
     /// where BSD sockets don't bring up the cellular radio or VPN on demand;
     /// opt-in on macOS. Elsewhere it means `.automatic`.
     case network

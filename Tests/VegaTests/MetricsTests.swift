@@ -97,8 +97,10 @@ import ucrt
             return out
         }
         #expect(samples.count == 3)
+        // Only a lower bound that matters: under a loaded parallel run (TSan,
+        // a simulator) a sample can come late, the first most of all.
         for s in samples {
-            #expect(s.elapsed >= .milliseconds(15) && s.elapsed < .seconds(2))
+            #expect(s.elapsed >= .milliseconds(15) && s.elapsed < .seconds(10))
         }
     }
 

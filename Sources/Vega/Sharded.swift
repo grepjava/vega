@@ -10,6 +10,10 @@ import ucrt
 
 /// One shard of a sharded server: a process with its own runtime, pinned
 /// to its share of the CPUs. See `Runtime.sharded(_:_:)`.
+@available(iOS, unavailable)
+@available(tvOS, unavailable)
+@available(watchOS, unavailable)
+@available(visionOS, unavailable)
 public struct Shard: Sendable {
     /// 0 ..< `count`; the same index across restarts.
     public let index: Int
@@ -41,6 +45,10 @@ public struct Shard: Sendable {
 }
 
 /// A TCP listener the shards share (`ShardOptions.listeners`).
+@available(iOS, unavailable)
+@available(tvOS, unavailable)
+@available(watchOS, unavailable)
+@available(visionOS, unavailable)
 public struct ShardListener: Sendable, Hashable {
     public var host: String
     /// 0 picks a free port, the same for every shard.
@@ -53,6 +61,10 @@ public struct ShardListener: Sendable, Hashable {
 }
 
 /// How shards share their listeners.
+@available(iOS, unavailable)
+@available(tvOS, unavailable)
+@available(watchOS, unavailable)
+@available(visionOS, unavailable)
 public enum ShardListenerMode: Sendable, Hashable {
     /// `.perShard` on Linux, `.shared` elsewhere.
     case automatic
@@ -77,6 +89,10 @@ public enum ShardListenerMode: Sendable, Hashable {
 }
 
 /// How the supervisor starts a shard process.
+@available(iOS, unavailable)
+@available(tvOS, unavailable)
+@available(watchOS, unavailable)
+@available(visionOS, unavailable)
 public enum ShardLaunch: Sendable, Hashable {
     /// `.fork` on Linux, `.exec` elsewhere.
     case automatic
@@ -104,6 +120,10 @@ public enum ShardLaunch: Sendable, Hashable {
 }
 
 /// A listener as the supervisor set it up.
+@available(iOS, unavailable)
+@available(tvOS, unavailable)
+@available(watchOS, unavailable)
+@available(visionOS, unavailable)
 struct PreparedListener: Sendable {
     let host: String
     let port: Int
@@ -113,6 +133,10 @@ struct PreparedListener: Sendable {
 }
 
 /// What the supervisor saw, for logging.
+@available(iOS, unavailable)
+@available(tvOS, unavailable)
+@available(watchOS, unavailable)
+@available(visionOS, unavailable)
 public enum ShardEvent: Sendable, Equatable {
     case started(shard: Int, pid: Int32)
     /// A shard process ended: with an exit code, or killed by a signal.
@@ -127,6 +151,10 @@ public enum ShardEvent: Sendable, Equatable {
 }
 
 /// How `Runtime.sharded` lays out and supervises its shards.
+@available(iOS, unavailable)
+@available(tvOS, unavailable)
+@available(watchOS, unavailable)
+@available(visionOS, unavailable)
 public struct ShardOptions: Sendable {
     /// Shard processes; nil: one per last-level cache domain (L3, read from
     /// sysfs on Linux), else one.
@@ -159,6 +187,11 @@ public struct ShardOptions: Sendable {
     }
 }
 
+// Apps on iOS, tvOS, watchOS and visionOS may not fork or spawn processes.
+@available(iOS, unavailable)
+@available(tvOS, unavailable)
+@available(watchOS, unavailable)
+@available(visionOS, unavailable)
 extension Runtime {
     /// Run a server as K shard processes, each with its own multi-threaded
     /// runtime on its own CPUs, under a supervisor (the hybrid fault model:
@@ -241,6 +274,10 @@ extension Runtime {
 
 /// The supervisor's loop. Single-threaded, synchronous: it must never
 /// start a thread, or later forks would copy a process in an unknown state.
+@available(iOS, unavailable)
+@available(tvOS, unavailable)
+@available(watchOS, unavailable)
+@available(visionOS, unavailable)
 private struct Supervisor {
     let options: ShardOptions
     let layout: [[Int]]
@@ -531,6 +568,10 @@ private extension StringProtocol {
 /// - `VEGA_SHARD_FDS`: per listener, "fd:port": the shared socket's number
 ///   in the shard (or -1 to bind its own), and the port.
 /// - `VEGA_SHARD_PARENT`: the supervisor's pid.
+@available(iOS, unavailable)
+@available(tvOS, unavailable)
+@available(watchOS, unavailable)
+@available(visionOS, unavailable)
 enum ExecShard {
     static let keys = ["VEGA_SHARD", "VEGA_SHARD_COUNT", "VEGA_SHARD_CPUS", "VEGA_SHARD_FDS", "VEGA_SHARD_PARENT"]
 
