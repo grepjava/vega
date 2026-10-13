@@ -7,10 +7,18 @@ import Testing
 /// The uring driver, asked for explicitly (the rest of the suite runs on it
 /// with `VEGA_DRIVER=uring`). Skipped where the kernel can't run it.
 @Suite(.enabled(if: URing.supported)) struct URingTests {
+    /// Ring memory counts against RLIMIT_MEMLOCK and closed rings are freed
+    /// asynchronously, so while other tests churn through runtimes a new one
+    /// can briefly fall back to epoll (by design). Allow for that.
     @Test func runtimeUsesRings() {
-        let rt = Runtime(workers: 2, io: .ioUring)
-        defer { rt.shutdown() }
-        #expect(rt.ioBackend == .ioUring)
+        var backend = IOBackend.readiness
+        for _ in 0..<100 where backend != .ioUring {
+            let rt = Runtime(workers: 2, io: .ioUring)
+            backend = rt.ioBackend
+            rt.shutdown()
+            if backend != .ioUring { usleep(20_000) }
+        }
+        #expect(backend == .ioUring)
         #expect(Runtime(workers: 1, io: .readiness).ioBackend == .readiness)
     }
 
