@@ -9,7 +9,7 @@ Update the table whenever a PR changes state: opened, reviewed, CI run, merged, 
 | PR | Title | Vega patch | Opened | Status |
 |---|---|---|---|---|
 | [swiftlang/swift#93174](https://github.com/swiftlang/swift/pull/93174) | Concurrency: remove cancellation handlers without taking the status record lock | 0002 | 2026-10-12 | ktoso replied positively and started CI (Linux, Windows, macOS); pending on 2026-10-12 |
-| [swiftlang/swift#93173](https://github.com/swiftlang/swift/pull/93173) | Runtime: load 16-byte atomics with one aligned vector load on x86-64 | 0005 | 2026-10-12 | Awaiting review |
+| [swiftlang/swift#93173](https://github.com/swiftlang/swift/pull/93173) | Runtime: load 16-byte atomics with one aligned vector load on x86-64 | 0005 | 2026-10-12 | Reviewed 2026-10-12: mikeash suggested a three-state byte in place of the guarded static, rjmccall suggested skipping CPUID when built for `__AVX__`. Both done in 8df8d30, pushed 2026-10-13 (lit on Linux x86-64: 378 passed, 166 unsupported, unchanged). Reply to reviewers not yet posted |
 | [swiftlang/swift#93179](https://github.com/swiftlang/swift/pull/93179) | Concurrency: tell TSan when a continuation is resumed before its await | — (found while testing Vega's sync primitives) | 2026-10-12 | Awaiting review |
 | [swiftlang/swift#93180](https://github.com/swiftlang/swift/pull/93180) | Concurrency: Task.yield enqueues without copying the current executor | 0004 | 2026-10-12 | Awaiting review. Measured −35% per yield on a custom task executor (8 threads); no change on the default Dispatch executor |
 
