@@ -294,8 +294,11 @@ private func listDirectory(_ path: String) throws(IOError) -> [DirectoryEntry] {
             if errno != 0 { throw IOError(code: errno) }
             return entries
         }
-        let name = withUnsafePointer(to: &entry.pointee.d_name) {
-            $0.withMemoryRebound(to: CChar.self, capacity: 256) { String(cString: $0) }
+        let name = withUnsafePointer(to: &entry.pointee.d_name) { field in
+            // 256 bytes on Linux, 1024 on Darwin.
+            field.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: field.pointee)) {
+                String(cString: $0)
+            }
         }
         if name == "." || name == ".." { continue }
         let full = joined(path, name)
