@@ -185,7 +185,9 @@ private func drain(_ conn: borrowing TCPStream) async -> [UInt8] {
             return ([], total, false)
         }
         #expect(sawFull)
-        #expect(sentInline > 0)
+        // Network.framework has no synchronous send: tryWrite is always 0
+        // there, and everything goes by write.
+        #expect(sentInline > 0 || rt.ioBackend == .network)
         // Whole rounds, then one round split between tryWrite and write.
         let rounds = sentInline / chunk.count + 1
         var expected: [UInt8] = []

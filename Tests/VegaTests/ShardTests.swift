@@ -47,6 +47,7 @@ import Testing
         #expect(cv_thread_count() > 1)
     }
 
+    #if os(Linux) || os(macOS) // sharding is unavailable on iOS and the rest
     @Test func readsTheShardCountFromTheEnvironment() {
         unsetenv("VEGA_SHARDS")
         #expect(Runtime.shardsFromEnvironment() == nil)
@@ -56,8 +57,10 @@ import Testing
         #expect(Runtime.shardsFromEnvironment() == 4)
         unsetenv("VEGA_SHARDS")
     }
+    #endif
 }
 
+#if os(Linux) || os(macOS)
 /// `shards` 0: the sharded body runs here, with threads already running,
 /// and its listeners work as in a shard.
 @Suite struct InProcessShardTests {
@@ -98,4 +101,5 @@ import Testing
         #expect(replies.allSatisfy { $0 == "a" || $0 == "b" })
     }
 }
+#endif
 #endif
