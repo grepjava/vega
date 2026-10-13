@@ -236,7 +236,15 @@ private func string(_ chars: [CChar], _ count: Int) -> String {
 }
 
 private func readText(_ path: String) throws(IOError) -> String {
-    guard let f = fopen(path, "rb") else { throw IOError(code: errno) }
+    guard let f = fopen(path, "rb") else {
+        #if os(Windows)
+        var code: Int32 = 0
+        _ = _get_errno(&code)
+        throw IOError(code: code)
+        #else
+        throw IOError(code: errno)
+        #endif
+    }
     defer { fclose(f) }
     var bytes: [UInt8] = []
     var chunk = [UInt8](repeating: 0, count: 16 * 1024)

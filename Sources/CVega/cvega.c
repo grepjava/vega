@@ -774,6 +774,7 @@ static BOOL CALLBACK load_ntdll(PINIT_ONCE once, PVOID param, PVOID *ctx) {
 #define POLL_READ 1u
 #define POLL_WRITE 2u
 #define POLL_CLOSING 4u
+#define POLL_SOCKET POLL_READ // a socket's one poll is in flight
 
 typedef struct cv_poll_op {
     cv_iosb iosb; // first: the completion's lpOverlapped points here
@@ -805,9 +806,17 @@ typedef struct cv_io_win {
     cv_driver *driver;
     int kind;
     SOCKET base; // the base provider socket, which AFD polls
-    // Sockets: a poll in flight per direction. Pipes: a read or write in
-    // flight. Handles: the wait, until its callback has posted.
+    // Sockets: POLL_SOCKET while the poll is in flight. Pipes: a read or
+    // write in flight. Handles: the wait, until its callback has posted.
     _Atomic uint32_t state;
+    // Sockets have one poll at a time, for every direction wanted: AFD
+    // loses events when a socket has two (wepoll issue 35, JDK-8334574).
+    // op[0] is that poll; `lock` covers it, the fields below, and every
+    // change to `state` for a socket.
+    SRWLOCK lock;
+    uint32_t wanted;  // directions with a waiter (POLL_READ, POLL_WRITE)
+    uint32_t polling; // the directions the poll in flight asks about
+    int cancelling;   // that poll is being cancelled, to ask about more
     cv_poll_op op[2];
     cv_pipe_op pipe[2];
     HANDLE wait, target; // handles: the wait and our copy of what it waits for
@@ -934,28 +943,29 @@ static void push_released(cv_driver *d, cv_io *io) {
                                                     memory_order_release, memory_order_relaxed));
 }
 
-static ULONG poll_mask(int dir) {
-    // Errors and closes complete both directions: the retried call reports them.
-    ULONG common = AFD_POLL_DISCONNECT | AFD_POLL_ABORT | AFD_POLL_LOCAL_CLOSE | AFD_POLL_CONNECT_FAIL;
-    return dir == CV_IO_READ ? AFD_POLL_RECEIVE | AFD_POLL_ACCEPT | common : AFD_POLL_SEND | common;
+// Errors and closes complete both directions: the retried call reports them.
+#define AFD_POLL_COMMON (AFD_POLL_DISCONNECT | AFD_POLL_ABORT | AFD_POLL_LOCAL_CLOSE | AFD_POLL_CONNECT_FAIL)
+
+static ULONG poll_mask(uint32_t dirs) {
+    ULONG mask = AFD_POLL_COMMON;
+    if (dirs & POLL_READ) mask |= AFD_POLL_RECEIVE | AFD_POLL_ACCEPT;
+    if (dirs & POLL_WRITE) mask |= AFD_POLL_SEND;
+    return mask;
 }
 
-void cv_driver_want(cv_io *raw, int dir) {
-    cv_io_win *io = (cv_io_win *)raw;
-    if (io->kind != IO_SOCKET) return; // the request itself completes on the port
-    uint32_t bit = dir == CV_IO_READ ? POLL_READ : POLL_WRITE;
-    uint32_t cur = atomic_load_explicit(&io->state, memory_order_acquire);
-    do {
-        if (cur & (bit | POLL_CLOSING)) return; // in flight already, or going away
-    } while (!atomic_compare_exchange_weak_explicit(&io->state, &cur, cur | bit,
-                                                    memory_order_acq_rel, memory_order_acquire));
-    cv_poll_op *op = &io->op[dir];
+// Submit the socket's poll for every direction wanted. Under io->lock,
+// with no poll in flight and the socket not closing.
+static void poll_submit(cv_io_win *io) {
+    cv_poll_op *op = &io->op[0];
+    io->polling = io->wanted;
+    io->cancelling = 0;
+    atomic_fetch_or_explicit(&io->state, POLL_SOCKET, memory_order_acq_rel);
     memset(&op->iosb, 0, sizeof op->iosb);
     op->info.Timeout.QuadPart = INT64_MAX;
     op->info.NumberOfHandles = 1;
     op->info.Exclusive = FALSE;
     op->info.Handles[0].Handle = (HANDLE)io->base;
-    op->info.Handles[0].Events = poll_mask(dir);
+    op->info.Handles[0].Events = poll_mask(io->polling);
     op->info.Handles[0].Status = 0;
     op->iosb.Status = CV_STATUS_PENDING;
     NTSTATUS st = nt_device_io_control_file(io->driver->afd, NULL, NULL, &op->iosb, &op->iosb,
@@ -963,11 +973,32 @@ void cv_driver_want(cv_io *raw, int dir) {
                                             sizeof op->info);
     if (st != CV_STATUS_PENDING && st != 0) {
         // Not submitted, so no completion comes: post one that says "ready",
-        // and the retried call finds out what's wrong.
-        op->info.Handles[0].Events = poll_mask(dir);
+        // and the retried calls find out what's wrong.
+        op->info.Handles[0].Events = poll_mask(io->polling);
         op->iosb.Status = 0;
         PostQueuedCompletionStatus(io->driver->port, 0, 0, (LPOVERLAPPED)&op->iosb);
     }
+}
+
+void cv_driver_want(cv_io *raw, int dir) {
+    cv_io_win *io = (cv_io_win *)raw;
+    if (io->kind != IO_SOCKET) return; // the request itself completes on the port
+    uint32_t bit = dir == CV_IO_READ ? POLL_READ : POLL_WRITE;
+    AcquireSRWLockExclusive(&io->lock);
+    uint32_t state = atomic_load_explicit(&io->state, memory_order_acquire);
+    if (!(state & POLL_CLOSING)) {
+        io->wanted |= bit;
+        if (!(state & POLL_SOCKET)) {
+            poll_submit(io);
+        } else if (!(io->polling & bit) && !io->cancelling) {
+            // The poll in flight doesn't ask about this direction: cancel it,
+            // and its completion submits one that asks about both.
+            io->cancelling = 1;
+            cv_iosb cancel;
+            nt_cancel_io_file_ex(io->driver->afd, &io->op[0].iosb, &cancel);
+        }
+    }
+    ReleaseSRWLockExclusive(&io->lock);
 }
 
 static int pipe_broken(DWORD e) {
@@ -1159,21 +1190,38 @@ int cv_driver_turn(cv_driver *d, cv_parker *p, int64_t timeout_ns) {
         }
         cv_poll_op *op = (cv_poll_op *)(void *)e->lpOverlapped;
         cv_io_win *io = op->io;
-        int dir = op->dir;
-        ULONG events = op->iosb.Status == 0 && op->info.NumberOfHandles > 0 ? op->info.Handles[0].Events : 0;
+        NTSTATUS status = op->iosb.Status;
+        ULONG events = status == 0 && op->info.NumberOfHandles > 0 ? op->info.Handles[0].Events : 0;
+        AcquireSRWLockExclusive(&io->lock);
         // Out of flight before waking anyone: a task arming after this
         // submits a new poll rather than waiting on this finished one.
-        uint32_t bit = dir == CV_IO_READ ? POLL_READ : POLL_WRITE;
-        uint32_t old = atomic_fetch_and_explicit(&io->state, ~bit, memory_order_acq_rel);
+        uint32_t old = atomic_fetch_and_explicit(&io->state, ~POLL_SOCKET, memory_order_acq_rel);
         if (old & POLL_CLOSING) {
-            if ((old & ~bit) == POLL_CLOSING) io_free(&io->io); // the last thing holding it
+            ReleaseSRWLockExclusive(&io->lock);
+            if ((old & ~POLL_SOCKET) == POLL_CLOSING) io_free(&io->io); // the last thing holding it
             continue;
         }
-        if (events & (AFD_POLL_DISCONNECT | AFD_POLL_ABORT | AFD_POLL_LOCAL_CLOSE | AFD_POLL_CONNECT_FAIL))
-            __atomic_store_n(&io->io.read_closed, 1, __ATOMIC_RELEASE);
-        // A cancelled or failed poll still wakes its waiter: it retries.
-        uintptr_t w = io_ready(&io->io, dir);
-        if (w) d->wakes[woken++] = w;
+        uint32_t ready;
+        if (status == CV_STATUS_CANCELLED) {
+            ready = 0; // cancelled to ask about more directions
+        } else if (status != 0) {
+            ready = io->polling; // failed: its waiters retry, and see why
+        } else {
+            ready = 0;
+            if (events & (AFD_POLL_RECEIVE | AFD_POLL_ACCEPT | AFD_POLL_COMMON)) ready |= POLL_READ;
+            if (events & (AFD_POLL_SEND | AFD_POLL_COMMON)) ready |= POLL_WRITE;
+            ready &= io->polling;
+        }
+        if (events & AFD_POLL_COMMON) __atomic_store_n(&io->io.read_closed, 1, __ATOMIC_RELEASE);
+        io->wanted &= ~ready;
+        // Directions still waited on get a new poll.
+        if (io->wanted) poll_submit(io);
+        ReleaseSRWLockExclusive(&io->lock);
+        for (int dir = 0; dir < 2; dir++) {
+            if (!(ready & (dir == CV_IO_READ ? POLL_READ : POLL_WRITE))) continue;
+            uintptr_t w = io_ready(&io->io, dir);
+            if (w) d->wakes[woken++] = w;
+        }
     }
     d->stats.wakes += (uint64_t)woken;
     return woken;
@@ -1206,6 +1254,7 @@ cv_io *cv_driver_register(cv_driver *d, int fd, int *err) {
     io->io.refs = 1;
     io->driver = d;
     io->base = base;
+    InitializeSRWLock(&io->lock);
     for (int dir = 0; dir < 2; dir++) {
         io->op[dir].io = io;
         io->op[dir].dir = dir;
@@ -1219,6 +1268,22 @@ cv_io *cv_driver_register(cv_driver *d, int fd, int *err) {
 void cv_driver_deregister(cv_driver *d, cv_io *raw) {
     if (__atomic_sub_fetch(&raw->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
     cv_io_win *io = (cv_io_win *)raw;
+    if (io->kind == IO_SOCKET) {
+        // Under the lock, so no completion submits a new poll after this.
+        AcquireSRWLockExclusive(&io->lock);
+        uint32_t old = atomic_fetch_or_explicit(&io->state, POLL_CLOSING, memory_order_acq_rel);
+        if (old & POLL_SOCKET) {
+            cv_iosb cancel;
+            nt_cancel_io_file_ex(d->afd, &io->op[0].iosb, &cancel);
+        }
+        ReleaseSRWLockExclusive(&io->lock);
+        atomic_fetch_sub_explicit(&d->registered, 1, memory_order_relaxed);
+        closesocket((SOCKET)raw->fd);
+        // Nothing in flight: no completion will free it, so the next turn does
+        // (one may be handling this io's last completion right now).
+        if (!(old & POLL_SOCKET)) push_released(d, raw);
+        return;
+    }
     uint32_t old = atomic_fetch_or_explicit(&io->state, POLL_CLOSING, memory_order_acq_rel);
     atomic_fetch_sub_explicit(&d->registered, 1, memory_order_relaxed);
     if (io->kind == IO_PIPE) {
@@ -1230,12 +1295,6 @@ void cv_driver_deregister(cv_driver *d, cv_io *raw) {
             push_released(d, raw);
         }
         return;
-    }
-    for (int dir = 0; dir < 2; dir++) {
-        if (old & (dir == CV_IO_READ ? POLL_READ : POLL_WRITE)) {
-            cv_iosb cancel;
-            nt_cancel_io_file_ex(d->afd, &io->op[dir].iosb, &cancel);
-        }
     }
     closesocket((SOCKET)raw->fd);
     // Nothing in flight: no completion will free it, so the next turn does
