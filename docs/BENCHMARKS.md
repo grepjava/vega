@@ -399,6 +399,7 @@ Requests per second against [the-benchmarker/web-frameworks](https://github.com/
 
 - **Hummingbird 2 and Vapor 4,** built from `VegaNIO/Examples`, each on NIOPosix (`MultiThreadedEventLoopGroup`) and on VegaNIO (`VegaEventLoopGroup`), with the same binary for both. See [HUMMINGBIRD2.md](HUMMINGBIRD2.md) and [VAPOR.md](VAPOR.md).
 - **Native Vega:** `Benchmarks/Sources/vega-http`, `HTTP1Server` from VegaHTTP1 with one task per connection. It has no NIO, no framework and no router, and it adds no `date` or `server` header.
+- **Native NIO:** `Benchmarks/nio-http`, the same contract on NIOPosix and NIOHTTP1 with no framework (sweep 4 only).
 
 **Load.**
 - **Ramp** is the-benchmarker's own load: `zrk -R1000:500000`, an open-loop ramp from 1,000 to 500,000 requests a second over 15 s, after a 5 s warm-up. The figure is zrk's achieved rate. Every server is overloaded by the end of the ramp, so its latencies are mostly queueing, not service time.
@@ -435,9 +436,20 @@ Closed-loop p50 at 512 connections was 8.5 ms for Hummingbird on both groups, an
 | **Native Vega (VegaHTTP1)** | **158,388** | **169,734** | **0.6 s** |
 
 - **VegaNIO is at parity with NIOPosix, not faster.** NIO's pipeline, its `EventLoopFuture`s, its HTTP/1 codec and the framework above them all stay, and they cost more than the event loop underneath. Swapping the event loop moves throughput by about 5% either way.
-- **Native Vega does 2.4–2.6× Hummingbird and about 3.3× Vapor.** Part of that gap is framework work (routing, middleware, headers), not NIO itself. Separating the two would take a minimal NIOPosix server with NIO's HTTP/1 handlers alone.
-- **The load generator likely caps native Vega,** since it shares the CPUs. Its ratio is a lower bound.
+- **Native Vega does 2.4–2.6× Hummingbird and about 3.3× Vapor.** Most of that gap is the framework, not NIO: see sweep 4.
 - **Vapor on NIOPosix in sweep 3** is noisy: 55.4k then 48.3k. Sweeps 1 and 2 had it near 48k, so the first round is probably the outlier.
+
+**NIOPosix against Vega without a framework, sweep 4** (e8fb356), 512 connections, 2 rounds, req/s. `Benchmarks/nio-http` is the counterpart of `vega-http`: NIOPosix with NIO's own HTTP/1 handlers (`configureHTTPServerPipeline`) and one handler that answers the same three routes with the same headers (only `content-length`). Both use 8 threads and TCP_NODELAY.
+
+| Server | Ramp r1 | Ramp r2 | Closed r1 | Closed r2 | Closed p50 / p99 |
+|---|---|---|---|---|---|
+| Hummingbird, NIOPosix | 65,423 | 65,916 | 57,292 | 56,786 | 8.4 / 19.3 ms |
+| nio-http (NIOPosix + NIOHTTP1) | 141,944 | 143,655 | 112,248 | 111,937 | 4.6 / 11.1 ms |
+| **vega-http (VegaHTTP1)** | **195,524** | **178,104** | **128,825** | **129,529** | **3.7 / 10.8 ms** |
+
+- **Vega against NIO is 1.24–1.38× under the ramp and 1.15× closed-loop,** with a 20% lower closed-loop median latency and the same p99.
+- **Hummingbird's own layers halve NIO's throughput:** nio-http does 2.0× (closed) to 2.2× (ramp) Hummingbird on the same NIOPosix. So of native Vega's 2.5–2.9× over Hummingbird, about 2× is the framework and 1.15–1.3× is NIO against Vega.
+- **The load generator is likely the limit for both bare servers,** more so closed-loop: oha costs more CPU per request than zrk, and it shares the 8 threads with the server. The closed-loop ratio is the one most likely understated. The plan's target is 1.5× NIO on HTTP/1. Measuring it properly needs the load generator on other cores (`PIN=`) or another machine.
 
 ## Measurement notes
 
