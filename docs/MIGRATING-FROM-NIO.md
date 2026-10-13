@@ -4,7 +4,7 @@ This guide is for code written against SwiftNIO (`NIOCore`, `NIOPosix`, `NIOExtr
 
 Vega has no channel pipeline and no futures. A connection is a value you `await` on, protocol logic is a codec or a plain async function, and the runtime is a work-stealing scheduler that every task runs on. Most NIO code gets shorter in the move, because the state that handlers kept between callbacks becomes local variables in one async function.
 
-If you need to keep NIO handlers running unchanged during a migration, `VegaNIO` (planned; see [PLAN.md](PLAN.md)) will provide NIO's `EventLoopGroup`, `Channel` and bootstraps on top of Vega's I/O. This guide covers the native API.
+If you need to keep NIO handlers running unchanged during a migration, the [`VegaNIO`](../VegaNIO/README.md) package provides NIO's `EventLoopGroup`, `Channel` and bootstraps on top of Vega's I/O. This guide covers the native API.
 
 The Vega snippets below compile and run against Vega at the commit that added this guide; they were checked in a scratch package that depends on `Vega`, `VegaIO`, `VegaFS` and `VegaTest`. The NIO snippets show the usual pattern and are not compiled here.
 
