@@ -30,5 +30,12 @@ let package = Package(
             dependencies: [.product(name: "Vega", package: "vega")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        // Runtime.sharded end to end: shards, crash restart, reload, stop.
+        .executableTarget(
+            name: "vega-shard-check",
+            dependencies: [.product(name: "Vega", package: "vega"),
+                           .product(name: "VegaProcess", package: "vega")],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
     ]
 )

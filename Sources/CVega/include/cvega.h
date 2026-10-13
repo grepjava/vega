@@ -252,6 +252,21 @@ int cv_pidfd_signal(int pidfd, int sig);
 /// waitpid, retrying EINTR: 1 reaped (*status set), 0 still running
 /// (nohang), or -errno.
 int cv_waitpid(int pid, int nohang, int *status);
+
+/// The shard supervisor's signals (SIGCHLD, SIGTERM, SIGINT, SIGHUP): from
+/// now on they're taken by cv_supervisor_next, not delivered. Call before
+/// any thread starts. 0 or an errno value.
+int cv_supervisor_init(void);
+/// fork(2) a shard: in the child, signals as they were before
+/// cv_supervisor_init, and (Linux) SIGTERM when the supervisor dies.
+/// The pid, 0 in the child, or -errno.
+int cv_supervisor_fork(void);
+/// Wait up to timeout_ns (< 0: forever): 1 when a child ended (*pid,
+/// *status as waitpid gives it), 2 for SIGTERM, SIGINT or SIGHUP (*status
+/// = the signal), 0 on timeout, or -errno.
+int cv_supervisor_next(int64_t timeout_ns, int *pid, int *status);
+/// Threads in this process, or -1 where unknown (non-Linux).
+int cv_thread_count(void);
 /// getsockname / getpeername. 0 or an errno value.
 int cv_local_address(int fd, cv_sockaddr *out);
 int cv_peer_address(int fd, cv_sockaddr *out);

@@ -22,6 +22,9 @@
 #include <signal.h>
 #include <spawn.h>
 #include <sys/socket.h>
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -1035,6 +1038,130 @@ int cv_waitpid(int pid, int nohang, int *status) {
         if (r == 0) return 0;
         if (errno != EINTR) return -errno;
     }
+}
+
+// MARK: - Shard supervisor
+//
+// The supervisor is single-threaded and takes its signals synchronously:
+// blocked and collected with sigtimedwait on Linux; ignored and reported
+// by a kqueue's EVFILT_SIGNAL on Darwin (which has no sigtimedwait).
+
+static sigset_t sup_old_mask;
+static int sup_ready;
+#if defined(__APPLE__)
+static int sup_kq = -1;
+#endif
+
+static void sup_set(sigset_t *set) {
+    sigemptyset(set);
+    sigaddset(set, SIGCHLD);
+    sigaddset(set, SIGTERM);
+    sigaddset(set, SIGINT);
+    sigaddset(set, SIGHUP);
+}
+
+int cv_supervisor_init(void) {
+    if (sup_ready) return 0;
+    sigset_t set;
+    sup_set(&set);
+#if defined(__APPLE__)
+    sup_kq = kqueue();
+    if (sup_kq < 0) return errno;
+    struct kevent ev[4];
+    int sigs[4] = {SIGCHLD, SIGTERM, SIGINT, SIGHUP};
+    for (int i = 0; i < 4; i++) EV_SET(&ev[i], sigs[i], EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
+    if (kevent(sup_kq, ev, 4, NULL, 0, NULL) < 0) return errno;
+    // Ignored, not blocked: kqueue still records them. SIGCHLD stays at its
+    // default (ignoring it would reap children for us).
+    signal(SIGTERM, SIG_IGN);
+    signal(SIGINT, SIG_IGN);
+    signal(SIGHUP, SIG_IGN);
+    sigemptyset(&set);
+#endif
+    int rc = pthread_sigmask(SIG_BLOCK, &set, &sup_old_mask);
+    if (rc != 0) return rc;
+    sup_ready = 1;
+    return 0;
+}
+
+int cv_supervisor_fork(void) {
+    pid_t parent = getpid();
+    pid_t pid = fork();
+    if (pid < 0) return -errno;
+    if (pid > 0) return pid;
+    // The shard: default dispositions, the mask from before the supervisor.
+    signal(SIGTERM, SIG_DFL);
+    signal(SIGINT, SIG_DFL);
+    signal(SIGHUP, SIG_DFL);
+    pthread_sigmask(SIG_SETMASK, &sup_old_mask, NULL);
+#if defined(__linux__)
+    // Go when the supervisor does (it may have died before we got here).
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
+    if (getppid() != parent) _exit(1);
+#else
+    (void)parent;
+#endif
+    return 0;
+}
+
+int cv_supervisor_next(int64_t timeout_ns, int *pid, int *status) {
+    for (;;) {
+        int st = 0;
+        pid_t p = waitpid(-1, &st, WNOHANG);
+        if (p > 0) {
+            *pid = p;
+            *status = st;
+            return 1;
+        }
+#if defined(__linux__)
+        sigset_t set;
+        sup_set(&set);
+        struct timespec ts, *tsp = NULL;
+        if (timeout_ns >= 0) {
+            ts.tv_sec = timeout_ns / 1000000000;
+            ts.tv_nsec = timeout_ns % 1000000000;
+            tsp = &ts;
+        }
+        siginfo_t si;
+        int sig = sigtimedwait(&set, &si, tsp);
+        if (sig < 0) {
+            if (errno == EAGAIN) return 0;
+            if (errno == EINTR) continue;
+            return -errno;
+        }
+#else
+        struct timespec ts, *tsp = NULL;
+        if (timeout_ns >= 0) {
+            ts.tv_sec = timeout_ns / 1000000000;
+            ts.tv_nsec = timeout_ns % 1000000000;
+            tsp = &ts;
+        }
+        struct kevent ev;
+        int n = kevent(sup_kq, NULL, 0, &ev, 1, tsp);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -errno;
+        }
+        if (n == 0) return 0;
+        int sig = (int)ev.ident;
+#endif
+        if (sig == SIGCHLD) continue; // reaped at the top
+        *status = sig;
+        return 2;
+    }
+}
+
+int cv_thread_count(void) {
+#if defined(__linux__)
+    char buf[4096];
+    long n = cv_read_small_file("/proc/self/status", buf, sizeof buf - 1);
+    if (n <= 0) return -1;
+    buf[n] = 0;
+    char *t = strstr(buf, "\nThreads:");
+    return t ? atoi(t + 9) : -1;
+#else
+    return -1;
+#endif
 }
 
 int cv_sockaddr_port(const cv_sockaddr *a) {

@@ -63,7 +63,9 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     /// A current-thread runtime: a thread is inside `block`.
     let driving = Atomic<Bool>(false)
 
-    init(workers count: Int, name: String, pin: Bool, io: IOBackend = .automatic,
+    /// `cpus`: with `pin`, worker i goes on `cpus[i % cpus.count]` (default:
+    /// CPU i).
+    init(workers count: Int, name: String, pin: Bool, cpus cpuList: [Int]? = nil, io: IOBackend = .automatic,
          currentThread: Bool = false,
          blockingThreads: Int = 512, blockingKeepAlive: Duration = .seconds(10)) {
         precondition(count >= 1, "a runtime needs at least one worker")
@@ -120,13 +122,13 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
             w.owner = me
         }
 
-        let cpus = Int(cv_cpu_count())
+        let cpus = cpuList.flatMap { $0.isEmpty ? nil : $0 } ?? Array(0..<Int(cv_cpu_count()))
         for w in workers where !currentThread {
             _ = Unmanaged.passRetained(self) // released by the thread when it exits
             let arg = Unmanaged.passRetained(w).toOpaque()
             let rc = cv_thread_spawn({ raw in
                 Unmanaged<Worker>.fromOpaque(raw!).takeRetainedValue().run()
-            }, arg, "\(name)-\(w.index)", pin ? Int32(w.index % cpus) : -1)
+            }, arg, "\(name)-\(w.index)", pin ? Int32(cpus[w.index % cpus.count]) : -1)
             precondition(rc == 0, "vega: cannot start worker thread (errno \(rc))")
         }
     }
