@@ -38,6 +38,7 @@
 #include <sys/random.h>
 #include <sys/syscall.h>
 #elif defined(__APPLE__)
+#include <mach-o/dyld.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <os/os_sync_wait_on_address.h>
@@ -1136,6 +1137,66 @@ int cv_supervisor_fork(void) {
     if (sup_watch_parent(parent) != 0 || getppid() != parent) _exit(1);
 #endif
     return 0;
+}
+
+int cv_shard_spawn(const char *path, char *const argv[], char *const envp[],
+                   const int *fds, const int *targets, int count, int *pid) {
+    posix_spawn_file_actions_t fa;
+    posix_spawnattr_t attr;
+    int rc = posix_spawn_file_actions_init(&fa);
+    if (rc != 0) return rc;
+    rc = posix_spawnattr_init(&attr);
+    if (rc != 0) {
+        posix_spawn_file_actions_destroy(&fa);
+        return rc;
+    }
+    // Listeners at the numbers named in the environment. dup2 leaves the
+    // copy without FD_CLOEXEC, so it survives the exec.
+    for (int i = 0; i < count && rc == 0; i++) rc = posix_spawn_file_actions_adddup2(&fa, fds[i], targets[i]);
+    // The mask from before the supervisor blocked its signals (Linux), and
+    // the dispositions it set to SIG_IGN (Darwin) back at their defaults:
+    // both would survive the exec.
+    sigset_t def;
+    sup_set(&def);
+    short flags = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF;
+#if defined(__APPLE__)
+    flags |= POSIX_SPAWN_CLOEXEC_DEFAULT; // stdio and the listeners only
+    for (int i = 0; i < 3 && rc == 0; i++) rc = posix_spawn_file_actions_addinherit_np(&fa, i);
+#endif
+    if (rc == 0) rc = posix_spawnattr_setsigmask(&attr, &sup_old_mask);
+    if (rc == 0) rc = posix_spawnattr_setsigdefault(&attr, &def);
+    if (rc == 0) rc = posix_spawnattr_setflags(&attr, flags);
+    if (rc == 0) {
+        pid_t child = 0;
+        rc = posix_spawn(&child, path, &fa, &attr, argv, envp);
+        if (rc == 0) *pid = child;
+    }
+    posix_spawnattr_destroy(&attr);
+    posix_spawn_file_actions_destroy(&fa);
+    return rc;
+}
+
+int cv_shard_adopt(int parent) {
+#if defined(__linux__)
+    // PR_SET_PDEATHSIG doesn't carry over from the supervisor: set it here.
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
+#else
+    if (sup_watch_parent(parent) != 0) return -1;
+#endif
+    return getppid() == parent ? 0 : -1;
+}
+
+int cv_self_exe(char *buf, int len) {
+#if defined(__APPLE__)
+    uint32_t size = (uint32_t)len;
+    if (_NSGetExecutablePath(buf, &size) != 0) return ENAMETOOLONG;
+    return 0;
+#else
+    ssize_t n = readlink("/proc/self/exe", buf, (size_t)len - 1);
+    if (n < 0) return errno;
+    buf[n] = 0;
+    return 0;
+#endif
 }
 
 int cv_supervisor_next(int64_t timeout_ns, int *pid, int *status) {

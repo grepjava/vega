@@ -36,6 +36,12 @@ func serve(port: Int) -> Never {
     case "perShard": options.listenerMode = .perShard
     default: break
     }
+    // VEGA_SHARD_LAUNCH=fork or exec; else the platform's default.
+    switch getenv("VEGA_SHARD_LAUNCH").map({ String(cString: $0) }) {
+    case "fork": options.launch = .fork
+    case "exec": options.launch = .exec
+    default: break
+    }
     Runtime.sharded(options) { shard in
         do {
             try shard.runtime.block { () async throws(IOError) in

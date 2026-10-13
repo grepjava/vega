@@ -54,7 +54,7 @@ public struct ShardListener: Sendable, Hashable {
 public enum ShardListenerMode: Sendable, Hashable {
     /// `.perShard` on Linux, `.shared` elsewhere.
     case automatic
-    /// The supervisor binds each listener before forking; every shard
+    /// The supervisor binds each listener before starting shards; every shard
     /// accepts on that one socket, and a connection goes to a shard waiting
     /// in accept. Balances by who's free; works everywhere.
     case shared
@@ -70,6 +70,33 @@ public enum ShardListenerMode: Sendable, Hashable {
         return .perShard
         #else
         return .shared
+        #endif
+    }
+}
+
+/// How the supervisor starts a shard process.
+public enum ShardLaunch: Sendable, Hashable {
+    /// `.fork` on Linux, `.exec` elsewhere.
+    case automatic
+    /// `fork` alone: the shard carries on from the `Runtime.sharded` call
+    /// with the supervisor's memory. Fast, but only safe where the system
+    /// libraries survive a fork without exec (Linux): on Darwin, os_log and
+    /// libdispatch state the Swift runtime touches is gone in the child, and
+    /// shards crash at random.
+    case fork
+    /// `posix_spawn` of the same executable with the same arguments: the
+    /// shard runs `main` again, and its `Runtime.sharded` call (told by the
+    /// environment which shard it is) runs `body` right away. Code before
+    /// that call runs in every shard, so it must do the same thing each time
+    /// and have no side effects. Listeners and ports carry over.
+    case exec
+
+    var resolved: ShardLaunch {
+        guard self == .automatic else { return self }
+        #if os(Linux)
+        return .fork
+        #else
+        return .exec
         #endif
     }
 }
@@ -113,9 +140,11 @@ public struct ShardOptions: Sendable {
     /// SIGKILL. A second SIGTERM or SIGINT doesn't wait.
     public var shutdownGracePeriod: Duration = .seconds(30)
     /// Listeners the shards serve, set up by the supervisor before the
-    /// first fork; a shard takes each with `Shard.listener(_:)`.
+    /// first shard starts; a shard takes each with `Shard.listener(_:)`.
     public var listeners: [ShardListener] = []
     public var listenerMode: ShardListenerMode = .automatic
+    /// How shard processes start (see `ShardLaunch`).
+    public var launch: ShardLaunch = .automatic
     /// Thread name prefix; shard i's runtime is "\(name)\(i)".
     public var name = "vega-s"
     /// Called in the supervisor for each event (synchronously: keep it
@@ -152,8 +181,12 @@ extension Runtime {
     /// ```
     ///
     /// Call it first thing in a synchronous `main`, before any thread or
-    /// task exists: shards are forked, and a fork copies only the calling
-    /// thread. (On Linux this is checked.) The calling process becomes the
+    /// task exists: a forked shard copies only the calling thread (this is
+    /// checked). With `ShardLaunch.exec` (the default on Darwin) each shard
+    /// runs `main` again up to this call, which then runs `body` at once
+    /// with the options and closure as that run builds them: code before
+    /// the call must be deterministic and free of side effects. Events and
+    /// restarts are the same in both modes. The calling process becomes the
     /// supervisor and never runs `body`: it starts the shards, restarts the
     /// ones that crash, passes SIGTERM or SIGINT on to them (then SIGKILL
     /// after `shutdownGracePeriod`), restarts them one by one on SIGHUP, and
@@ -161,10 +194,14 @@ extension Runtime {
     /// finished cleanly, 1 when one crashed and isn't restarted.
     ///
     /// In a shard, `body` runs on the process's main thread with the
-    /// shard's runtime; when it returns, the shard exits 0. On Linux a
-    /// shard gets SIGTERM if the supervisor dies.
+    /// shard's runtime; when it returns, the shard exits 0. A shard gets
+    /// SIGTERM if the supervisor dies.
     public static func sharded(_ options: ShardOptions = ShardOptions(),
                                _ body: @escaping (Shard) -> Void) -> Never {
+        if let launched = ExecShard.fromEnvironment(options) {
+            Supervisor.runShard(options, launched.index, count: launched.count, cpus: launched.cpus,
+                                listeners: launched.listeners, body: body)
+        }
         let threads = cv_thread_count()
         precondition(threads <= 1, "Runtime.sharded must run before any thread starts (\(threads) running)")
         let layout = Topology.layout(shards: options.shards, workersPerShard: options.workersPerShard)
@@ -254,8 +291,17 @@ private struct Supervisor {
     }
 
     mutating func start(_ i: Int) {
-        let pid = cv_supervisor_fork()
-        if pid == 0 { runShard(i) }
+        let pid: Int32
+        switch options.launch.resolved {
+        case .exec:
+            pid = ExecShard.spawn(i, count: layout.count, cpus: layout[i], listeners: listeners)
+        default:
+            pid = cv_supervisor_fork()
+            if pid == 0 {
+                Supervisor.runShard(options, i, count: layout.count, cpus: layout[i], listeners: listeners,
+                                    body: body)
+            }
+        }
         guard pid > 0 else {
             // Out of processes or memory: try again shortly.
             pending[i] = cv_now_ns() &+ 1_000_000_000
@@ -267,12 +313,12 @@ private struct Supervisor {
         options.onEvent?(.started(shard: i, pid: pid))
     }
 
-    func runShard(_ i: Int) -> Never {
-        let cpus = layout[i]
+    static func runShard(_ options: ShardOptions, _ i: Int, count: Int, cpus: [Int],
+                         listeners: [PreparedListener], body: (Shard) -> Void) -> Never {
         let workers = options.workersPerShard ?? cpus.count
         let rt = Runtime(scheduler: Scheduler(workers: max(workers, 1), name: "\(options.name)\(i)",
                                               pin: options.pinThreads, cpus: cpus))
-        body(Shard(index: i, count: layout.count, cpus: cpus, runtime: rt, listeners: listeners))
+        body(Shard(index: i, count: count, cpus: cpus, runtime: rt, listeners: listeners))
         rt.shutdown()
         exit(0)
     }
@@ -472,6 +518,108 @@ private extension StringProtocol {
         while let c = s.first, c.isWhitespace { s.removeFirst() }
         while let c = s.last, c.isWhitespace { s.removeLast() }
         return String(s)
+    }
+}
+/// Exec mode (`ShardLaunch.exec`): what the supervisor passes a shard in
+/// its environment, and the shard reads back.
+///
+/// - `VEGA_SHARD`: the shard's index.
+/// - `VEGA_SHARD_COUNT`: how many shards there are.
+/// - `VEGA_SHARD_CPUS`: its CPU list ("0,1,2,3").
+/// - `VEGA_SHARD_FDS`: per listener, "fd:port": the shared socket's number
+///   in the shard (or -1 to bind its own), and the port.
+/// - `VEGA_SHARD_PARENT`: the supervisor's pid.
+enum ExecShard {
+    static let keys = ["VEGA_SHARD", "VEGA_SHARD_COUNT", "VEGA_SHARD_CPUS", "VEGA_SHARD_FDS", "VEGA_SHARD_PARENT"]
+
+    struct Launched {
+        let index: Int
+        let count: Int
+        let cpus: [Int]
+        let listeners: [PreparedListener]
+    }
+
+    /// In a shard: its settings, with the variables removed so the shard's
+    /// own children don't see them. Nil in the supervisor.
+    static func fromEnvironment(_ options: ShardOptions) -> Launched? {
+        guard let raw = getenv("VEGA_SHARD") else { return nil }
+        func value(_ key: String) -> String { getenv(key).map { String(cString: $0) } ?? "" }
+        let index = Int(String(cString: raw)), count = Int(value("VEGA_SHARD_COUNT"))
+        let cpus = Topology.parseList(value("VEGA_SHARD_CPUS"))
+        let parent = Int32(value("VEGA_SHARD_PARENT"))
+        let fds = value("VEGA_SHARD_FDS").split(separator: ",").map { pair -> (Int32, Int)? in
+            let p = pair.split(separator: ":")
+            guard p.count == 2, let fd = Int32(p[0]), let port = Int(p[1]) else { return nil }
+            return (fd, port)
+        }
+        for key in keys { unsetenv(key) }
+        guard let index, let count, index >= 0, index < count, let parent,
+              fds.count == options.listeners.count, fds.allSatisfy({ $0 != nil }) else {
+            fail("a shard's VEGA_SHARD settings don't match its ShardOptions")
+        }
+        // Gone already, or going: nobody would supervise this shard.
+        if cv_shard_adopt(parent) != 0 { exit(1) }
+        let listeners = zip(options.listeners, fds).map { spec, pair -> PreparedListener in
+            let (fd, port) = pair!
+            if fd >= 0 { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) } // not for the shard's children
+            return PreparedListener(host: spec.host, port: port, backlog: spec.backlog, shared: fd)
+        }
+        return Launched(index: index, count: count, cpus: cpus, listeners: listeners)
+    }
+
+    /// In the supervisor: start shard `i` as a new run of this executable.
+    /// Returns its pid, or -1.
+    static func spawn(_ i: Int, count: Int, cpus: [Int], listeners: [PreparedListener]) -> Int32 {
+        var path = [CChar](repeating: 0, count: 4096)
+        guard cv_self_exe(&path, Int32(path.count)) == 0 else { return -1 }
+        // Shared sockets go above every one of them, so no dup2 overwrites
+        // a socket still to be copied.
+        let sources = listeners.map(\.shared).filter { $0 >= 0 }
+        var next = (sources.max() ?? 2) + 1
+        var fds: [Int32] = [], targets: [Int32] = [], named: [String] = []
+        for l in listeners {
+            if l.shared >= 0 {
+                fds.append(l.shared)
+                targets.append(next)
+                named.append("\(next):\(l.port)")
+                next += 1
+            } else {
+                named.append("-1:\(l.port)")
+            }
+        }
+        var env: [String] = []
+        if let environ = cv_environ() {
+            var p = environ
+            while let entry = p.pointee {
+                let s = String(cString: entry)
+                if !keys.contains(where: { s.hasPrefix($0 + "=") }) { env.append(s) }
+                p += 1
+            }
+        }
+        env += ["VEGA_SHARD=\(i)", "VEGA_SHARD_COUNT=\(count)",
+                "VEGA_SHARD_CPUS=\(cpus.map(String.init).joined(separator: ","))",
+                "VEGA_SHARD_FDS=\(named.joined(separator: ","))", "VEGA_SHARD_PARENT=\(getpid())"]
+        var pid: Int32 = -1
+        let rc = withCStrings(CommandLine.arguments) { argv in
+            withCStrings(env) { envp in
+                cv_shard_spawn(path, argv, envp, fds, targets, Int32(fds.count), &pid)
+            }
+        }
+        return rc == 0 ? pid : -1
+    }
+
+    private static func withCStrings<R>(_ strings: [String],
+                                        _ body: (UnsafePointer<UnsafeMutablePointer<CChar>?>) -> R) -> R {
+        var pointers = strings.map { strdup($0) }
+        pointers.append(nil)
+        defer { for p in pointers { free(p) } }
+        return pointers.withUnsafeBufferPointer { body($0.baseAddress!) }
+    }
+
+    private static func fail(_ message: String) -> Never {
+        let line = "vega: \(message)\n"
+        _ = line.withCString { write(2, $0, strlen($0)) }
+        exit(1)
     }
 }
 #endif

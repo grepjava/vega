@@ -265,6 +265,17 @@ int cv_supervisor_fork(void);
 /// *status as waitpid gives it), 2 for SIGTERM, SIGINT or SIGHUP (*status
 /// = the signal), 0 on timeout, or -errno.
 int cv_supervisor_next(int64_t timeout_ns, int *pid, int *status);
+/// Exec mode: start a shard as a new run of `path`, with listener fds[i]
+/// at targets[i] in the child, the signal mask from before
+/// cv_supervisor_init, and the supervisor's signals at their defaults.
+/// Returns 0 or an errno value.
+int cv_shard_spawn(const char *path, char *const argv[], char *const envp[],
+                   const int *fds, const int *targets, int count, int *pid);
+/// In an exec'd shard: end with the supervisor `parent` (SIGTERM, as a
+/// forked shard). -1 if it is gone already.
+int cv_shard_adopt(int parent);
+/// This process's executable path. Returns 0 or an errno value.
+int cv_self_exe(char *buf, int len);
 /// Threads in this process, or -1 where unknown (non-Linux).
 int cv_thread_count(void);
 /// getsockname / getpeername. 0 or an errno value.
