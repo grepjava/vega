@@ -52,22 +52,8 @@ public struct TCPStream: ~Copyable, Sendable {
 
     init(reg: IORegistration) { self.reg = reg }
 
-    /// Connect to `host` and `port`. A name is looked up on the blocking pool
-    /// (see `SocketAddress.lookup`), and each address it resolves to is tried
-    /// in turn until one connects. Call from a task on a Vega runtime.
-    public static func connect(host: String, port: Int) async throws(IOError) -> TCPStream {
-        _ = try IODriver.current()
-        var failure = IOError(code: EADDRNOTAVAIL)
-        for address in try await SocketAddress.lookup(host: host, port: port) {
-            do {
-                return try await connect(to: address)
-            } catch {
-                if error == .cancelled { throw error }
-                failure = error
-            }
-        }
-        throw failure
-    }
+    // connect(host:port:attemptDelay:) and connect(to: [SocketAddress]):
+    // Happy Eyeballs, in HappyEyeballs.swift.
 
     /// Connect to `address`. Call from a task on a Vega runtime.
     public static func connect(to address: SocketAddress) async throws(IOError) -> TCPStream {
