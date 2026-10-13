@@ -393,6 +393,52 @@ So on macOS, kqueue stays the default for servers. `.network` is for iOS, tvOS, 
 - **mpsc_ping_pong and semaphore.** Both park on most operations, so skipping the status record pays off.
 - **mpsc_fan_in.** The receiver rarely parks, so the status record costs little there. It got slower in both modes, and the cause isn't known yet.
 
+## Hummingbird and Vapor on VegaNIO, and native VegaHTTP1 (2026-10-13/14)
+
+Requests per second against [the-benchmarker/web-frameworks](https://github.com/the-benchmarker/web-frameworks)' HTTP contract, run with `~/wl/benchmarks/frameworks.sh` on the box. The servers:
+
+- **Hummingbird 2 and Vapor 4,** built from `VegaNIO/Examples`, each on NIOPosix (`MultiThreadedEventLoopGroup`) and on VegaNIO (`VegaEventLoopGroup`), with the same binary for both. See [HUMMINGBIRD2.md](HUMMINGBIRD2.md) and [VAPOR.md](VAPOR.md).
+- **Native Vega:** `Benchmarks/Sources/vega-http`, `HTTP1Server` from VegaHTTP1 with one task per connection. It has no NIO, no framework and no router, and it adds no `date` or `server` header.
+
+**Load.**
+- **Ramp** is the-benchmarker's own load: `zrk -R1000:500000`, an open-loop ramp from 1,000 to 500,000 requests a second over 15 s, after a 5 s warm-up. The figure is zrk's achieved rate. Every server is overloaded by the end of the ramp, so its latencies are mostly queueing, not service time.
+- **Closed** is `oha -c N` for 15 s, which measures capacity instead.
+- The server and the load generator run unpinned on the same 8 threads, so a faster server leaves the load generator less CPU.
+
+Arms rotate their position each round. No run had errors. Compare ratios within one sweep: Hummingbird on NIOPosix measured 59k at 512 connections in the first two sweeps and 65k in the third, with the same binary.
+
+**VegaNIO against NIOPosix, sweep 1** (319d29e, flush through the writer task), median of 5 rounds, req/s:
+
+| Server | 64 conns | 256 conns | 512 conns |
+|---|---|---|---|
+| Hummingbird, NIOPosix, ramp | 59,578 | 60,804 | 58,937 |
+| Hummingbird, VegaNIO, ramp | 56,341 (0.95×) | 60,362 (0.99×) | 58,841 (1.00×) |
+| Vapor, NIOPosix, ramp | 48,438 | 48,564 | 48,143 |
+| Vapor, VegaNIO, ramp | 46,212 (0.95×) | 45,710 (0.94×) | 45,102 (0.94×) |
+| Hummingbird, NIOPosix, closed | 53,855 | 57,273 | 56,732 |
+| Hummingbird, VegaNIO, closed | 50,871 (0.94×) | 56,075 (0.98×) | 55,485 (0.98×) |
+| Vapor, NIOPosix, closed | 41,877 | 42,003 | 41,587 |
+| Vapor, VegaNIO, closed | 40,174 (0.96×) | 39,598 (0.94×) | 39,438 (0.95×) |
+
+Closed-loop p50 at 512 connections was 8.5 ms for Hummingbird on both groups, and 11.6 ms against 12.7 ms for Vapor.
+
+**Sweep 2** (be9997e, `flush` writes inline as NIO's does, and only what the socket doesn't take goes to the writer task), ramp, 2 rounds. Vapor on VegaNIO moved to 0.97–0.99× of NIOPosix (from 0.94–0.95×). Hummingbird stayed level at 256 and 512 connections; its 64-connection ratio is noise at 2 rounds (one NIOPosix round measured 65.6k, the other 58.8k).
+
+**Native VegaHTTP1, sweep 3** (be9997e), ramp, 512 connections, 2 rounds, req/s:
+
+| Server | Round 1 | Round 2 | p50 |
+|---|---|---|---|
+| Hummingbird, NIOPosix | 65,495 | 65,487 | 2.6–2.7 s |
+| Hummingbird, VegaNIO | 62,069 | 63,090 | 2.7–2.8 s |
+| Vapor, NIOPosix | 55,433 | 48,263 | 2.8–2.9 s |
+| Vapor, VegaNIO | 47,267 | 46,779 | 2.6–2.7 s |
+| **Native Vega (VegaHTTP1)** | **158,388** | **169,734** | **0.6 s** |
+
+- **VegaNIO is at parity with NIOPosix, not faster.** NIO's pipeline, its `EventLoopFuture`s, its HTTP/1 codec and the framework above them all stay, and they cost more than the event loop underneath. Swapping the event loop moves throughput by about 5% either way.
+- **Native Vega does 2.4–2.6× Hummingbird and about 3.3× Vapor.** Part of that gap is framework work (routing, middleware, headers), not NIO itself. Separating the two would take a minimal NIOPosix server with NIO's HTTP/1 handlers alone.
+- **The load generator likely caps native Vega,** since it shares the CPUs. Its ratio is a lower bound.
+- **Vapor on NIOPosix in sweep 3** is noisy: 55.4k then 48.3k. Sweeps 1 and 2 had it near 48k, so the first round is probably the outlier.
+
 ## Measurement notes
 
 - **`sleep_many` is bimodal on the box.** A run lands near 2.8 µs per op or near 5.8 µs, with nothing in between. A bisect over eight commits, from bebf35b to 87d7874, run alternately on 2026-10-13, showed both modes at every commit. So `sleep_many` can't confirm a regression from a single run. The likely causes are the 1 ms timer tick against each run's start time, and the box's `powersave` governor, which leaves idle cores at 400 MHz. Compare `sleep_many` only A/B and alternated, across several rounds.

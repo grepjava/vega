@@ -111,4 +111,14 @@ The example's test uses Hummingbird's own live test framework (`app.test(.live)`
 
 ## Performance
 
-Benchmarks against Hummingbird on NIOPosix will go here once they have been run on the bench box. See [BENCHMARKS.md](BENCHMARKS.md) for the setup.
+On the bench box, under the-benchmarker's load, Hummingbird on VegaNIO runs at parity with Hummingbird on NIOPosix: 0.95–1.00× the requests per second at 64–512 connections, with the same latency. Its router, NIO's pipeline and NIO's HTTP/1 codec cost more than the event loop does, so swapping the event loop alone doesn't make it faster.
+
+Vega's own HTTP/1 server (`Benchmarks/Sources/vega-http`), with no NIO and no framework, served the same requests at 2.4–2.6× Hummingbird's rate on NIOPosix, at 512 connections.
+
+| 512 connections, ramp | req/s |
+|---|---|
+| Hummingbird, NIOPosix | 65,495 / 65,487 |
+| Hummingbird, VegaNIO | 62,069 / 63,090 |
+| Native Vega (VegaHTTP1) | 158,388 / 169,734 |
+
+The setup, all three sweeps and the caveats are in [BENCHMARKS.md](BENCHMARKS.md#hummingbird-and-vapor-on-veganio-and-native-vegahttp1-2026-101314).

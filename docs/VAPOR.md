@@ -95,4 +95,14 @@ The example's test starts a real Vapor server on a `VegaEventLoopGroup` (`app.se
 
 ## Performance
 
-Benchmarks against Vapor on NIOPosix will go here once they have been run on the bench box. See [BENCHMARKS.md](BENCHMARKS.md) for the setup.
+On the bench box, under the-benchmarker's load, Vapor on VegaNIO runs at 0.94–0.96× the requests per second of Vapor on NIOPosix with the first VegaNIO, and at 0.97–0.99× once `flush` wrote inline as NIO's does. Vapor, NIO's pipeline and NIO's HTTP/1 codec cost more than the event loop does, so swapping the event loop alone doesn't make it faster.
+
+Vega's own HTTP/1 server (`Benchmarks/Sources/vega-http`), with no NIO and no framework, served the same requests at about 3.3× Vapor's rate on NIOPosix, at 512 connections.
+
+| 512 connections, ramp | req/s |
+|---|---|
+| Vapor, NIOPosix | 55,433 / 48,263 |
+| Vapor, VegaNIO | 47,267 / 46,779 |
+| Native Vega (VegaHTTP1) | 158,388 / 169,734 |
+
+The setup, all three sweeps and the caveats are in [BENCHMARKS.md](BENCHMARKS.md#hummingbird-and-vapor-on-veganio-and-native-vegahttp1-2026-101314).
