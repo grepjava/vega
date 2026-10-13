@@ -38,6 +38,7 @@
 #include <sys/random.h>
 #include <sys/syscall.h>
 #elif defined(__APPLE__)
+#include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <os/os_sync_wait_on_address.h>
 #include <sys/event.h>
@@ -1084,6 +1085,37 @@ int cv_supervisor_init(void) {
     return 0;
 }
 
+#if defined(__APPLE__)
+static void *sup_parent_watch(void *raw) {
+    int kq = (int)(intptr_t)raw;
+    struct kevent ev;
+    while (kevent(kq, NULL, 0, &ev, 1, NULL) < 0 && errno == EINTR) {}
+    kill(getpid(), SIGTERM);
+    return NULL;
+}
+
+static int sup_watch_parent(pid_t parent) {
+    int kq = kqueue(); // the supervisor's kqueue isn't inherited across fork
+    if (kq < 0) return errno;
+    struct kevent ev;
+    EV_SET(&ev, parent, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, NULL);
+    if (kevent(kq, &ev, 1, NULL, 0, NULL) < 0) { // ESRCH: gone already
+        int e = errno;
+        close(kq);
+        return e;
+    }
+    fcntl(kq, F_SETFD, FD_CLOEXEC);
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_attr_setstacksize(&attr, 64 * 1024);
+    pthread_t t;
+    int rc = pthread_create(&t, &attr, sup_parent_watch, (void *)(intptr_t)kq);
+    pthread_attr_destroy(&attr);
+    return rc;
+}
+#endif
+
 int cv_supervisor_fork(void) {
     pid_t parent = getpid();
     pid_t pid = fork();
@@ -1099,7 +1131,9 @@ int cv_supervisor_fork(void) {
     prctl(PR_SET_PDEATHSIG, SIGTERM);
     if (getppid() != parent) _exit(1);
 #else
-    (void)parent;
+    // No PR_SET_PDEATHSIG: a small thread waits for the supervisor's exit
+    // (EVFILT_PROC) and sends us SIGTERM, as Linux would.
+    if (sup_watch_parent(parent) != 0 || getppid() != parent) _exit(1);
 #endif
     return 0;
 }
@@ -1159,6 +1193,13 @@ int cv_thread_count(void) {
     buf[n] = 0;
     char *t = strstr(buf, "\nThreads:");
     return t ? atoi(t + 9) : -1;
+#elif defined(__APPLE__)
+    thread_act_array_t threads;
+    mach_msg_type_number_t n = 0;
+    if (task_threads(mach_task_self(), &threads, &n) != KERN_SUCCESS) return -1;
+    for (mach_msg_type_number_t i = 0; i < n; i++) mach_port_deallocate(mach_task_self(), threads[i]);
+    vm_deallocate(mach_task_self(), (vm_address_t)threads, n * sizeof *threads);
+    return (int)n;
 #else
     return -1;
 #endif

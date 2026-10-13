@@ -1,4 +1,5 @@
 #if os(Linux) || canImport(Darwin)
+import CVega
 import Testing
 @testable import Vega
 
@@ -33,6 +34,12 @@ import Testing
 
     @Test func defaultIsOneShardPerCacheDomain() {
         #expect(Topology.layout(shards: nil, workersPerShard: nil) == Topology.cacheDomains())
+    }
+
+    /// What `Runtime.sharded`'s "no threads yet" check reads: known on Linux
+    /// and Darwin, and more than one in a test process.
+    @Test func countsThreads() {
+        #expect(cv_thread_count() > 1)
     }
 }
 #endif

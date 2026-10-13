@@ -286,8 +286,9 @@ enum Topology {
         return out
     }
 
-    /// Online CPUs grouped by shared last-level cache: from sysfs on Linux;
-    /// one group of every CPU elsewhere, or if sysfs says nothing.
+    /// Online CPUs grouped by shared last-level cache: from sysfs on Linux,
+    /// by performance level (each a cluster with its own L2) on Darwin; one
+    /// group of every CPU otherwise, or if neither says anything.
     static func cacheDomains() -> [[Int]] {
         let fallback = [Array(0..<Int(cv_cpu_count()))]
         #if os(Linux)
@@ -307,10 +308,31 @@ enum Topology {
             return [online]
         }
         return domains
+        #elseif canImport(Darwin)
+        // Apple silicon: performance and efficiency cores, numbered here in
+        // that order (threads can't be pinned on Darwin, so these are counts).
+        let levels = sysctlInt("hw.nperflevels") ?? 0
+        var domains: [[Int]] = []
+        var next = 0
+        for level in 0..<levels {
+            guard let n = sysctlInt("hw.perflevel\(level).logicalcpu"), n > 0 else { return fallback }
+            domains.append(Array(next..<next + n))
+            next += n
+        }
+        return domains.count > 1 && next == fallback[0].count ? domains : fallback
         #else
         return fallback
         #endif
     }
+
+    #if canImport(Darwin)
+    private static func sysctlInt(_ name: String) -> Int? {
+        var value: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        guard sysctlbyname(name, &value, &size, nil, 0) == 0 else { return nil }
+        return Int(value)
+    }
+    #endif
 
     /// The CPUs sharing `cpu`'s highest-level cache.
     private static func lastLevelCache(_ cpu: Int) -> [Int]? {
