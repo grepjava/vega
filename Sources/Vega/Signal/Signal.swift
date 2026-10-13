@@ -87,12 +87,20 @@ final class SignalHub: Sendable {
         var dispatching = false
     }
 
-    private let state = Mutex(State())
+    // A RawLock rather than Synchronization.Mutex, which TSan doesn't see
+    // (it reports races inside the lock). The hub lives as long as the
+    // process: neither is destroyed.
+    private let lock = RawLock()
+    private let guarded = Guarded(State())
+
+    private func withState<R>(_ body: (inout State) -> R) -> R {
+        lock.withLock { body(&guarded.pointer.pointee) }
+    }
 
     func install(_ signal: Int32) throws(IOError) {
         let rc = cv_signal_install(signal)
         guard rc == 0 else { throw IOError(code: rc) }
-        let start = state.withLock { s in
+        let start = withState { s in
             defer { s.dispatching = true }
             return !s.dispatching
         }
@@ -104,13 +112,13 @@ final class SignalHub: Sendable {
     /// Suspend until `signal`'s count is past `seen`; returns the count, or
     /// nil if the task is cancelled first.
     func wait(_ signal: Int32, seen: UInt64) async -> UInt64? {
-        let id = state.withLock { s in
+        let id = withState { s in
             s.nextID += 1
             return s.nextID
         }
         let count = await withTaskCancellationHandler {
             await withUnsafeContinuation { (c: UnsafeContinuation<UInt64?, Never>) in
-                let resume: UInt64?? = state.withLock { s in
+                let resume: UInt64?? = withState { s in
                     // The handler counts before it writes the pipe, so a
                     // signal the dispatcher has already handled shows here.
                     let now = cv_signal_count(signal)
@@ -124,7 +132,7 @@ final class SignalHub: Sendable {
                 if let resume { c.resume(returning: resume) }
             }
         } onCancel: {
-            let waiter = state.withLock { s -> Waiter? in
+            let waiter = withState { s -> Waiter? in
                 guard let i = s.waiters.firstIndex(where: { $0.id == id }) else { return nil }
                 return s.waiters.remove(at: i)
             }
@@ -139,7 +147,7 @@ final class SignalHub: Sendable {
         while true {
             cv_signal_wait()
             var ready: [(UnsafeContinuation<UInt64?, Never>, UInt64)] = []
-            state.withLock { s in
+            withState { s in
                 s.waiters.removeAll { w in
                     let now = cv_signal_count(w.signal)
                     guard now != w.seen else { return false }
