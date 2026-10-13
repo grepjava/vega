@@ -1,5 +1,4 @@
-// POSIX for now; Windows comes with the IOCP driver.
-#if os(Linux) || canImport(Darwin)
+#if os(Linux) || canImport(Darwin) || os(Windows)
 import CVega
 import Vega
 import VegaIO
@@ -19,12 +18,15 @@ import ucrt
 /// can finish.
 ///
 /// The exit is watched on the runtime's driver, with no thread and no
-/// SIGCHLD handler: through a pidfd on Linux, EVFILT_PROC on Darwin.
+/// SIGCHLD handler: through a pidfd on Linux, EVFILT_PROC on Darwin, and on
+/// Windows a thread-pool wait on the process handle that posts to the
+/// completion port.
 /// Spawned off a runtime (or without pidfds), `wait` polls instead, backing
 /// off to 50 ms.
 ///
 /// A child dropped before it was waited for is reaped in the background
 /// (and first killed, with `Command.killOnDrop`): it never stays a zombie.
+/// (Windows has no zombies: dropping closes the process handle.)
 public struct Child: ~Copyable, Sendable {
     public let pid: Int32
     /// The child's stdin, with `Stdio.pipe`.
@@ -35,13 +37,34 @@ public struct Child: ~Copyable, Sendable {
     public var stderr: PipeReader?
     /// The pidfd, where there is one, and its number (-1: none).
     private var exit: ReadinessWatch?
-    #if canImport(Darwin)
+    #if canImport(Darwin) || os(Windows)
     private var procExit: ProcessExitWatch?
+    #endif
+    #if os(Windows)
+    /// The process handle.
+    private let process: Int
     #endif
     private var pidfd: Int32 = -1
     private var status: ExitStatus?
     private let killOnDrop: Bool
 
+    #if os(Windows)
+    init(pid: Int32, process: Int, killOnDrop: Bool) {
+        self.pid = pid
+        self.process = process
+        self.killOnDrop = killOnDrop
+    }
+
+    deinit {
+        if status == nil && killOnDrop { _ = cv_process_kill(process) }
+        cv_process_close(process)
+    }
+
+    mutating func watchExit() {
+        // Off a runtime: poll.
+        procExit = try? ProcessExitWatch(process: process)
+    }
+    #else
     init(pid: Int32, killOnDrop: Bool) {
         self.pid = pid
         self.killOnDrop = killOnDrop
@@ -65,6 +88,7 @@ public struct Child: ~Copyable, Sendable {
         exit = try ReadinessWatch(adopting: fd)
         pidfd = fd
     }
+    #endif
 
     /// Wait for the child to end (closing stdin first). Cancelling the task
     /// leaves the child running; wait again later, or kill it.
@@ -74,7 +98,7 @@ public struct Child: ~Copyable, Sendable {
         var backoff = Duration.milliseconds(1)
         while true {
             if let status = try tryWait() { return status }
-            #if canImport(Darwin)
+            #if canImport(Darwin) || os(Windows)
             switch procExit {
             case .some(let watch):
                 try await watch.exited()
@@ -99,7 +123,7 @@ public struct Child: ~Copyable, Sendable {
 
     /// Whether the exit is watched on the driver, for tests.
     package var exitWatched: Bool {
-        #if canImport(Darwin)
+        #if canImport(Darwin) || os(Windows)
         if procExit != nil { return true }
         #endif
         return exit != nil
@@ -108,15 +132,32 @@ public struct Child: ~Copyable, Sendable {
     /// The status if the child has ended, else nil, without waiting.
     public mutating func tryWait() throws(IOError) -> ExitStatus? {
         if let status { return status }
+        #if os(Windows)
+        var code: UInt32 = 0
+        let r = cv_process_wait(process, 1, &code)
+        if r < 0 { throw IOError(code: -r) }
+        guard r == 1 else { return nil }
+        let status = ExitStatus(rawValue: Int32(bitPattern: code))
+        #else
         var raw: Int32 = 0
         let r = cv_waitpid(pid, 1, &raw)
         if r < 0 { throw IOError(code: -r) }
         guard r == 1 else { return nil }
         let status = ExitStatus(rawValue: raw)
+        #endif
         self.status = status
         return status
     }
 
+    #if os(Windows)
+    /// Terminate the child (TerminateProcess, exit code 1), whatever
+    /// `signal` says. Does nothing once the child has been waited for.
+    public func kill(signal: Int32 = 9) throws(IOError) {
+        guard status == nil else { return }
+        let e = cv_process_kill(process)
+        if e != 0 { throw IOError(code: e) }
+    }
+    #else
     /// Send `signal` (SIGKILL by default). Does nothing once the child has
     /// been waited for: its pid may belong to another process by then.
     public func kill(signal: Int32 = SIGKILL) throws(IOError) {
@@ -133,6 +174,7 @@ public struct Child: ~Copyable, Sendable {
         }
         return Glibc_kill(pid, sig) == 0 ? 0 : errno
     }
+    #endif
 
     /// Collect stdout and stderr (whichever are pipes) to their ends, at
     /// once so neither fills up and stalls the child, then wait.
@@ -147,7 +189,9 @@ public struct Child: ~Copyable, Sendable {
     }
 }
 
+#if !os(Windows)
 private func Glibc_kill(_ pid: Int32, _ sig: Int32) -> Int32 { kill(pid, sig) }
+#endif
 
 /// Moves a non-copyable value into a child task.
 private final class Transfer<Value: ~Copyable>: @unchecked Sendable {
@@ -175,6 +219,7 @@ private func readAll(_ transfer: Transfer<PipeReader>) async -> Result<[UInt8], 
     }
 }
 
+#if !os(Windows)
 /// Children dropped before they were waited for, reaped whenever a child
 /// is spawned (as Tokio's orphan queue is).
 enum Orphans {
@@ -207,4 +252,5 @@ enum Orphans {
         return pids.count
     }
 }
+#endif
 #endif

@@ -782,13 +782,44 @@ typedef struct cv_poll_op {
     int dir;
 } cv_poll_op;
 
+// One direction of an overlapped pipe end: the request in flight, and the
+// buffer it reads into or writes from.
+typedef struct cv_pipe_op {
+    OVERLAPPED ov; // first: the completion's lpOverlapped points here
+    struct cv_io_win *io;
+    int dir;
+    uint8_t *buf;
+    DWORD len; // read: the bytes the last read brought; write: those being written
+    DWORD pos; // read: the bytes taken out so far
+    DWORD err; // the last request's Win32 error, 0 if none
+} cv_pipe_op;
+
+#define CV_PIPE_BUFFER (64 * 1024)
+#define CV_PIPE_KEY ((ULONG_PTR)2)
+#define CV_EXIT_KEY ((ULONG_PTR)3)
+
+enum { IO_SOCKET, IO_PIPE, IO_HANDLE };
+
 typedef struct cv_io_win {
     cv_io io; // first: Swift sees a cv_io *
     cv_driver *driver;
+    int kind;
     SOCKET base; // the base provider socket, which AFD polls
+    // Sockets: a poll in flight per direction. Pipes: a read or write in
+    // flight. Handles: the wait, until its callback has posted.
     _Atomic uint32_t state;
     cv_poll_op op[2];
+    cv_pipe_op pipe[2];
+    HANDLE wait, target; // handles: the wait and our copy of what it waits for
+    _Atomic int fired;
 } cv_io_win;
+
+static void io_free(cv_io *raw) {
+    cv_io_win *io = (cv_io_win *)raw;
+    free(io->pipe[0].buf);
+    free(io->pipe[1].buf);
+    free(io);
+}
 
 struct cv_driver {
     _Atomic uint32_t locked;
@@ -846,7 +877,7 @@ static void release_pending(cv_driver *d) {
     cv_io *io = atomic_exchange_explicit(&d->released, NULL, memory_order_acquire);
     while (io) {
         cv_io *next = io->next;
-        free(io);
+        io_free(io);
         io = next;
     }
 }
@@ -911,6 +942,7 @@ static ULONG poll_mask(int dir) {
 
 void cv_driver_want(cv_io *raw, int dir) {
     cv_io_win *io = (cv_io_win *)raw;
+    if (io->kind != IO_SOCKET) return; // the request itself completes on the port
     uint32_t bit = dir == CV_IO_READ ? POLL_READ : POLL_WRITE;
     uint32_t cur = atomic_load_explicit(&io->state, memory_order_acquire);
     do {
@@ -938,6 +970,163 @@ void cv_driver_want(cv_io *raw, int dir) {
     }
 }
 
+static int pipe_broken(DWORD e) {
+    return e == ERROR_BROKEN_PIPE || e == ERROR_NO_DATA || e == ERROR_PIPE_NOT_CONNECTED;
+}
+
+// A pipe request finished: note the outcome, then wake the waiter, or,
+// once the owner has let go, close and free when nothing else is in flight.
+static uintptr_t pipe_completed(OVERLAPPED_ENTRY *e) {
+    cv_pipe_op *op = (cv_pipe_op *)(void *)e->lpOverlapped;
+    cv_io_win *io = op->io;
+    HANDLE h = (HANDLE)(intptr_t)io->io.fd;
+    DWORD bytes = 0;
+    op->err = GetOverlappedResult(h, &op->ov, &bytes, FALSE) ? 0 : GetLastError();
+    if (op->dir == CV_IO_READ) {
+        op->len = op->err ? 0 : bytes;
+        op->pos = 0;
+    }
+    uint32_t bit = op->dir == CV_IO_READ ? POLL_READ : POLL_WRITE;
+    uint32_t old = atomic_fetch_and_explicit(&io->state, ~bit, memory_order_acq_rel);
+    if (old & POLL_CLOSING) {
+        if ((old & ~bit) == POLL_CLOSING) {
+            CloseHandle(h);
+            io_free(&io->io);
+        }
+        return 0;
+    }
+    return io_ready(&io->io, op->dir);
+}
+
+intptr_t cv_pipe_read_io(cv_io *raw, void *buf, intptr_t len) {
+    cv_io_win *io = (cv_io_win *)raw;
+    cv_pipe_op *op = &io->pipe[CV_IO_READ];
+    if (atomic_load_explicit(&io->state, memory_order_acquire) & POLL_READ) return -EAGAIN;
+    if (op->pos < op->len) {
+        DWORD n = op->len - op->pos;
+        if ((intptr_t)n > len) n = (DWORD)len;
+        memcpy(buf, op->buf + op->pos, n);
+        op->pos += n;
+        return (intptr_t)n;
+    }
+    if (op->err) {
+        if (pipe_broken(op->err) || op->err == ERROR_HANDLE_EOF) return 0; // for good
+        int e = cv_win_errno(op->err);
+        op->err = 0;
+        return -(intptr_t)e;
+    }
+    if (len <= 0) return 0;
+    if (!op->buf && !(op->buf = malloc(CV_PIPE_BUFFER))) return -ENOMEM;
+    op->pos = op->len = 0;
+    memset(&op->ov, 0, sizeof op->ov);
+    atomic_fetch_or_explicit(&io->state, POLL_READ, memory_order_acq_rel);
+    if (!ReadFile((HANDLE)(intptr_t)raw->fd, op->buf, CV_PIPE_BUFFER, NULL, &op->ov)) {
+        DWORD e = GetLastError();
+        if (e != ERROR_IO_PENDING) { // no completion comes
+            atomic_fetch_and_explicit(&io->state, ~POLL_READ, memory_order_acq_rel);
+            if (pipe_broken(e) || e == ERROR_HANDLE_EOF) {
+                op->err = e;
+                return 0;
+            }
+            return -(intptr_t)cv_win_errno(e);
+        }
+    }
+    return -EAGAIN; // even if it finished already: its completion still comes
+}
+
+intptr_t cv_pipe_write_io(cv_io *raw, const void *buf, intptr_t len) {
+    cv_io_win *io = (cv_io_win *)raw;
+    cv_pipe_op *op = &io->pipe[CV_IO_WRITE];
+    if (atomic_load_explicit(&io->state, memory_order_acquire) & POLL_WRITE) return -EAGAIN;
+    if (op->err) {
+        DWORD e = op->err;
+        if (pipe_broken(e)) return -EPIPE; // for good
+        op->err = 0;
+        return -(intptr_t)cv_win_errno(e);
+    }
+    if (len <= 0) return 0;
+    if (!op->buf && !(op->buf = malloc(CV_PIPE_BUFFER))) return -ENOMEM;
+    DWORD n = len > CV_PIPE_BUFFER ? CV_PIPE_BUFFER : (DWORD)len;
+    memcpy(op->buf, buf, n);
+    op->len = n;
+    memset(&op->ov, 0, sizeof op->ov);
+    atomic_fetch_or_explicit(&io->state, POLL_WRITE, memory_order_acq_rel);
+    if (!WriteFile((HANDLE)(intptr_t)raw->fd, op->buf, n, NULL, &op->ov)) {
+        DWORD e = GetLastError();
+        if (e != ERROR_IO_PENDING) {
+            atomic_fetch_and_explicit(&io->state, ~POLL_WRITE, memory_order_acq_rel);
+            if (pipe_broken(e)) {
+                op->err = e;
+                return -EPIPE;
+            }
+            return -(intptr_t)cv_win_errno(e);
+        }
+    }
+    return (intptr_t)n;
+}
+
+// A watched handle was signalled: the thread pool's callback posted this.
+static uintptr_t handle_signalled(OVERLAPPED_ENTRY *e) {
+    cv_io_win *io = (cv_io_win *)(void *)e->lpOverlapped;
+    uint32_t old = atomic_fetch_and_explicit(&io->state, ~POLL_READ, memory_order_acq_rel);
+    if (old & POLL_CLOSING) {
+        io_free(&io->io);
+        return 0;
+    }
+    __atomic_store_n(&io->io.read_closed, 1, __ATOMIC_RELEASE);
+    return io_ready(&io->io, CV_IO_READ);
+}
+
+static VOID CALLBACK handle_callback(PVOID ctx, BOOLEAN timed_out) {
+    (void)timed_out;
+    cv_io_win *io = ctx;
+    atomic_store_explicit(&io->fired, 1, memory_order_release);
+    PostQueuedCompletionStatus(io->driver->port, 0, CV_EXIT_KEY, (LPOVERLAPPED)(void *)io);
+}
+
+cv_io *cv_driver_watch_handle(cv_driver *d, intptr_t handle, int *err) {
+    cv_io_win *io = calloc(1, sizeof *io);
+    if (!io) {
+        *err = ENOMEM;
+        return NULL;
+    }
+    io->io.fd = -1;
+    io->io.refs = 1;
+    io->driver = d;
+    io->kind = IO_HANDLE;
+    atomic_store_explicit(&io->state, POLL_READ, memory_order_relaxed); // the wait
+    if (!DuplicateHandle(GetCurrentProcess(), (HANDLE)handle, GetCurrentProcess(), &io->target, SYNCHRONIZE,
+                         FALSE, 0)) {
+        *err = cv_win_errno(GetLastError());
+        free(io);
+        return NULL;
+    }
+    if (!RegisterWaitForSingleObject(&io->wait, io->target, handle_callback, io, INFINITE,
+                                     WT_EXECUTEONLYONCE)) {
+        *err = cv_win_errno(GetLastError());
+        CloseHandle(io->target);
+        free(io);
+        return NULL;
+    }
+    atomic_fetch_add_explicit(&d->registered, 1, memory_order_relaxed);
+    return &io->io;
+}
+
+void cv_driver_unwatch_handle(cv_driver *d, cv_io *raw) {
+    cv_io_win *io = (cv_io_win *)raw;
+    // Once this returns the callback has run, or never will.
+    UnregisterWaitEx(io->wait, INVALID_HANDLE_VALUE);
+    CloseHandle(io->target);
+    atomic_fetch_sub_explicit(&d->registered, 1, memory_order_relaxed);
+    if (!atomic_load_explicit(&io->fired, memory_order_acquire)) {
+        push_released(d, raw); // nothing was posted
+        return;
+    }
+    uint32_t old = atomic_fetch_or_explicit(&io->state, POLL_CLOSING, memory_order_acq_rel);
+    // Posted but not yet taken: its completion frees it.
+    if ((old & POLL_READ) == 0) push_released(d, raw);
+}
+
 int cv_driver_turn(cv_driver *d, cv_parker *p, int64_t timeout_ns) {
     release_pending(d);
     if (p) {
@@ -963,6 +1152,11 @@ int cv_driver_turn(cv_driver *d, cv_parker *p, int64_t timeout_ns) {
     for (ULONG i = 0; i < n; i++) {
         OVERLAPPED_ENTRY *e = &d->events[i];
         if (e->lpCompletionKey == CV_WAKE_KEY || !e->lpOverlapped) continue; // a wake
+        if (e->lpCompletionKey == CV_PIPE_KEY || e->lpCompletionKey == CV_EXIT_KEY) {
+            uintptr_t w = e->lpCompletionKey == CV_PIPE_KEY ? pipe_completed(e) : handle_signalled(e);
+            if (w) d->wakes[woken++] = w;
+            continue;
+        }
         cv_poll_op *op = (cv_poll_op *)(void *)e->lpOverlapped;
         cv_io_win *io = op->io;
         int dir = op->dir;
@@ -972,7 +1166,7 @@ int cv_driver_turn(cv_driver *d, cv_parker *p, int64_t timeout_ns) {
         uint32_t bit = dir == CV_IO_READ ? POLL_READ : POLL_WRITE;
         uint32_t old = atomic_fetch_and_explicit(&io->state, ~bit, memory_order_acq_rel);
         if (old & POLL_CLOSING) {
-            if ((old & ~bit) == POLL_CLOSING) free(io); // the last thing holding it
+            if ((old & ~bit) == POLL_CLOSING) io_free(&io->io); // the last thing holding it
             continue;
         }
         if (events & (AFD_POLL_DISCONNECT | AFD_POLL_ABORT | AFD_POLL_LOCAL_CLOSE | AFD_POLL_CONNECT_FAIL))
@@ -994,8 +1188,20 @@ cv_io *cv_driver_register(cv_driver *d, int fd, int *err) {
     // Layered providers can wrap the socket; AFD wants the one underneath.
     SOCKET base = INVALID_SOCKET;
     DWORD bytes = 0;
-    if (WSAIoctl((SOCKET)fd, SIO_BASE_HANDLE, NULL, 0, &base, sizeof base, &bytes, NULL, NULL) != 0)
+    if (WSAIoctl((SOCKET)fd, SIO_BASE_HANDLE, NULL, 0, &base, sizeof base, &bytes, NULL, NULL) != 0) {
+        // (Without Winsock started, it can't be a socket of ours.)
+        int e = WSAGetLastError();
+        if (e == WSAENOTSOCK || e == WSANOTINITIALISED) {
+            // An overlapped pipe end: its requests complete on the port.
+            if (!CreateIoCompletionPort((HANDLE)(intptr_t)fd, d->port, CV_PIPE_KEY, 0)) {
+                *err = cv_win_errno(GetLastError());
+                free(io);
+                return NULL;
+            }
+            io->kind = IO_PIPE;
+        }
         base = (SOCKET)fd;
+    }
     io->io.fd = fd;
     io->io.refs = 1;
     io->driver = d;
@@ -1003,6 +1209,8 @@ cv_io *cv_driver_register(cv_driver *d, int fd, int *err) {
     for (int dir = 0; dir < 2; dir++) {
         io->op[dir].io = io;
         io->op[dir].dir = dir;
+        io->pipe[dir].io = io;
+        io->pipe[dir].dir = dir;
     }
     atomic_fetch_add_explicit(&d->registered, 1, memory_order_relaxed);
     return &io->io;
@@ -1012,6 +1220,17 @@ void cv_driver_deregister(cv_driver *d, cv_io *raw) {
     if (__atomic_sub_fetch(&raw->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
     cv_io_win *io = (cv_io_win *)raw;
     uint32_t old = atomic_fetch_or_explicit(&io->state, POLL_CLOSING, memory_order_acq_rel);
+    atomic_fetch_sub_explicit(&d->registered, 1, memory_order_relaxed);
+    if (io->kind == IO_PIPE) {
+        // A read is cancelled; a write finishes first (its bytes were taken),
+        // and the last completion closes the handle.
+        if (old & POLL_READ) CancelIoEx((HANDLE)(intptr_t)raw->fd, &io->pipe[CV_IO_READ].ov);
+        if ((old & (POLL_READ | POLL_WRITE)) == 0) {
+            CloseHandle((HANDLE)(intptr_t)raw->fd);
+            push_released(d, raw);
+        }
+        return;
+    }
     for (int dir = 0; dir < 2; dir++) {
         if (old & (dir == CV_IO_READ ? POLL_READ : POLL_WRITE)) {
             cv_iosb cancel;
@@ -1019,7 +1238,6 @@ void cv_driver_deregister(cv_driver *d, cv_io *raw) {
         }
     }
     closesocket((SOCKET)raw->fd);
-    atomic_fetch_sub_explicit(&d->registered, 1, memory_order_relaxed);
     // Nothing in flight: no completion will free it, so the next turn does
     // (one may be handling this io's last completion right now).
     if ((old & (POLL_READ | POLL_WRITE)) == 0) push_released(d, raw);

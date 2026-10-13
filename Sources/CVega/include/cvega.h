@@ -262,6 +262,46 @@ void cv_fs_list_free(cv_dir_entry *entries, int count);
 int cv_fs_temp_dir(const char *prefix, char *out, int len);
 /// Copy a file, replacing `to`: the bytes, or -errno.
 int64_t cv_fs_copy(const char *from, const char *to);
+
+// Pipes and processes on Windows, for VegaProcess. A pipe is a named pipe
+// whose overlapped ends the driver runs on its completion port (as Tokio's
+// mio does): cv_driver_register takes them, and reads and writes go
+// through an internal buffer per direction, reporting EAGAIN while one is
+// in flight and readiness when it completes.
+
+/// A pipe; fds[0] reads, fds[1] writes. With child_end 0 or 1, that end is
+/// synchronous (to hand to a child) and only the other is overlapped; with
+/// -1 both are. Neither is inheritable. 0 or an errno value.
+int cv_pipe_win(int fds[2], int child_end);
+/// Read from a registered overlapped pipe end: bytes, 0 at end of stream,
+/// or -errno (-EAGAIN: wait for CV_IO_READ).
+intptr_t cv_pipe_read_io(cv_io *io, void *buf, intptr_t len);
+/// Write to a registered overlapped pipe end: the bytes taken (they're
+/// copied and written in the background), or -errno (-EAGAIN: wait for
+/// CV_IO_WRITE; -EPIPE once the reader is gone). A failure of a background
+/// write shows on the next call. Closing waits for it, not cancels it.
+intptr_t cv_pipe_write_io(cv_io *io, const void *buf, intptr_t len);
+/// Watch a waitable handle (a process): its signal shows as the read side
+/// of the returned io, which has no fd (the watch keeps a copy of the
+/// handle, so the caller's may close first). NULL
+/// and *err set on failure. Release with cv_driver_unwatch_handle.
+cv_io *cv_driver_watch_handle(cv_driver *d, intptr_t handle, int *err);
+void cv_driver_unwatch_handle(cv_driver *d, cv_io *io);
+/// CreateProcessW. cmdline is the whole command line, quoted; env a
+/// CREATE_UNICODE_ENVIRONMENT block or NULL to inherit; cwd may be NULL.
+/// stdio[i] is a handle for the child's stdin, stdout or stderr,
+/// CV_STDIO_INHERIT or CV_STDIO_NULL; the child inherits those and nothing
+/// else. 0 (with *process, a handle to close with cv_process_close, and
+/// *pid) or an errno value.
+int cv_spawn_win(const wchar_t *app, const wchar_t *cmdline, const wchar_t *env, const wchar_t *cwd,
+                 const int stdio[3], int new_group, intptr_t *process, int *pid);
+/// 1 exited (*code set), 0 still running (nohang), or -errno.
+int cv_process_wait(intptr_t process, int nohang, uint32_t *code);
+/// TerminateProcess with exit code 1; 0 if it has exited already.
+int cv_process_kill(intptr_t process);
+void cv_process_close(intptr_t process);
+/// A Win32 error as an errno value.
+int cv_win_errno(unsigned long error);
 #endif
 
 // ---- sockets -------------------------------------------------------------

@@ -103,7 +103,10 @@ static SOCKET new_socket(int family, int type, int *err) {
     return s;
 }
 
-void cv_close_socket(int fd) { closesocket(as_socket(fd)); }
+void cv_close_socket(int fd) {
+    // Pipe ends come here too (an adopted one that failed to register).
+    if (closesocket(as_socket(fd)) != 0 && WSAGetLastError() == WSAENOTSOCK) CloseHandle((HANDLE)(intptr_t)fd);
+}
 
 static struct addrinfo *resolve(const char *host, int port, int passive, int type, int *err) {
     wsa_init();
@@ -510,7 +513,7 @@ int cv_signal_raise(int signo) {
 // Files as Win32 handles (they fit the int descriptor, as sockets do), with
 // paths in UTF-8 converted to UTF-16. Errors come back as errno values.
 
-static int map_win_error(DWORD e) {
+int cv_win_errno(unsigned long e) {
     switch (e) {
     case ERROR_FILE_NOT_FOUND: case ERROR_PATH_NOT_FOUND: case ERROR_INVALID_DRIVE:
     case ERROR_BAD_NETPATH: case ERROR_BAD_PATHNAME: return ENOENT;
@@ -528,11 +531,15 @@ static int map_win_error(DWORD e) {
     case ERROR_INVALID_HANDLE: return EBADF;
     case ERROR_NOT_SUPPORTED: case ERROR_NOT_A_REPARSE_POINT: return EINVAL;
     case ERROR_NOT_READY: return EAGAIN;
+    case ERROR_BROKEN_PIPE: case ERROR_NO_DATA: case ERROR_PIPE_NOT_CONNECTED: return EPIPE;
+    case ERROR_BAD_EXE_FORMAT: case ERROR_EXE_MACHINE_TYPE_MISMATCH: return ENOEXEC;
+    case ERROR_OPERATION_ABORTED: return ECANCELED;
     default: return EIO;
     }
 }
 
-static int last_win_error(void) { return map_win_error(GetLastError()); }
+static int map_win_error(DWORD e) { return cv_win_errno(e); }
+static int last_win_error(void) { return cv_win_errno(GetLastError()); }
 
 /// UTF-8 to a malloc'd UTF-16 string, forward slashes turned back (some
 /// calls, symbolic link targets among them, take the path as written).
@@ -1305,4 +1312,157 @@ intptr_t cv_recv_segments(int fd, void *buf, intptr_t len, cv_sockaddr *from, in
     f->len = (uint32_t)alen;
     return (intptr_t)n;
 }
+// ---- pipes and processes (VegaProcess) --------------------------------------
+// A pipe is a named pipe with a unique name, as Rust's std makes them: only
+// those can be overlapped, which the driver needs. The child's end of a
+// child's pipe stays synchronous, as programs expect of their stdio.
+
+int cv_pipe_win(int fds[2], int child_end) {
+    static volatile LONG serial;
+    WCHAR name[128];
+    for (int attempt = 0; attempt < 8; attempt++) {
+        unsigned long long r;
+        cv_random_bytes(&r, sizeof r);
+        swprintf(name, 128, L"\\\\.\\pipe\\vega-anonymous-pipe.%lu.%ld.%016llx", GetCurrentProcessId(),
+                 InterlockedIncrement(&serial), r);
+        HANDLE server = CreateNamedPipeW(name,
+                                         PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE |
+                                             (child_end == 0 ? 0 : FILE_FLAG_OVERLAPPED),
+                                         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                                         1, 64 * 1024, 64 * 1024, 0, NULL);
+        if (server == INVALID_HANDLE_VALUE) {
+            DWORD e = GetLastError();
+            if (e == ERROR_ACCESS_DENIED || e == ERROR_PIPE_BUSY) continue; // the name is taken
+            return cv_win_errno(e);
+        }
+        HANDLE client = CreateFileW(name, GENERIC_WRITE | FILE_READ_ATTRIBUTES, 0, NULL, OPEN_EXISTING,
+                                    child_end == 1 ? 0 : FILE_FLAG_OVERLAPPED, NULL);
+        if (client == INVALID_HANDLE_VALUE) {
+            int e = last_win_error();
+            CloseHandle(server);
+            return e;
+        }
+        fds[0] = (int)(intptr_t)server;
+        fds[1] = (int)(intptr_t)client;
+        return 0;
+    }
+    return EEXIST;
+}
+
+int cv_pipe(int fds[2]) { return cv_pipe_win(fds, -1); }
+
+int cv_pipe_prepare(int fd) {
+    (void)fd; // created non-inheritable and overlapped already
+    return 0;
+}
+
+int cv_spawn_win(const wchar_t *app, const wchar_t *cmdline, const wchar_t *env, const wchar_t *cwd,
+                 const int stdio[3], int new_group, intptr_t *process, int *pid) {
+    static const DWORD std_ids[3] = {STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE};
+    HANDLE handles[3] = {NULL, NULL, NULL}; // inheritable copies, closed here
+    HANDLE list[3];
+    int listed = 0, err = 0;
+    HANDLE nul = INVALID_HANDLE_VALUE;
+    wchar_t *line = NULL;
+    LPPROC_THREAD_ATTRIBUTE_LIST attrs = NULL;
+    int attrs_ready = 0;
+    for (int i = 0; i < 3; i++) {
+        HANDLE h;
+        if (stdio[i] == CV_STDIO_INHERIT) {
+            h = GetStdHandle(std_ids[i]);
+        } else if (stdio[i] == CV_STDIO_NULL) {
+            if (nul == INVALID_HANDLE_VALUE) {
+                nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                  OPEN_EXISTING, 0, NULL);
+                if (nul == INVALID_HANDLE_VALUE) {
+                    err = last_win_error();
+                    goto done;
+                }
+            }
+            h = nul;
+        } else {
+            h = (HANDLE)(intptr_t)stdio[i];
+        }
+        if (h == NULL || h == INVALID_HANDLE_VALUE) continue; // the parent has none (a GUI app)
+        if (!DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &handles[i], 0, TRUE,
+                             DUPLICATE_SAME_ACCESS)) {
+            handles[i] = NULL;
+            err = last_win_error();
+            goto done;
+        }
+        list[listed++] = handles[i];
+    }
+    size_t n = wcslen(cmdline) + 1; // CreateProcessW may write to it
+    line = malloc(n * sizeof(wchar_t));
+    if (!line) {
+        err = ENOMEM;
+        goto done;
+    }
+    memcpy(line, cmdline, n * sizeof(wchar_t));
+
+    STARTUPINFOEXW si;
+    memset(&si, 0, sizeof si);
+    si.StartupInfo.cb = sizeof si.StartupInfo;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = handles[0];
+    si.StartupInfo.hStdOutput = handles[1];
+    si.StartupInfo.hStdError = handles[2];
+    DWORD flags = CREATE_UNICODE_ENVIRONMENT | (new_group ? CREATE_NEW_PROCESS_GROUP : 0);
+    if (listed) {
+        // Only these handles, so a spawn on another thread can't leak its
+        // pipe ends into this child (which would keep them open).
+        SIZE_T size = 0;
+        InitializeProcThreadAttributeList(NULL, 1, 0, &size);
+        attrs = malloc(size);
+        if (!attrs || !InitializeProcThreadAttributeList(attrs, 1, 0, &size)) {
+            err = attrs ? last_win_error() : ENOMEM;
+            goto done;
+        }
+        attrs_ready = 1;
+        if (!UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, list,
+                                       (SIZE_T)listed * sizeof(HANDLE), NULL, NULL)) {
+            err = last_win_error();
+            goto done;
+        }
+        si.StartupInfo.cb = sizeof si;
+        si.lpAttributeList = attrs;
+        flags |= EXTENDED_STARTUPINFO_PRESENT;
+    }
+    PROCESS_INFORMATION pi;
+    if (!CreateProcessW(app, line, NULL, NULL, listed > 0, flags, (LPVOID)env, cwd, &si.StartupInfo, &pi)) {
+        err = last_win_error();
+        goto done;
+    }
+    CloseHandle(pi.hThread);
+    *process = (intptr_t)pi.hProcess;
+    *pid = (int)pi.dwProcessId;
+done:
+    if (attrs_ready) DeleteProcThreadAttributeList(attrs);
+    free(attrs);
+    free(line);
+    for (int i = 0; i < 3; i++)
+        if (handles[i]) CloseHandle(handles[i]);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    return err;
+}
+
+int cv_process_wait(intptr_t process, int nohang, uint32_t *code) {
+    DWORD r = WaitForSingleObject((HANDLE)process, nohang ? 0 : INFINITE);
+    if (r == WAIT_TIMEOUT) return 0;
+    if (r != WAIT_OBJECT_0) return -last_win_error();
+    DWORD c = 0;
+    if (!GetExitCodeProcess((HANDLE)process, &c)) return -last_win_error();
+    *code = c;
+    return 1;
+}
+
+int cv_process_kill(intptr_t process) {
+    if (TerminateProcess((HANDLE)process, 1)) return 0;
+    int e = last_win_error();
+    // Refused once it has exited.
+    return WaitForSingleObject((HANDLE)process, 0) == WAIT_OBJECT_0 ? 0 : e;
+}
+
+void cv_process_close(intptr_t process) { CloseHandle((HANDLE)process); }
+
 #endif

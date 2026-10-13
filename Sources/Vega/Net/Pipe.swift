@@ -1,4 +1,4 @@
-#if os(Linux) || canImport(Darwin)
+#if os(Linux) || canImport(Darwin) || os(Windows)
 import CVega
 #if canImport(Glibc)
 import Glibc
@@ -10,6 +10,10 @@ import ucrt
 
 /// The read end of a pipe (or a FIFO, or a terminal): Tokio's
 /// `pipe::Receiver`. A child process's stdout and stderr are these.
+///
+/// On Windows the descriptor is a handle to an overlapped named pipe (as
+/// `makePipe` and VegaProcess make them), run on the driver's completion
+/// port through an internal buffer.
 public struct PipeReader: ~Copyable, Sendable {
     let reg: IORegistration
 
@@ -34,10 +38,17 @@ public struct PipeReader: ~Copyable, Sendable {
     /// every writer has closed (or with a full buffer).
     public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
         guard buffer.spareCapacity > 0 else { return 0 }
+        #if os(Windows)
+        let io = reg.io
+        let n = try await reg.perform(CV_IO_READ) {
+            cv_pipe_read_io(io, buffer.base + buffer.count, buffer.spareCapacity)
+        }
+        #else
         let fd = reg.fd
         let n = try await reg.perform(CV_IO_READ) {
             cv_fd_read(fd, buffer.base + buffer.count, buffer.spareCapacity)
         }
+        #endif
         buffer.count += n
         return n
     }
@@ -69,11 +80,19 @@ public struct PipeWriter: ~Copyable, Sendable {
     /// Write all of `bytes`. They must stay valid until this returns.
     public func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError) {
         guard let base = bytes.baseAddress else { return }
+        #if os(Windows)
+        let io = reg.io
+        #else
         let fd = reg.fd
+        #endif
         var done = 0
         while done < bytes.count {
             done += try await reg.perform(CV_IO_WRITE) {
+                #if os(Windows)
+                cv_pipe_write_io(io, base + done, bytes.count - done)
+                #else
                 cv_pipe_write(fd, base + done, bytes.count - done)
+                #endif
             }
         }
     }
@@ -161,6 +180,33 @@ package struct ProcessExitWatch: ~Copyable, Sendable {
     }
 }
 
+#elseif os(Windows)
+/// A child's exit that a task can wait for: a thread-pool wait on the
+/// process handle posts to the runtime's completion port. The watch keeps
+/// its own copy of the handle.
+package struct ProcessExitWatch: ~Copyable, Sendable {
+    let reg: IORegistration
+
+    /// Off a Vega runtime: `IOError.notOnRuntime`.
+    package init(process: Int) throws(IOError) {
+        let driver = try IODriver.current()
+        var err: Int32 = 0
+        guard let raw = driver.raw, let io = cv_driver_watch_handle(raw, process, &err) else {
+            throw IOError(code: err == 0 ? ENOSYS : err)
+        }
+        reg = IORegistration(io: io, driver: driver)
+    }
+
+    deinit { cv_driver_unwatch_handle(reg.driver, reg.io) }
+
+    /// Wait until the child has exited (at once if it has).
+    package func exited() async throws(IOError) {
+        try await reg.wait(CV_IO_READ)
+    }
+}
+#endif
+
+#if canImport(Darwin) || os(Windows)
 extension IORegistration {
     /// An io the driver made for something other than an fd.
     init(io: UnsafeMutablePointer<cv_io>, driver: IODriver) {

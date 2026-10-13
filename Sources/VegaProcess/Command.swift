@@ -1,5 +1,4 @@
-// POSIX for now; Windows comes with the IOCP driver.
-#if os(Linux) || canImport(Darwin)
+#if os(Linux) || canImport(Darwin) || os(Windows)
 import CVega
 import Vega
 #if canImport(Glibc)
@@ -8,6 +7,7 @@ import Glibc
 import Darwin
 #elseif os(Windows)
 import ucrt
+import WinSDK
 #endif
 
 /// A program to run: Tokio's `tokio::process::Command`.
@@ -27,16 +27,27 @@ import ucrt
 /// `environment` sets one). Spawning and waiting need a Vega runtime. On
 /// iOS, tvOS, watchOS and visionOS, where apps can't start processes,
 /// `spawn` throws `ENOTSUP`.
+///
+/// On Windows, as Rust's std does it: an executable without an extension
+/// gets `.exe`; one without a path is looked up in the child's `PATH`,
+/// then the system directories; the arguments are quoted into one command
+/// line the way the Microsoft C runtime splits it. Batch files (`.bat`,
+/// `.cmd`) are refused with `EINVAL`, since cmd.exe parses its command line
+/// by other rules: run them as `cmd.exe /c`, quoting for cmd yourself.
+/// Variable names are case-insensitive, `processGroup` 0 starts a new
+/// console process group (any other value is ignored), and there are no
+/// signals: `Child.kill` terminates the process with exit code 1.
 public struct Command: Sendable {
     /// Where one of the child's standard streams goes.
     public enum Stdio: Sendable, Hashable {
         /// The parent's own.
         case inherit
-        /// /dev/null.
+        /// /dev/null (NUL on Windows).
         case null
         /// A pipe to the parent: `Child.stdin`, `stdout` or `stderr`.
         case pipe
-        /// A descriptor of the parent's (it stays open in the parent).
+        /// A descriptor of the parent's (it stays open in the parent); on
+        /// Windows, a handle.
         case descriptor(Int32)
     }
 
@@ -68,6 +79,9 @@ public struct Command: Sendable {
     /// environment if none was set yet.
     public mutating func setEnvironment(_ name: String, _ value: String?) {
         var env = environment ?? Command.currentEnvironment
+        #if os(Windows)
+        for key in env.keys where key.uppercased() == name.uppercased() { env[key] = nil }
+        #endif
         env[name] = value
         environment = env
     }
@@ -75,6 +89,21 @@ public struct Command: Sendable {
     /// The parent's environment.
     public static var currentEnvironment: [String: String] {
         var env: [String: String] = [:]
+        #if os(Windows)
+        guard let block = GetEnvironmentStringsW() else { return env }
+        defer { FreeEnvironmentStringsW(block) }
+        var p = UnsafePointer(block)
+        while p.pointee != 0 {
+            let s = String(decodingCString: p, as: UTF16.self)
+            p += wcslen(p) + 1
+            // "=C:=C:\dir" entries are cmd's per-drive directories.
+            if s.hasPrefix("=") { continue }
+            if let eq = s.firstIndex(of: "=") {
+                env[String(s[..<eq])] = String(s[s.index(after: eq)...])
+            }
+        }
+        return env
+        #else
         guard var p = cv_environ() else { return env }
         while let entry = p.pointee {
             let s = String(cString: entry)
@@ -84,6 +113,7 @@ public struct Command: Sendable {
             p += 1
         }
         return env
+        #endif
     }
 
     // MARK: - Running
@@ -111,6 +141,8 @@ public struct Command: Sendable {
     func spawn(stdin: Stdio, stdout: Stdio, stderr: Stdio) throws(IOError) -> Child {
         #if os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
         throw IOError(code: ENOTSUP)
+        #elseif os(Windows)
+        try spawnWindows(stdin: stdin, stdout: stdout, stderr: stderr)
         #else
         Orphans.reap()
         for s in [executable, workingDirectory ?? ""] + arguments where s.utf8.contains(0) {
@@ -169,6 +201,7 @@ public struct Command: Sendable {
         #endif
     }
 
+    #if !os(Windows)
     /// The executable's path: as given if it has a slash, else the first
     /// match in PATH.
     private func resolve() throws(IOError) -> String {
@@ -186,15 +219,24 @@ public struct Command: Sendable {
         }
         throw IOError(code: denied ? EACCES : ENOENT)
     }
+    #endif
 }
 
 /// How a child ended.
 public struct ExitStatus: Sendable, Hashable, CustomStringConvertible {
-    /// The status as waitpid(2) reports it.
+    /// The status as waitpid(2) reports it; on Windows, the exit code.
     public let rawValue: Int32
 
     public init(rawValue: Int32) { self.rawValue = rawValue }
 
+    #if os(Windows)
+    /// The exit code (an NTSTATUS such as 0xC0000005, as a negative number,
+    /// if the process crashed).
+    public var code: Int32? { rawValue }
+
+    /// Always nil: Windows has no signals.
+    public var signal: Int32? { nil }
+    #else
     /// The exit code, if it exited (rather than being killed by a signal).
     public var code: Int32? { rawValue & 0x7f == 0 ? (rawValue >> 8) & 0xff : nil }
 
@@ -203,6 +245,7 @@ public struct ExitStatus: Sendable, Hashable, CustomStringConvertible {
         let sig = rawValue & 0x7f
         return sig != 0 && sig != 0x7f ? sig : nil
     }
+    #endif
 
     /// Exited with code 0.
     public var isSuccess: Bool { code == 0 }
@@ -225,6 +268,7 @@ public struct Output: Sendable, Hashable {
     public var stderrString: String { String(decoding: stderr, as: UTF8.self) }
 }
 
+#if !os(Windows)
 /// `strings` as a NULL-terminated C array for `body`; nil stays nil.
 private func withOptionalCStrings<R>(_ strings: [String]?, _ body: (UnsafePointer<UnsafeMutablePointer<CChar>?>?) -> R) -> R {
     guard let strings else { return body(nil) }
@@ -237,4 +281,5 @@ private func withOptionalCStrings<R>(_ strings: [String]?, _ body: (UnsafePointe
 private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeMutablePointer<CChar>?>) -> R) -> R {
     withOptionalCStrings(strings) { body($0!) }
 }
+#endif
 #endif
