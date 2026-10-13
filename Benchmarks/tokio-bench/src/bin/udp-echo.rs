@@ -1,6 +1,7 @@
-//! UDP echo server on Tokio: the reference for vega-udp. One SO_REUSEPORT
-//! socket per worker, each served by one task that sends every datagram back
-//! to its sender (recv_from / send_to, as plain Tokio code does).
+//! UDP echo server on Tokio: the reference for vega-udp. One socket per
+//! worker on consecutive ports from --port, each served by one task that
+//! sends every datagram back to its sender (recv_from / send_to, as plain
+//! Tokio code does).
 //!
 //!   udp-echo [--port 7100] [--workers N]
 use std::net::SocketAddr;
@@ -23,14 +24,10 @@ fn main() {
         .build()
         .unwrap();
     rt.block_on(async move {
-        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
         let mut tasks = Vec::new();
-        for _ in 0..workers {
-            let s = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None).unwrap();
-            s.set_reuse_port(true).unwrap();
-            s.set_nonblocking(true).unwrap();
-            s.bind(&addr.into()).unwrap();
-            let sock = UdpSocket::from_std(s.into()).unwrap();
+        for i in 0..workers {
+            let addr: SocketAddr = format!("127.0.0.1:{}", port as usize + i).parse().unwrap();
+            let sock = UdpSocket::bind(addr).await.unwrap();
             tasks.push(tokio::spawn(async move {
                 let mut buf = vec![0u8; 2048];
                 loop {

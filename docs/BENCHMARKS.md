@@ -222,6 +222,35 @@ io_uring matches epoll at 64 connections, is 2% behind at 256, and is 9% ahead a
 
 **Next:** `SEND_ZC` for large writes, and deciding whether io_uring becomes the default.
 
+## UDP echo (2026-10-13)
+
+Datagrams per second through a UDP echo server, measured with `Benchmarks/udp-on-box.sh`.
+
+**Setup.** Each server runs 4 workers on physical cores 0–1 and has one socket per worker, on consecutive ports. Client flow *i* goes to port + *i* mod 4, so flows land the same way on every server. A first run used one SO_REUSEPORT port instead, and the kernel's hash put two of four flows on one socket differently from run to run, so it couldn't compare servers at 4 flows.
+
+The client, `tokio-bench`'s `udp-load`, runs on cores 2–3. Each flow has its own connected socket and thread, keeps 256 datagrams in flight, and sends and receives through `sendmmsg` / `recvmmsg`. That way the client isn't the limit. No run lost datagrams.
+
+- **single:** a `receiveFrom` and a `send(to:)` per datagram, the same shape as Tokio's `recv_from` / `send_to`.
+- **batch:** `DatagramBatch`, up to 64 datagrams per `recvmmsg`, sent back with one `sendmmsg`.
+- **gso:** a GRO receive and a GSO send.
+
+Datagrams per second:
+
+| Server | 1 flow, 64 B | 1 flow, 1,200 B | 4 flows, 64 B | 4 flows, 1,200 B |
+|---|---|---|---|---|
+| Vega single, epoll | 157,973 | 148,014 | 480,675 | 406,330 |
+| Vega single, io_uring | 194,722 | 196,258 | 454,599 | 417,296 |
+| Vega batch, epoll | 275,995 | 263,333 | 694,944 | 644,404 |
+| Vega batch, io_uring | **340,513** | **320,240** | **738,710** | **664,296** |
+| Vega gso, epoll | 142,003 | 143,733 | 363,386 | 354,952 |
+| Tokio (`recv_from` / `send_to`) | 195,122 | 182,762 | 462,687 | 439,971 |
+
+- **Batching** gives 1.75× Tokio's datagrams per second with one flow and 1.5–1.6× with four, on io_uring. Most of that comes from cutting syscalls from two per datagram to two per batch. Tokio has no batched UDP API; quinn-udp adds one.
+- **Single datagrams** match Tokio on io_uring.
+  - On epoll, a single flow is 19% behind (158k against 195k), and four flows are level.
+  - Profiling this is next. With one flow, one worker does all the work, and the gap is likely per-datagram overhead in Vega's wait path: a failed `recvfrom` that says `EAGAIN` before each wait.
+- **GSO/GRO** gains nothing here and costs a little: GRO's control message on each receive. Loopback coalesces only datagrams that were sent with GSO, and the client sends with `sendmmsg`. The GSO path pays off for bulk senders (QUIC, media) on real NICs, and it needs a GSO client to measure.
+
 ## Sync primitives (2026-10-12)
 
 8 workers, executor preference, median of 9 runs, in ns/op. Tokio's numbers come from the same benchmarks in `tokio-bench`.

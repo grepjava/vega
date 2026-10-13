@@ -1,6 +1,7 @@
 // UDP echo server on Vega, for packets-per-second runs driven by
-// tokio-bench's udp-load. One SO_REUSEPORT socket per worker (the kernel
-// spreads flows across them), each served by one task that sends every
+// tokio-bench's udp-load. One socket per worker, on consecutive ports from
+// --port (udp-load sends flow i to port + i % workers, so flows land the
+// same way on every server), each served by one task that sends every
 // datagram back to its sender.
 //
 //   vega-udp [--port 7100] [--workers N] [--mode single|batch|gso]
@@ -79,8 +80,8 @@ let listenPort = port, echoMode = mode
 }
 
 try rt.block { () async throws(IOError) in
-    for _ in 0..<rt.workerCount {
-        let socket = try UDPSocket.bind(host: "127.0.0.1", port: listenPort, reusePort: true)
+    for i in 0..<rt.workerCount {
+        let socket = try UDPSocket.bind(host: "127.0.0.1", port: listenPort + i)
         rt.spawn(with: socket) { socket in
             do {
                 switch echoMode {

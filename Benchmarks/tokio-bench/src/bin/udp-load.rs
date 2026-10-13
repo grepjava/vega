@@ -4,8 +4,11 @@
 //! to 64 a call, so the client isn't what limits a fast server. The same
 //! client drives every server.
 //!
-//!   udp-load [--addr 127.0.0.1:7100] [--flows 4] [--size 64] [--window 256]
-//!            [--secs 10] [--warmup 2]
+//!   udp-load [--addr 127.0.0.1:7100] [--ports 4] [--flows 4] [--size 64]
+//!            [--window 256] [--secs 10] [--warmup 2]
+//!
+//! Flow i goes to the address's port + i % ports: the servers listen on
+//! consecutive ports, one socket per worker.
 //!
 //! Prints replies per second. A datagram lost on the way (the server's
 //! socket buffer overflowed) is noticed by a 20 ms receive timeout, which
@@ -21,12 +24,14 @@ const CHUNK: usize = 64;
 fn main() {
     let mut addr = "127.0.0.1:7100".to_string();
     let (mut flows, mut size, mut window, mut secs, mut warmup) = (4usize, 64usize, 256usize, 10u64, 2u64);
+    let mut ports = 1usize;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut v = || args.next().unwrap();
         match a.as_str() {
             "--addr" => addr = v(),
             "--flows" => flows = v().parse().unwrap(),
+            "--ports" => ports = v().parse().unwrap(),
             "--size" => size = v().parse().unwrap(),
             "--window" => window = v().parse().unwrap(),
             "--secs" => secs = v().parse().unwrap(),
@@ -40,7 +45,9 @@ fn main() {
     let lost = Arc::new(AtomicU64::new(0));
     let mut threads = Vec::new();
     for f in 0..flows {
-        let (addr, stop, received, lost) = (addr.clone(), stop.clone(), received.clone(), lost.clone());
+        let mut addr: std::net::SocketAddr = addr.parse().unwrap();
+        addr.set_port(addr.port() + (f % ports) as u16);
+        let (stop, received, lost) = (stop.clone(), received.clone(), lost.clone());
         threads.push(std::thread::spawn(move || {
             let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
             sock.connect(&addr).unwrap();

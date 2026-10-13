@@ -30,10 +30,10 @@ for s in $SERVERS; do
     for f in $FLOWS; do
         for z in $SIZES; do
             taskset -c 2,3,6,7 ./tokio-bench/target/release/udp-load \
-                --addr 127.0.0.1:$PORT --flows "$f" --size "$z" --secs "$SECS" --warmup 2 </dev/null
+                --addr 127.0.0.1:$PORT --ports 4 --flows "$f" --size "$z" --secs "$SECS" --warmup 2 </dev/null
         done
     done
     grep -v '^vega-udp: [a-z]* on' /tmp/udp-server.log | head -3
     kill $pid; wait $pid 2>/dev/null || true
-    PORT=$((PORT + 1))
+    PORT=$((PORT + 10)) # each server takes PORT..PORT+3
 done
