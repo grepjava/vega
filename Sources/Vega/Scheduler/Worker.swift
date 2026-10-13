@@ -23,7 +23,13 @@ final class Worker: @unchecked Sendable {
     /// instead of a futex syscall on both sides. `VEGA_SPIN_NS` overrides.
     static let spinNanos: Int64 = {
         if let v = getenv("VEGA_SPIN_NS"), let n = Int64(String(cString: v)) { return n }
+        #if canImport(Darwin)
+        // Apple machines usually share cores with whatever drives them, where
+        // a spin costs battery and the client's CPU (M1: docs/BENCHMARKS.md).
+        return 0
+        #else
         return 50_000
+        #endif
     }()
 
     let index: Int
