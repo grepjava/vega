@@ -35,6 +35,13 @@
 #include <string.h>
 #include <signal.h>
 #include <spawn.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+// iOS, tvOS, watchOS, visionOS: apps may not fork or spawn processes.
+#define CV_NO_SPAWN 1
+#endif
+#endif
 #include <sys/socket.h>
 #if defined(__linux__)
 #include <sys/prctl.h>
@@ -1037,6 +1044,9 @@ long cv_pipe_write(int fd, const void *buf, long len) {
 
 int cv_spawn(const char *path, char *const argv[], char *const envp[], const char *cwd,
              const int stdio[3], int pgroup, int *pid) {
+#ifdef CV_NO_SPAWN
+    return ENOTSUP;
+#else
     posix_spawn_file_actions_t fa;
     posix_spawnattr_t attr;
     int rc = posix_spawn_file_actions_init(&fa);
@@ -1075,6 +1085,7 @@ int cv_spawn(const char *path, char *const argv[], char *const envp[], const cha
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&fa);
     return rc;
+#endif
 }
 
 char **cv_environ(void) {
@@ -1192,6 +1203,9 @@ static int sup_watch_parent(pid_t parent) {
 #endif
 
 int cv_supervisor_fork(void) {
+#ifdef CV_NO_SPAWN
+    return -ENOTSUP;
+#else
     pid_t parent = getpid();
     pid_t pid = fork();
     if (pid < 0) return -errno;
@@ -1211,10 +1225,14 @@ int cv_supervisor_fork(void) {
     if (sup_watch_parent(parent) != 0 || getppid() != parent) _exit(1);
 #endif
     return 0;
+#endif
 }
 
 int cv_shard_spawn(const char *path, char *const argv[], char *const envp[],
                    const int *fds, const int *targets, int count, int *pid) {
+#ifdef CV_NO_SPAWN
+    return ENOTSUP;
+#else
     posix_spawn_file_actions_t fa;
     posix_spawnattr_t attr;
     int rc = posix_spawn_file_actions_init(&fa);
@@ -1248,6 +1266,7 @@ int cv_shard_spawn(const char *path, char *const argv[], char *const envp[],
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&fa);
     return rc;
+#endif
 }
 
 int cv_shard_adopt(int parent) {

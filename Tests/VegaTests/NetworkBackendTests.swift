@@ -15,6 +15,14 @@ import Testing
         defer { rt.shutdown() }
         #expect(rt.ioBackend == .network)
         #expect(Runtime(workers: 1, io: .readiness).ioBackend == .readiness)
+        #if !os(macOS)
+        // The default on iOS, tvOS, watchOS and visionOS.
+        if getenv("VEGA_DRIVER") == nil {
+            let auto = Runtime(workers: 1)
+            #expect(auto.ioBackend == .network)
+            auto.shutdown()
+        }
+        #endif
     }
 
     /// An echo through split halves, both ends Network.framework sockets.

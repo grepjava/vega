@@ -24,7 +24,9 @@ import ucrt
 /// ```
 ///
 /// `executable` without a slash is looked up in `PATH` (the child's, when
-/// `environment` sets one). Spawning and waiting need a Vega runtime.
+/// `environment` sets one). Spawning and waiting need a Vega runtime. On
+/// iOS, tvOS, watchOS and visionOS, where apps can't start processes,
+/// `spawn` throws `ENOTSUP`.
 public struct Command: Sendable {
     /// Where one of the child's standard streams goes.
     public enum Stdio: Sendable, Hashable {
@@ -107,6 +109,9 @@ public struct Command: Sendable {
     }
 
     func spawn(stdin: Stdio, stdout: Stdio, stderr: Stdio) throws(IOError) -> Child {
+        #if os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+        throw IOError(code: ENOTSUP)
+        #else
         Orphans.reap()
         for s in [executable, workingDirectory ?? ""] + arguments where s.utf8.contains(0) {
             throw IOError(code: EINVAL)
@@ -161,6 +166,7 @@ public struct Command: Sendable {
         if let fd = parentFDs[2] { child.stderr = try PipeReader(adopting: fd) }
         try child.watchExit()
         return child
+        #endif
     }
 
     /// The executable's path: as given if it has a slash, else the first

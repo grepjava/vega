@@ -27,6 +27,8 @@ private func sh(_ script: String) -> Command {
     Command("sh", arguments: ["-c", script])
 }
 
+// iOS, tvOS, watchOS and visionOS apps can't start processes.
+#if os(Linux) || os(macOS)
 @Suite struct ProcessTests {
     @Test func outputCollectsBothStreams() throws {
         let out = try run { try await sh("echo out; echo err >&2; exit 3").output() }
@@ -197,6 +199,23 @@ private func sh(_ script: String) -> Command {
         #expect(text == "via fd\n")
     }
 }
+#else
+@Suite struct ProcessTests {
+    @Test func spawningIsUnsupported() throws {
+        let rt = Runtime(workers: 1)
+        defer { rt.shutdown() }
+        let error = try rt.block { () async throws -> IOError? in
+            do throws(IOError) {
+                _ = try Command("true").spawn()
+                return nil
+            } catch {
+                return error
+            }
+        }
+        #expect(error == IOError(code: ENOTSUP))
+    }
+}
+#endif
 
 @Suite struct PipeTests {
     @Test func bytesFlowAndEndOfStream() throws {
