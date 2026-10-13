@@ -49,19 +49,16 @@ func printError(_ line: String) {
 }
 
 func statsLoop() async {
-    var io = rt.ioMetrics
     var m = rt.metrics
     while true {
         try? await Runtime.sleep(for: .seconds(2))
-        let io2 = rt.ioMetrics, m2 = rt.metrics
-        let parked = io2.parkedPolls - io.parkedPolls, busy = io2.busyPolls - io.busyPolls
-        let events = io2.events - io.events
-        let jobs = zip(m2, m).map { $0.jobs - $1.jobs }
-        let steals = zip(m2, m).map { $0.steals - $1.steals }
-        printError("jobs \(jobs) steals \(steals) | polls parked \(parked) busy \(busy) "
-              + "events \(events) (\(parked + busy > 0 ? events / (parked + busy) : 0)/poll) "
-              + "wakes \(io2.wakes - io.wakes) full \(io2.fullBatches - io.fullBatches)\n")
-        io = io2
+        let m2 = rt.metrics
+        let d = m2.since(m), io = d.io
+        let parked = io.parkedPolls, busy = io.busyPolls
+        printError("jobs \(d.workers.map(\.polls)) steals \(d.workers.map(\.steals)) "
+              + "busy \(Int(d.utilization * 100))% | polls parked \(parked) busy \(busy) "
+              + "events \(io.events) (\(parked + busy > 0 ? io.events / (parked + busy) : 0)/poll) "
+              + "wakes \(io.wakes) full \(io.fullBatches)\n")
         m = m2
     }
 }

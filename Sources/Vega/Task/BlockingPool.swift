@@ -52,6 +52,14 @@ final class BlockingPool: @unchecked Sendable {
     /// Threads alive now, busy or idle.
     var threadCount: Int { lock.withLock { state.pointer.pointee.threads } }
 
+    /// Threads alive, those idle, and jobs waiting for a thread.
+    var counts: (threads: Int, idle: Int, queued: Int) {
+        lock.withLock {
+            let s = state.pointer.pointee
+            return (s.threads, s.idle.count, s.jobs.count - s.head)
+        }
+    }
+
     /// Run `job` on a pool thread.
     func submit(_ job: @escaping Job) {
         lock.lock()

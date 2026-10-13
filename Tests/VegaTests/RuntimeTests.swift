@@ -88,7 +88,7 @@ func spin(microseconds: UInt64) {
             }
         }
         #expect(workers.count >= 3, "ran on \(workers)")
-        #expect(rt.metrics.map(\.steals).reduce(0, +) > 0)
+        #expect(rt.metrics.steals > 0)
     }
 
     @Test func sleepsWakeInOrderAndOnTime() {

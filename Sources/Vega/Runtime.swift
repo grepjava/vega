@@ -206,9 +206,65 @@ public final class Runtime: Sendable {
     /// The index of the Vega worker running the caller, or nil off-runtime.
     public static var currentWorker: Int? { Worker.current?._withUnsafeGuaranteedRef { $0.index } }
 
-    /// Per-worker counters.
-    public var metrics: [(jobs: UInt64, steals: UInt64)] {
-        scheduler.workers.map { ($0.jobsRun.load(ordering: .relaxed), $0.steals.load(ordering: .relaxed)) }
+    /// The runtime's counters now (Tokio's `RuntimeMetrics`). Cheap enough
+    /// to sample every second; counters are read without stopping the
+    /// workers, so they're consistent only to within a few jobs.
+    public var metrics: RuntimeMetrics {
+        let now = cv_now_ns()
+        let timing = scheduler.pollTiming.load(ordering: .relaxed)
+        let workers = scheduler.workers.map { w -> RuntimeMetrics.Worker in
+            let since = w.activeSince.load(ordering: .relaxed)
+            let busy = w.busyNanos.load(ordering: .relaxed) &+ (since != 0 && now > since ? now - since : 0)
+            var histogram: [UInt64] = []
+            if timing || w.longestPoll.load(ordering: .relaxed) > 0 {
+                histogram = (0..<Worker.pollBuckets).map { (w.pollHistogram + $0).pointee.load(ordering: .relaxed) }
+            }
+            return RuntimeMetrics.Worker(
+                polls: w.jobsRun.load(ordering: .relaxed),
+                steals: w.steals.load(ordering: .relaxed),
+                parks: w.parks.load(ordering: .relaxed),
+                overflows: w.queue.overflows.load(ordering: .relaxed),
+                forcedYields: w.forcedYields.load(ordering: .relaxed),
+                localQueueDepth: w.queue.count,
+                busyTime: .nanoseconds(Int64(clamping: busy)),
+                pollTimeHistogram: histogram,
+                slowPolls: w.slowPolls.load(ordering: .relaxed),
+                longestPoll: .nanoseconds(Int64(clamping: w.longestPoll.load(ordering: .relaxed))),
+                totalPollTime: .nanoseconds(Int64(clamping: w.pollNanos.load(ordering: .relaxed))))
+        }
+        let blocking = scheduler.blocking.counts
+        return RuntimeMetrics(
+            elapsed: .nanoseconds(Int64(clamping: now &- scheduler.startedAt)),
+            workers: workers,
+            injectQueueDepth: scheduler.inject.count.load(ordering: .relaxed),
+            blockingThreads: blocking.threads,
+            idleBlockingThreads: blocking.idle,
+            blockingQueueDepth: blocking.queued,
+            timedEnqueues: scheduler.timedEnqueues.load(ordering: .relaxed),
+            foreignEnqueues: scheduler.foreignEnqueues.load(ordering: .relaxed),
+            io: ioMetrics)
+    }
+
+    /// Time every job the workers run, for `metrics`' poll-time histogram,
+    /// slow-poll count and longest poll. Off by default: it costs two clock
+    /// reads per job. Takes effect from each worker's next job.
+    public var measurePollTimes: Bool {
+        get { scheduler.pollTiming.load(ordering: .relaxed) }
+        set { scheduler.pollTiming.store(newValue, ordering: .relaxed) }
+    }
+
+    /// With `measurePollTimes`, a job that runs this long or longer counts
+    /// in `RuntimeMetrics.Worker.slowPolls`: it held its worker, and every
+    /// task queued behind it, that long. nil counts none.
+    public var slowPollThreshold: Duration? {
+        get {
+            let ns = scheduler.slowPollNanos.load(ordering: .relaxed)
+            return ns == .max ? nil : .nanoseconds(Int64(clamping: ns))
+        }
+        set {
+            scheduler.slowPollNanos.store(newValue.map { UInt64(Scheduler.nanoseconds($0)) } ?? .max,
+                                          ordering: .relaxed)
+        }
     }
 
     /// Enqueues since start: timed ones (sleeps and timeouts, and on Linux

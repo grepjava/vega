@@ -42,6 +42,12 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     let isShutdown = Atomic<Bool>(false)
     /// The time timers run on; paused in tests.
     let clock = RuntimeClock()
+    /// Whether workers time each job (`Runtime.measurePollTimes`), and the
+    /// poll time counted as slow. Read on every job; written rarely.
+    let pollTiming = Atomic<Bool>(false)
+    let slowPollNanos = Atomic<UInt64>(UInt64.max)
+    /// When the runtime started (cv_now_ns), for metrics.
+    let startedAt = cv_now_ns()
 
     /// Written fields below, away from the read-mostly ones above.
     private let writePad = Pad128()

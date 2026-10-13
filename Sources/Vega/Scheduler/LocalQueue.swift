@@ -15,6 +15,9 @@ final class LocalQueue: @unchecked Sendable {
 
     let head = Atomic<UInt64>(0)
     let tail = Atomic<UInt32>(0)
+    /// Pushes that found the ring full and moved jobs to the inject queue.
+    /// Owner-written; metrics read it racily.
+    let overflows = Atomic<UInt64>(0)
     let buffer: UnsafeMutablePointer<UnownedJob>
 
     init() {
@@ -65,9 +68,13 @@ final class LocalQueue: @unchecked Sendable {
             if steal != real {
                 // A thief is mid-copy and will free room shortly; don't wait for it.
                 overflow.push(job)
+                overflows.store(overflows.load(ordering: .relaxed) &+ 1, ordering: .relaxed)
                 return
             }
-            if pushOverflow(job, real: real, tail: t, overflow: overflow) { return }
+            if pushOverflow(job, real: real, tail: t, overflow: overflow) {
+                overflows.store(overflows.load(ordering: .relaxed) &+ 1, ordering: .relaxed)
+                return
+            }
             // A thief took jobs between our load and the CAS: there's room now.
         }
     }

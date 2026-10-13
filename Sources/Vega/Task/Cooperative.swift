@@ -30,6 +30,10 @@ extension Runtime {
             worker.budget -= 1
             return worker.budget <= 0
         }
-        if exhausted { await yield() }
+        if exhausted {
+            w._withUnsafeGuaranteedRef { $0.forcedYields.store($0.forcedYields.load(ordering: .relaxed) &+ 1,
+                                                               ordering: .relaxed) }
+            await yield()
+        }
     }
 }

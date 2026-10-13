@@ -82,15 +82,62 @@ final class Worker: @unchecked Sendable {
     /// for, so the loop returns (from `park` too) instead of sleeping on.
     let driveDone = Atomic<Bool>(false)
     let steals = Atomic<UInt64>(0)
+    /// Times this worker parked, and its time out of park (busy), in ns.
+    /// `activeSince` is when it last unparked (0 while parked).
+    let parks = Atomic<UInt64>(0)
+    let busyNanos = Atomic<UInt64>(0)
+    let activeSince = Atomic<UInt64>(0)
+    /// Tasks made to yield by an exhausted budget (`Runtime.consumeBudget`).
+    let forcedYields = Atomic<UInt64>(0)
+    /// With poll timing on: jobs by duration (`Worker.pollBucket`), those
+    /// over the slow threshold, and the longest, in ns.
+    let pollHistogram: UnsafeMutablePointer<Atomic<UInt64>>
+    let slowPolls = Atomic<UInt64>(0)
+    let longestPoll = Atomic<UInt64>(0)
+    let pollNanos = Atomic<UInt64>(0)
+    static let pollBuckets = 24
 
     init(index: Int) {
         self.index = index
         rng = UInt32(truncatingIfNeeded: index &* 0x9E37_79B9) | 1
+        pollHistogram = .allocate(capacity: Self.pollBuckets)
+        for i in 0..<Self.pollBuckets { (pollHistogram + i).initialize(to: Atomic(0)) }
     }
 
     deinit {
         cv_parker_free(parker)
         injectBuffer.deallocate()
+        pollHistogram.deinitialize(count: Self.pollBuckets)
+        pollHistogram.deallocate()
+    }
+
+    /// The histogram bucket of a poll that took `ns`: 0 under 1 µs, then
+    /// one per doubling (bucket b holds [2^(b-1), 2^b) µs); the last is open.
+    @inline(__always) static func pollBucket(_ ns: UInt64) -> Int {
+        let micros = ns / 1000
+        return min(UInt64.bitWidth - micros.leadingZeroBitCount, pollBuckets - 1)
+    }
+
+    /// Owner only: one poll took `ns`.
+    @inline(never) private func recordPoll(_ ns: UInt64, _ s: Scheduler) {
+        let b = pollHistogram + Self.pollBucket(ns)
+        b.pointee.store(b.pointee.load(ordering: .relaxed) &+ 1, ordering: .relaxed)
+        pollNanos.store(pollNanos.load(ordering: .relaxed) &+ ns, ordering: .relaxed)
+        if ns > longestPoll.load(ordering: .relaxed) { longestPoll.store(ns, ordering: .relaxed) }
+        if ns >= s.slowPollNanos.load(ordering: .relaxed) {
+            slowPolls.store(slowPolls.load(ordering: .relaxed) &+ 1, ordering: .relaxed)
+        }
+    }
+
+    /// Park, counting it and the busy stretch it ends.
+    @inline(__always) private func parkCounted(_ s: Scheduler) {
+        let start = cv_now_ns()
+        let since = activeSince.load(ordering: .relaxed)
+        if since != 0 { busyNanos.store(busyNanos.load(ordering: .relaxed) &+ (start &- since), ordering: .relaxed) }
+        activeSince.store(0, ordering: .relaxed)
+        parks.store(parks.load(ordering: .relaxed) &+ 1, ordering: .relaxed)
+        park(s)
+        activeSince.store(cv_now_ns(), ordering: .relaxed)
     }
 
     /// The worker running on this thread, unretained.
@@ -209,11 +256,12 @@ final class Worker: @unchecked Sendable {
             precondition(e == 0, "vega: cannot enable io_uring (errno \(e))")
         }
         #endif
+        activeSince.store(cv_now_ns(), ordering: .relaxed)
         while !s.isShutdown.load(ordering: .relaxed) {
             if let job = nextJob(s) ?? ringJob() ?? steal(s) {
                 runJob(job, s, executor)
             } else {
-                park(s)
+                parkCounted(s)
             }
         }
         #if os(Linux)
@@ -229,13 +277,18 @@ final class Worker: @unchecked Sendable {
         cv_current_set(Unmanaged.passUnretained(self).toOpaque())
         let s = scheduler.unsafelyUnwrapped
         let executor = s.asUnownedTaskExecutor()
+        activeSince.store(cv_now_ns(), ordering: .relaxed)
         while !s.isShutdown.load(ordering: .relaxed) && !driveDone.load(ordering: .acquiring) {
             if let job = nextJob(s) ?? steal(s) {
                 runJob(job, s, executor)
             } else {
-                park(s)
+                parkCounted(s)
             }
         }
+        // Out of `block`: not busy, as far as metrics go.
+        let since = activeSince.load(ordering: .relaxed)
+        busyNanos.store(busyNanos.load(ordering: .relaxed) &+ (cv_now_ns() &- since), ordering: .relaxed)
+        activeSince.store(0, ordering: .relaxed)
         driveDone.store(false, ordering: .relaxed)
         cv_current_set(nil)
     }
@@ -250,7 +303,13 @@ final class Worker: @unchecked Sendable {
         #endif
         running = Self.identity(job)
         budget = Self.budgetPerPoll
-        job.runSynchronously(on: executor)
+        if s.pollTiming.load(ordering: .relaxed) {
+            let start = cv_now_ns()
+            job.runSynchronously(on: executor)
+            recordPoll(cv_now_ns() &- start, s)
+        } else {
+            job.runSynchronously(on: executor)
+        }
         #if VEGA_JOB_AUDIT
         JobAudit.note(job, "done")
         #endif
