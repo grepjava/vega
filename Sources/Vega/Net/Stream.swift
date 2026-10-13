@@ -1,4 +1,4 @@
-#if os(Linux) || canImport(Darwin)
+#if os(Linux) || canImport(Darwin) || os(Windows)
 import CVega
 #if canImport(Glibc)
 import Glibc
@@ -211,7 +211,12 @@ extension IORegistration {
         #if canImport(Network)
         if let nw { return nwShutdownWrite(nw) }
         #endif
+        #if os(Windows)
+        let e = cv_shutdown_write(fd)
+        if e != 0 { throw IOError(code: e) }
+        #else
         if shutdown(fd, Int32(SHUT_WR)) != 0 { throw IOError(code: errno) }
+        #endif
     }
 
     var localAddress: SocketAddress {

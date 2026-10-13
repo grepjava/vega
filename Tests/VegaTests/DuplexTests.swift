@@ -1,4 +1,4 @@
-#if os(Linux) || canImport(Darwin)
+#if os(Linux) || canImport(Darwin) || os(Windows)
 import Testing
 import Vega
 import VegaIO

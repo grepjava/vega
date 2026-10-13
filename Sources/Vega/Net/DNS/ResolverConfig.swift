@@ -1,4 +1,4 @@
-#if os(Linux) || canImport(Darwin)
+#if os(Linux) || canImport(Darwin) || os(Windows)
 import CVega
 
 /// What a `Resolver` asks and whom: the parts of resolv.conf a stub resolver

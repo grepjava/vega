@@ -461,7 +461,7 @@ final class Worker: @unchecked Sendable {
             if let n = parkInRing(timeout) {
                 fired = n
             } else {
-                #if os(Linux) || canImport(Darwin)
+                #if os(Linux) || canImport(Darwin) || os(Windows)
                 if ownsTimers, let driver = s.driver {
                     fired = driver.park(parker, timeout: timeout, on: self)
                 } else {

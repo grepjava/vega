@@ -129,14 +129,17 @@ enum { EMPTY = 0, PARKED = 1, NOTIFIED = 2, PARKED_IO = 3 };
 struct cv_parker {
     _Atomic uint32_t state;
     int wake_fd; // the driver's eventfd (Linux) or kqueue (Darwin), or -1
-    char pad[120]; // own cache line pair: parkers are hit from other threads
+    void *wake_port; // Windows: the driver's completion port, or NULL
+    char pad[112]; // own cache line pair: parkers are hit from other threads
 };
+_Static_assert(sizeof(struct cv_parker) == 128, "aligned_alloc needs a multiple of the alignment");
 
 cv_parker *cv_parker_new(void) {
     cv_parker *p = cv_aligned_alloc(128, sizeof(cv_parker));
     if (!p) abort();
     atomic_init(&p->state, EMPTY);
     p->wake_fd = -1;
+    p->wake_port = NULL;
     return p;
 }
 
@@ -235,7 +238,15 @@ void cv_park_spin(cv_parker *p, int64_t timeout_ns, int64_t spin_ns) {
 }
 
 /// Interrupt a turn blocked in the driver whose wake fd is `fd`.
-static void driver_wake(int fd) {
+/// The completion key of a wake posted to a Windows driver's port.
+#define CV_WAKE_KEY ((ULONG_PTR)1)
+
+static void driver_wake(cv_parker *p) {
+#if defined(_WIN32)
+    PostQueuedCompletionStatus((HANDLE)p->wake_port, 0, CV_WAKE_KEY, NULL);
+#else
+    int fd = p->wake_fd;
+#endif
 #if defined(__linux__)
     uint64_t one = 1;
     ssize_t r = write(fd, &one, sizeof one);
@@ -244,7 +255,7 @@ static void driver_wake(int fd) {
     struct kevent ev;
     EV_SET(&ev, 0, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
     kevent(fd, &ev, 1, NULL, 0, NULL);
-#else
+#elif !defined(_WIN32)
     (void)fd;
 #endif
 }
@@ -254,7 +265,7 @@ void cv_unpark(cv_parker *p) {
     if (old == PARKED) {
         wake_one(&p->state);
     } else if (old == PARKED_IO) {
-        driver_wake(p->wake_fd);
+        driver_wake(p);
     }
 }
 
@@ -677,6 +688,343 @@ void cv_driver_unwatch_exit(cv_driver *d, cv_io *io, int pid) {
 }
 #endif
 
+#elif defined(_WIN32)
+// Readiness on Windows, as Tokio's mio does it: one I/O completion port per
+// runtime, and IOCTL_AFD_POLL requests against the sockets' base handles
+// through a handle to the AFD driver. A poll is one-shot: it's submitted
+// when a task arms a direction after WSAEWOULDBLOCK (cv_driver_want), and
+// completes on the port at once if the socket is ready already, so no edge
+// is lost. Its completion resumes the waiter exactly as an epoll event does.
+
+#include <winsock2.h>
+#include <mswsock.h>
+#include <timeapi.h>
+
+typedef LONG NTSTATUS;
+typedef struct {
+    union {
+        NTSTATUS Status;
+        PVOID Pointer;
+    };
+    ULONG_PTR Information;
+} cv_iosb;
+typedef struct {
+    USHORT Length;
+    USHORT MaximumLength;
+    PWSTR Buffer;
+} cv_unicode_string;
+typedef struct {
+    ULONG Length;
+    HANDLE RootDirectory;
+    cv_unicode_string *ObjectName;
+    ULONG Attributes;
+    PVOID SecurityDescriptor;
+    PVOID SecurityQualityOfService;
+} cv_object_attributes;
+typedef struct {
+    HANDLE Handle;
+    ULONG Events;
+    NTSTATUS Status;
+} cv_afd_poll_handle;
+typedef struct {
+    LARGE_INTEGER Timeout;
+    ULONG NumberOfHandles;
+    ULONG Exclusive;
+    cv_afd_poll_handle Handles[1];
+} cv_afd_poll_info;
+
+#define CV_IOCTL_AFD_POLL 0x00012024
+#define CV_FILE_OPEN 0x00000001
+#define CV_STATUS_PENDING ((NTSTATUS)0x00000103L)
+#define CV_STATUS_CANCELLED ((NTSTATUS)0xC0000120L)
+#define AFD_POLL_RECEIVE 0x0001
+#define AFD_POLL_RECEIVE_EXPEDITED 0x0002
+#define AFD_POLL_SEND 0x0004
+#define AFD_POLL_DISCONNECT 0x0008
+#define AFD_POLL_ABORT 0x0010
+#define AFD_POLL_LOCAL_CLOSE 0x0020
+#define AFD_POLL_ACCEPT 0x0080
+#define AFD_POLL_CONNECT_FAIL 0x0100
+
+typedef NTSTATUS(NTAPI *nt_create_file_fn)(PHANDLE, ACCESS_MASK, cv_object_attributes *, cv_iosb *,
+                                           PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
+typedef NTSTATUS(NTAPI *nt_device_io_control_file_fn)(HANDLE, HANDLE, PVOID, PVOID, cv_iosb *, ULONG,
+                                                      PVOID, ULONG, PVOID, ULONG);
+typedef NTSTATUS(NTAPI *nt_cancel_io_file_ex_fn)(HANDLE, cv_iosb *, cv_iosb *);
+
+static nt_create_file_fn nt_create_file;
+static nt_device_io_control_file_fn nt_device_io_control_file;
+static nt_cancel_io_file_ex_fn nt_cancel_io_file_ex;
+
+static BOOL CALLBACK load_ntdll(PINIT_ONCE once, PVOID param, PVOID *ctx) {
+    (void)once, (void)param, (void)ctx;
+    HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+    if (!nt) return FALSE;
+    nt_create_file = (nt_create_file_fn)(void *)GetProcAddress(nt, "NtCreateFile");
+    nt_device_io_control_file = (nt_device_io_control_file_fn)(void *)GetProcAddress(nt, "NtDeviceIoControlFile");
+    nt_cancel_io_file_ex = (nt_cancel_io_file_ex_fn)(void *)GetProcAddress(nt, "NtCancelIoFileEx");
+    return nt_create_file && nt_device_io_control_file && nt_cancel_io_file_ex;
+}
+
+#define CV_MAX_EVENTS 1024
+
+// The state word of a registration: a poll in flight per direction, and
+// whether the owner let go. Whoever takes it to CLOSING with nothing in
+// flight frees it.
+#define POLL_READ 1u
+#define POLL_WRITE 2u
+#define POLL_CLOSING 4u
+
+typedef struct cv_poll_op {
+    cv_iosb iosb; // first: the completion's lpOverlapped points here
+    cv_afd_poll_info info;
+    struct cv_io_win *io;
+    int dir;
+} cv_poll_op;
+
+typedef struct cv_io_win {
+    cv_io io; // first: Swift sees a cv_io *
+    cv_driver *driver;
+    SOCKET base; // the base provider socket, which AFD polls
+    _Atomic uint32_t state;
+    cv_poll_op op[2];
+} cv_io_win;
+
+struct cv_driver {
+    _Atomic uint32_t locked;
+    char pad0[124];
+    _Atomic int registered;
+    _Atomic(cv_io *) released;
+    char pad1[112];
+    HANDLE port;
+    HANDLE afd;
+    cv_driver_stats stats;
+    OVERLAPPED_ENTRY events[CV_MAX_EVENTS];
+    uintptr_t wakes[2 * CV_MAX_EVENTS];
+};
+
+cv_driver *cv_driver_new(void) {
+    static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
+    if (!InitOnceExecuteOnce(&once, load_ntdll, NULL, NULL)) {
+        errno = ENOSYS;
+        return NULL;
+    }
+    cv_driver *d = cv_aligned_alloc(128, (sizeof(cv_driver) + 127) & ~(size_t)127);
+    if (!d) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    memset(d, 0, sizeof *d);
+    d->port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+    if (!d->port) goto fail;
+    // A handle to AFD of our own: the name after \Device\Afd is arbitrary.
+    static WCHAR name[] = L"\\Device\\Afd\\Vega";
+    cv_unicode_string uname = {sizeof name - sizeof(WCHAR), sizeof name, name};
+    cv_object_attributes attrs = {sizeof attrs, NULL, &uname, 0, NULL, NULL};
+    cv_iosb iosb;
+    NTSTATUS st = nt_create_file(&d->afd, SYNCHRONIZE, &attrs, &iosb, NULL, 0,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE, CV_FILE_OPEN, 0, NULL, 0);
+    if (st != 0) {
+        d->afd = NULL;
+        goto fail;
+    }
+    if (!CreateIoCompletionPort(d->afd, d->port, 0, 0)) goto fail;
+    SetFileCompletionNotificationModes(d->afd, FILE_SKIP_SET_EVENT_ON_HANDLE);
+    // Waits time out on the system tick, 15.6 ms by default: too coarse for
+    // timers. 1 ms while a runtime exists (per process since Windows 10 2004).
+    timeBeginPeriod(1);
+    return d;
+fail:
+    if (d->afd) CloseHandle(d->afd);
+    if (d->port) CloseHandle(d->port);
+    cv_aligned_free(d);
+    errno = EIO;
+    return NULL;
+}
+
+static void release_pending(cv_driver *d) {
+    cv_io *io = atomic_exchange_explicit(&d->released, NULL, memory_order_acquire);
+    while (io) {
+        cv_io *next = io->next;
+        free(io);
+        io = next;
+    }
+}
+
+void cv_driver_free(cv_driver *d) {
+    if (!d) return;
+    release_pending(d);
+    CloseHandle(d->afd);
+    CloseHandle(d->port);
+    cv_aligned_free(d);
+    timeEndPeriod(1);
+}
+
+void cv_parker_attach_driver(cv_parker *p, cv_driver *d) { p->wake_port = d->port; }
+
+int cv_driver_try_lock(cv_driver *d) {
+    return atomic_load_explicit(&d->locked, memory_order_relaxed) == 0 &&
+           atomic_exchange_explicit(&d->locked, 1, memory_order_acquire) == 0;
+}
+
+void cv_driver_lock(cv_driver *d) {
+    for (uint32_t i = 1; !cv_driver_try_lock(d); i++) {
+        cpu_relax();
+        if ((i & 1023) == 0) SwitchToThread();
+    }
+}
+
+void cv_driver_unlock(cv_driver *d) { atomic_store_explicit(&d->locked, 0, memory_order_release); }
+
+int cv_driver_registered(cv_driver *d) {
+    return atomic_load_explicit(&d->registered, memory_order_relaxed);
+}
+
+uintptr_t *cv_driver_wakes(cv_driver *d) { return d->wakes; }
+
+cv_driver_stats cv_driver_get_stats(cv_driver *d) { return d->stats; }
+
+static uintptr_t io_ready(cv_io *io, int dir) {
+    uintptr_t cur = __atomic_load_n(&io->slot[dir], __ATOMIC_ACQUIRE);
+    for (;;) {
+        if (cur == CV_IO_READY) return 0;
+        uintptr_t next = cur == CV_IO_IDLE ? CV_IO_READY : CV_IO_IDLE;
+        if (__atomic_compare_exchange_n(&io->slot[dir], &cur, next, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return cur == CV_IO_IDLE ? 0 : cur;
+    }
+}
+
+static void push_released(cv_driver *d, cv_io *io) {
+    cv_io *head = atomic_load_explicit(&d->released, memory_order_relaxed);
+    do {
+        io->next = head;
+    } while (!atomic_compare_exchange_weak_explicit(&d->released, &head, io,
+                                                    memory_order_release, memory_order_relaxed));
+}
+
+static ULONG poll_mask(int dir) {
+    // Errors and closes complete both directions: the retried call reports them.
+    ULONG common = AFD_POLL_DISCONNECT | AFD_POLL_ABORT | AFD_POLL_LOCAL_CLOSE | AFD_POLL_CONNECT_FAIL;
+    return dir == CV_IO_READ ? AFD_POLL_RECEIVE | AFD_POLL_ACCEPT | common : AFD_POLL_SEND | common;
+}
+
+void cv_driver_want(cv_io *raw, int dir) {
+    cv_io_win *io = (cv_io_win *)raw;
+    uint32_t bit = dir == CV_IO_READ ? POLL_READ : POLL_WRITE;
+    uint32_t cur = atomic_load_explicit(&io->state, memory_order_acquire);
+    do {
+        if (cur & (bit | POLL_CLOSING)) return; // in flight already, or going away
+    } while (!atomic_compare_exchange_weak_explicit(&io->state, &cur, cur | bit,
+                                                    memory_order_acq_rel, memory_order_acquire));
+    cv_poll_op *op = &io->op[dir];
+    memset(&op->iosb, 0, sizeof op->iosb);
+    op->info.Timeout.QuadPart = INT64_MAX;
+    op->info.NumberOfHandles = 1;
+    op->info.Exclusive = FALSE;
+    op->info.Handles[0].Handle = (HANDLE)io->base;
+    op->info.Handles[0].Events = poll_mask(dir);
+    op->info.Handles[0].Status = 0;
+    op->iosb.Status = CV_STATUS_PENDING;
+    NTSTATUS st = nt_device_io_control_file(io->driver->afd, NULL, NULL, &op->iosb, &op->iosb,
+                                            CV_IOCTL_AFD_POLL, &op->info, sizeof op->info, &op->info,
+                                            sizeof op->info);
+    if (st != CV_STATUS_PENDING && st != 0) {
+        // Not submitted, so no completion comes: post one that says "ready",
+        // and the retried call finds out what's wrong.
+        op->info.Handles[0].Events = poll_mask(dir);
+        op->iosb.Status = 0;
+        PostQueuedCompletionStatus(io->driver->port, 0, 0, (LPOVERLAPPED)&op->iosb);
+    }
+}
+
+int cv_driver_turn(cv_driver *d, cv_parker *p, int64_t timeout_ns) {
+    release_pending(d);
+    if (p) {
+        uint32_t expected = NOTIFIED;
+        if (atomic_compare_exchange_strong(&p->state, &expected, EMPTY)) {
+            timeout_ns = 0;
+        } else {
+            expected = EMPTY;
+            if (!atomic_compare_exchange_strong(&p->state, &expected, PARKED_IO)) {
+                atomic_store(&p->state, EMPTY);
+                timeout_ns = 0;
+            }
+        }
+    }
+    DWORD ms = timeout_ns < 0 ? INFINITE : (DWORD)((timeout_ns + 999999) / 1000000);
+    ULONG n = 0;
+    if (!GetQueuedCompletionStatusEx(d->port, d->events, CV_MAX_EVENTS, &n, ms, FALSE)) n = 0;
+    if (p) atomic_store(&p->state, EMPTY);
+    if (p) d->stats.parked_turns++; else d->stats.busy_turns++;
+    d->stats.events += n;
+    if (n == CV_MAX_EVENTS) d->stats.full_batches++;
+    int woken = 0;
+    for (ULONG i = 0; i < n; i++) {
+        OVERLAPPED_ENTRY *e = &d->events[i];
+        if (e->lpCompletionKey == CV_WAKE_KEY || !e->lpOverlapped) continue; // a wake
+        cv_poll_op *op = (cv_poll_op *)(void *)e->lpOverlapped;
+        cv_io_win *io = op->io;
+        int dir = op->dir;
+        ULONG events = op->iosb.Status == 0 && op->info.NumberOfHandles > 0 ? op->info.Handles[0].Events : 0;
+        // Out of flight before waking anyone: a task arming after this
+        // submits a new poll rather than waiting on this finished one.
+        uint32_t bit = dir == CV_IO_READ ? POLL_READ : POLL_WRITE;
+        uint32_t old = atomic_fetch_and_explicit(&io->state, ~bit, memory_order_acq_rel);
+        if (old & POLL_CLOSING) {
+            if ((old & ~bit) == POLL_CLOSING) free(io); // the last thing holding it
+            continue;
+        }
+        if (events & (AFD_POLL_DISCONNECT | AFD_POLL_ABORT | AFD_POLL_LOCAL_CLOSE | AFD_POLL_CONNECT_FAIL))
+            __atomic_store_n(&io->io.read_closed, 1, __ATOMIC_RELEASE);
+        // A cancelled or failed poll still wakes its waiter: it retries.
+        uintptr_t w = io_ready(&io->io, dir);
+        if (w) d->wakes[woken++] = w;
+    }
+    d->stats.wakes += (uint64_t)woken;
+    return woken;
+}
+
+cv_io *cv_driver_register(cv_driver *d, int fd, int *err) {
+    cv_io_win *io = calloc(1, sizeof *io);
+    if (!io) {
+        *err = ENOMEM;
+        return NULL;
+    }
+    // Layered providers can wrap the socket; AFD wants the one underneath.
+    SOCKET base = INVALID_SOCKET;
+    DWORD bytes = 0;
+    if (WSAIoctl((SOCKET)fd, SIO_BASE_HANDLE, NULL, 0, &base, sizeof base, &bytes, NULL, NULL) != 0)
+        base = (SOCKET)fd;
+    io->io.fd = fd;
+    io->io.refs = 1;
+    io->driver = d;
+    io->base = base;
+    for (int dir = 0; dir < 2; dir++) {
+        io->op[dir].io = io;
+        io->op[dir].dir = dir;
+    }
+    atomic_fetch_add_explicit(&d->registered, 1, memory_order_relaxed);
+    return &io->io;
+}
+
+void cv_driver_deregister(cv_driver *d, cv_io *raw) {
+    if (__atomic_sub_fetch(&raw->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+    cv_io_win *io = (cv_io_win *)raw;
+    uint32_t old = atomic_fetch_or_explicit(&io->state, POLL_CLOSING, memory_order_acq_rel);
+    for (int dir = 0; dir < 2; dir++) {
+        if (old & (dir == CV_IO_READ ? POLL_READ : POLL_WRITE)) {
+            cv_iosb cancel;
+            nt_cancel_io_file_ex(d->afd, &io->op[dir].iosb, &cancel);
+        }
+    }
+    closesocket((SOCKET)raw->fd);
+    atomic_fetch_sub_explicit(&d->registered, 1, memory_order_relaxed);
+    // Nothing in flight: no completion will free it, so the next turn does
+    // (one may be handling this io's last completion right now).
+    if ((old & (POLL_READ | POLL_WRITE)) == 0) push_released(d, raw);
+}
+
 #else // no driver on this platform yet
 
 cv_driver *cv_driver_new(void) {
@@ -893,7 +1241,7 @@ int cv_sockaddr_ip_bytes(const cv_sockaddr *a, uint8_t *ip) {
     return -1;
 }
 
-void cv_random_bytes(void *buf, long n) {
+void cv_random_bytes(void *buf, intptr_t n) {
 #if defined(__linux__)
     uint8_t *p = buf;
     while (n > 0) {
@@ -910,7 +1258,7 @@ void cv_random_bytes(void *buf, long n) {
 #endif
 }
 
-long cv_read_small_file(const char *path, void *buf, long max) {
+intptr_t cv_read_small_file(const char *path, void *buf, intptr_t max) {
     // O_NONBLOCK so opening a fifo doesn't wait for a writer; fstat then
     // refuses it.
     int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
@@ -1014,12 +1362,12 @@ int cv_pipe_prepare(int fd) {
     return 0;
 }
 
-long cv_fd_read(int fd, void *buf, long len) {
+intptr_t cv_fd_read(int fd, void *buf, intptr_t len) {
     ssize_t n = read(fd, buf, (size_t)len);
     return n >= 0 ? (long)n : -(long)errno;
 }
 
-long cv_pipe_write(int fd, const void *buf, long len) {
+intptr_t cv_pipe_write(int fd, const void *buf, intptr_t len) {
 #if defined(F_SETNOSIGPIPE)
     ssize_t n = write(fd, buf, (size_t)len);
     return n >= 0 ? (long)n : -(long)errno;
@@ -1415,12 +1763,12 @@ int cv_local_port(int fd) {
 #define MSG_NOSIGNAL 0 // Darwin: SO_NOSIGPIPE, set on every socket by prepare_fd
 #endif
 
-long cv_recv(int fd, void *buf, long len) {
+intptr_t cv_recv(int fd, void *buf, intptr_t len) {
     ssize_t n = recv(fd, buf, (size_t)len, 0);
     return n >= 0 ? (long)n : -(long)errno;
 }
 
-long cv_send(int fd, const void *buf, long len) {
+intptr_t cv_send(int fd, const void *buf, intptr_t len) {
     ssize_t n = send(fd, buf, (size_t)len, MSG_NOSIGNAL);
     return n >= 0 ? (long)n : -(long)errno;
 }
@@ -1456,13 +1804,13 @@ int cv_connect_address(int fd, const cv_sockaddr *a) {
     return connect(fd, (const struct sockaddr *)a->storage, (socklen_t)a->len) == 0 ? 0 : errno;
 }
 
-long cv_sendto(int fd, const void *buf, long len, const cv_sockaddr *to) {
+intptr_t cv_sendto(int fd, const void *buf, intptr_t len, const cv_sockaddr *to) {
     ssize_t n = sendto(fd, buf, (size_t)len, MSG_NOSIGNAL, (const struct sockaddr *)to->storage,
                        (socklen_t)to->len);
     return n >= 0 ? (long)n : -(long)errno;
 }
 
-long cv_recvfrom(int fd, void *buf, long len, cv_sockaddr *from) {
+intptr_t cv_recvfrom(int fd, void *buf, intptr_t len, cv_sockaddr *from) {
     socklen_t alen = sizeof from->storage;
     ssize_t n = recvfrom(fd, buf, (size_t)len, 0, (struct sockaddr *)from->storage, &alen);
     if (n < 0) return -(long)errno;
@@ -1535,11 +1883,11 @@ int cv_unix_pair(int fds[2]) {
 
 #else // _WIN32: the few of those the portable code uses
 
-void cv_random_bytes(void *buf, long n) {
+void cv_random_bytes(void *buf, intptr_t n) {
     if (BCryptGenRandom(NULL, (PUCHAR)buf, (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) abort();
 }
 
-long cv_read_small_file(const char *path, void *buf, long max) {
+intptr_t cv_read_small_file(const char *path, void *buf, intptr_t max) {
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
     long total = (long)fread(buf, 1, (size_t)max, f);
@@ -1735,7 +2083,7 @@ _Static_assert(sizeof(cv_iovec) == sizeof(struct iovec) &&
                    offsetof(cv_iovec, len) == offsetof(struct iovec, iov_len),
                "cv_iovec must match struct iovec");
 
-long cv_sendv(int fd, const cv_iovec *iov, int count) {
+intptr_t cv_sendv(int fd, const cv_iovec *iov, int count) {
     struct msghdr mh = {0};
     mh.msg_iov = (struct iovec *)iov;
     mh.msg_iovlen = count;
@@ -1745,7 +2093,7 @@ long cv_sendv(int fd, const cv_iovec *iov, int count) {
 
 enum { CV_BATCH_CHUNK = 64 };
 
-long cv_recv_batch(int fd, void *base, long stride, int count, cv_sockaddr *from,
+intptr_t cv_recv_batch(int fd, void *base, intptr_t stride, int count, cv_sockaddr *from,
                    uint32_t *lens, uint32_t *flags) {
 #if defined(__linux__)
     if (count > CV_BATCH_CHUNK) count = CV_BATCH_CHUNK;
@@ -1790,7 +2138,7 @@ long cv_recv_batch(int fd, void *base, long stride, int count, cv_sockaddr *from
 #endif
 }
 
-long cv_send_batch(int fd, const void *base, long stride, const uint32_t *lens,
+intptr_t cv_send_batch(int fd, const void *base, intptr_t stride, const uint32_t *lens,
                    const cv_sockaddr *to, int count) {
 #if defined(__linux__)
     if (count > CV_BATCH_CHUNK) count = CV_BATCH_CHUNK;
@@ -1826,7 +2174,7 @@ long cv_send_batch(int fd, const void *base, long stride, const uint32_t *lens,
 #endif
 }
 
-long cv_send_segments_split(int fd, const void *buf, long len, int segment, const cv_sockaddr *to) {
+intptr_t cv_send_segments_split(int fd, const void *buf, intptr_t len, int segment, const cv_sockaddr *to) {
     // The segments already lie back to back, segment bytes apart: send them
     // as a batch over the same memory, one datagram each.
     if (segment <= 0 || len <= segment) segment = len > 0 ? (int)len : 1;
@@ -1850,7 +2198,7 @@ long cv_send_segments_split(int fd, const void *buf, long len, int segment, cons
     return done;
 }
 
-long cv_send_segments(int fd, const void *buf, long len, int segment, const cv_sockaddr *to) {
+intptr_t cv_send_segments(int fd, const void *buf, intptr_t len, int segment, const cv_sockaddr *to) {
 #if defined(__linux__)
     if (segment <= 0 || len <= segment)
         return cv_send_segments_split(fd, buf, len, segment, to);
@@ -1908,7 +2256,7 @@ int cv_udp_gso_supported(int fd) {
 #endif
 }
 
-long cv_recv_segments(int fd, void *buf, long len, cv_sockaddr *from, int *segment,
+intptr_t cv_recv_segments(int fd, void *buf, intptr_t len, cv_sockaddr *from, int *segment,
                       uint32_t *flags) {
     struct iovec v = {buf, (size_t)len};
     struct msghdr mh = {0};

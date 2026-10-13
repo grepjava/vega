@@ -191,6 +191,17 @@ cv_io *cv_driver_register(cv_driver *d, int fd, int *err);
 /// name it.
 void cv_driver_deregister(cv_driver *d, cv_io *io);
 
+/// Windows: a task armed `dir` of `io` after WSAEWOULDBLOCK; make sure an
+/// AFD poll for it is in flight (readiness there is one-shot, not edge).
+void cv_driver_want(cv_io *io, int dir);
+
+#if defined(_WIN32)
+/// closesocket(2) and shutdown(SD_SEND): sockets aren't CRT descriptors.
+void cv_close_socket(int fd);
+/// 0 or an errno value.
+int cv_shutdown_write(int fd);
+#endif
+
 // ---- sockets -------------------------------------------------------------
 // All fds are non-blocking and close-on-exec, and never raise SIGPIPE
 // (MSG_NOSIGNAL on Linux, SO_NOSIGPIPE on Darwin). Failures return -1 and an errno
@@ -221,11 +232,11 @@ int cv_sockaddr_ip(cv_sockaddr *out, const uint8_t *ip, int len, int port);
 /// 16, or -1 for another family.
 int cv_sockaddr_ip_bytes(const cv_sockaddr *a, uint8_t *ip);
 /// n bytes from the system's CSPRNG (getrandom, arc4random_buf).
-void cv_random_bytes(void *buf, long n);
+void cv_random_bytes(void *buf, intptr_t n);
 /// Read a small regular file whole into buf: its length, or -1 if it is
 /// missing, not a regular file (a fifo would block), longer than max, or
 /// unreadable.
-long cv_read_small_file(const char *path, void *buf, long max);
+intptr_t cv_read_small_file(const char *path, void *buf, intptr_t max);
 /// Copy everything from in's position to out's: the bytes copied, or
 /// -errno. Uses copy_file_range on Linux where it can.
 long long cv_copy_fd(int in, int out);
@@ -236,10 +247,10 @@ int cv_pipe(int fds[2]);
 /// on Darwin, free of SIGPIPE). 0 or an errno value.
 int cv_pipe_prepare(int fd);
 /// read(2): bytes, or -errno.
-long cv_fd_read(int fd, void *buf, long len);
+intptr_t cv_fd_read(int fd, void *buf, intptr_t len);
 /// write(2) to a pipe without SIGPIPE: bytes, or -errno (-EPIPE once the
 /// reader is gone).
-long cv_pipe_write(int fd, const void *buf, long len);
+intptr_t cv_pipe_write(int fd, const void *buf, intptr_t len);
 
 #define CV_STDIO_INHERIT (-1)
 #define CV_STDIO_NULL (-2)
@@ -303,8 +314,8 @@ int cv_socket_error(int fd);
 /// The local port a socket is bound to, or -1.
 int cv_local_port(int fd);
 /// recv / send (MSG_NOSIGNAL): bytes moved, or -errno.
-long cv_recv(int fd, void *buf, long len);
-long cv_send(int fd, const void *buf, long len);
+intptr_t cv_recv(int fd, void *buf, intptr_t len);
+intptr_t cv_send(int fd, const void *buf, intptr_t len);
 
 /// A UDP socket bound to host:port (port 0: any free one).
 int cv_udp_bind(const char *host, int port, int reuse_port, int *err);
@@ -312,8 +323,8 @@ int cv_udp_bind(const char *host, int port, int reuse_port, int *err);
 int cv_connect_address(int fd, const cv_sockaddr *a);
 /// sendto / recvfrom: bytes moved, or -errno. A datagram longer than len is
 /// cut to len.
-long cv_sendto(int fd, const void *buf, long len, const cv_sockaddr *to);
-long cv_recvfrom(int fd, void *buf, long len, cv_sockaddr *from);
+intptr_t cv_sendto(int fd, const void *buf, intptr_t len, const cv_sockaddr *to);
+intptr_t cv_recvfrom(int fd, void *buf, intptr_t len, cv_sockaddr *from);
 
 /// A listening Unix stream socket at path (which must not exist yet).
 int cv_unix_listen(const char *path, int backlog, int *err);
@@ -368,18 +379,18 @@ typedef struct cv_iovec {
     size_t len;
 } cv_iovec;
 /// sendmsg of count buffers (MSG_NOSIGNAL): bytes sent, or -errno.
-long cv_sendv(int fd, const cv_iovec *iov, int count);
+intptr_t cv_sendv(int fd, const cv_iovec *iov, int count);
 
 #define CV_DGRAM_TRUNCATED 1u
 /// Receive up to count (at most 64) datagrams, datagram i into
 /// base + i * stride, with recvmmsg where there is one. Fills from[i],
 /// lens[i] and flags[i] (CV_DGRAM_TRUNCATED). Datagrams received, or -errno.
-long cv_recv_batch(int fd, void *base, long stride, int count, cv_sockaddr *from,
+intptr_t cv_recv_batch(int fd, void *base, intptr_t stride, int count, cv_sockaddr *from,
                    uint32_t *lens, uint32_t *flags);
 /// Send up to count (at most 64) datagrams laid out as for cv_recv_batch,
 /// each to to[i] (NULL, or len 0: the connected peer). Datagrams sent, or
 /// -errno.
-long cv_send_batch(int fd, const void *base, long stride, const uint32_t *lens,
+intptr_t cv_send_batch(int fd, const void *base, intptr_t stride, const uint32_t *lens,
                    const cv_sockaddr *to, int count);
 /// Send len bytes as datagrams of segment bytes each (the last may be
 /// shorter): one sendmsg that the kernel cuts up (UDP GSO) where it can, else
@@ -387,10 +398,10 @@ long cv_send_batch(int fd, const void *base, long stride, const uint32_t *lens,
 /// offload: EIO). to may be NULL for the connected peer. Bytes sent: a split
 /// send that fills the socket returns the whole segments sent so far.
 /// Or -errno.
-long cv_send_segments(int fd, const void *buf, long len, int segment, const cv_sockaddr *to);
+intptr_t cv_send_segments(int fd, const void *buf, intptr_t len, int segment, const cv_sockaddr *to);
 /// cv_send_segments without GSO: the segments as one datagram each, through
 /// cv_send_batch over the same memory.
-long cv_send_segments_split(int fd, const void *buf, long len, int segment, const cv_sockaddr *to);
+intptr_t cv_send_segments_split(int fd, const void *buf, intptr_t len, int segment, const cv_sockaddr *to);
 /// Whether the kernel takes cv_send_segments with a segment size.
 int cv_udp_gso_supported(int fd);
 /// recvmsg that also reports UDP GRO: with CV_OPT_UDP_GRO on, several
@@ -398,7 +409,7 @@ int cv_udp_gso_supported(int fd);
 /// (the last may be shorter); *segment is 0 for a single datagram. *flags
 /// gets CV_DGRAM_TRUNCATED if what arrived was longer than len (its tail is
 /// lost). from may be NULL. Bytes received, or -errno.
-long cv_recv_segments(int fd, void *buf, long len, cv_sockaddr *from, int *segment,
+intptr_t cv_recv_segments(int fd, void *buf, intptr_t len, cv_sockaddr *from, int *segment,
                       uint32_t *flags);
 
 // ---- io_uring driver (Linux) ---------------------------------------------

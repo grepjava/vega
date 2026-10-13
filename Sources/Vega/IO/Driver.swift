@@ -1,4 +1,4 @@
-#if os(Linux) || canImport(Darwin)
+#if os(Linux) || canImport(Darwin) || os(Windows)
 import CVega
 #if canImport(Glibc)
 import Glibc
@@ -9,7 +9,12 @@ import ucrt
 #endif
 
 /// close(2), under a name that a type's own `close()` doesn't shadow.
+#if os(Windows)
+/// Every descriptor the driver sees on Windows is a socket.
+@inline(__always) func closeDescriptor(_ fd: Int32) { cv_close_socket(fd) }
+#else
 @inline(__always) func closeDescriptor(_ fd: Int32) { _ = close(fd) }
+#endif
 
 /// The runtime's I/O driver: one edge-triggered epoll (Linux) or kqueue
 /// (Darwin) instance, as in Tokio's multi-threaded runtime. The parked worker that owns the timers blocks in
@@ -161,7 +166,13 @@ struct IORegistration: @unchecked Sendable {
                 // flag first, so one of the two sees the other.
                 if Task.isCancelled, cv_io_disarm(io, direction, waiter) != 0 {
                     c.resume(returning: false)
+                    return
                 }
+                #if os(Windows)
+                // Readiness there is a one-shot AFD poll, asked for now that
+                // someone waits (it completes at once if already ready).
+                cv_driver_want(io, direction)
+                #endif
             }
         } onCancel: {
             let waiter = cv_io_take_waiter(io, direction)

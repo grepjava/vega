@@ -27,7 +27,7 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     let timers: TimerWheel
     /// Threads for blocking work (`Runtime.blocking`).
     let blocking: BlockingPool
-    #if os(Linux) || canImport(Darwin)
+    #if os(Linux) || canImport(Darwin) || os(Windows)
     /// Sockets; the timer owner blocks in it while parked. nil if it can't be
     /// created, or when the workers have rings instead.
     let driver: IODriver?
@@ -107,7 +107,7 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
         driver = usesRings ? nil : IODriver.make()
         #else
         usesRings = false
-        #if canImport(Darwin)
+        #if canImport(Darwin) || os(Windows)
         driver = IODriver.make()
         #endif
         #endif
@@ -119,7 +119,7 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
         for (i, w) in workers.enumerated() {
             (queues + i).initialize(to: .passUnretained(w.queue))
             (parkers + i).initialize(to: w.parker)
-            #if os(Linux) || canImport(Darwin)
+            #if os(Linux) || canImport(Darwin) || os(Windows)
             if let driver { cv_parker_attach_driver(w.parker, driver.raw) }
             #endif
         }
@@ -146,7 +146,7 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
         queues.deallocate()
         parkers.deallocate()
         socketCount.deallocate()
-        #if os(Linux) || canImport(Darwin)
+        #if os(Linux) || canImport(Darwin) || os(Windows)
         driver?.destroy()
         #endif
         #if os(Linux)
@@ -159,7 +159,7 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
         #if os(Linux)
         if let ring = worker.ring { return URing.deliver(cv_uring_poll(ring), ring, on: worker, busy: true) }
         #endif
-        #if os(Linux) || canImport(Darwin)
+        #if os(Linux) || canImport(Darwin) || os(Windows)
         if let driver { return driver.poll(on: worker) }
         #endif
         return 0

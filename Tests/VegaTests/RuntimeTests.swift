@@ -80,7 +80,9 @@ func spin(microseconds: UInt64) {
             await withTaskGroup(of: Int.self) { g in
                 for _ in 0..<32 {
                     g.addTask(executorPreference: rt.executor) {
-                        spin(microseconds: 2_000)
+                        // Long enough that a parked worker wakes in time to
+                        // steal, even with the whole suite running alongside.
+                        spin(microseconds: 5_000)
                         return Runtime.currentWorker!
                     }
                 }

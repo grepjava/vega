@@ -1,4 +1,4 @@
-#if os(Linux) || canImport(Darwin)
+#if os(Linux) || canImport(Darwin) || os(Windows)
 import CVega
 import Synchronization
 #if canImport(Glibc)
@@ -33,7 +33,7 @@ import ucrt
 public final class TCPServer: Sendable {
     public struct Configuration: Sendable {
         /// Accept loops, each with its own listener on the port. More than
-        /// one implies `reusePort`.
+        /// one implies `reusePort`. Windows has no SO_REUSEPORT: one there.
         public var acceptors = 1
         public var backlog = 1024
         public var reusePort = false
@@ -88,7 +88,12 @@ public final class TCPServer: Sendable {
     public static func bind(host: String = "", port: Int, configuration: Configuration = .init(),
                             handler: @escaping @Sendable (consuming TCPStream) async -> Void) throws(IOError) -> TCPServer {
         guard let scheduler = Worker.currentScheduler else { throw .notOnRuntime }
+        #if os(Windows)
+        // No SO_REUSEPORT: one listener, one accept loop.
+        let acceptors = 1
+        #else
         let acceptors = max(configuration.acceptors, 1)
+        #endif
         #if canImport(Network)
         if NetworkIO.active {
             // One NWListener (Network.framework won't share a port between

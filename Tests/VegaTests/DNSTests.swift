@@ -1,4 +1,4 @@
-#if os(Linux) || canImport(Darwin)
+#if os(Linux) || canImport(Darwin) || os(Windows)
 import CVega
 import Synchronization
 import Testing
@@ -298,8 +298,30 @@ private func writeText(_ text: String, to path: String) -> Bool {
     return text.withCString { fputs($0, file) >= 0 }
 }
 
+/// A TCP listener and a UDP socket on one port. The port UDP picked may be
+/// taken or reserved for TCP (Windows reserves blocks of 100 for Hyper-V,
+/// and hands out ports in sequence): retry past a whole block.
+private struct BoundPair: ~Copyable {
+    var listener: TCPListener
+    var udp: UDPSocket
+}
+
+private func bindPair() throws -> BoundPair {
+    var attempts = 0
+    while true {
+        let udp = try UDPSocket.bind(host: "127.0.0.1", port: 0)
+        do {
+            let listener = try TCPListener.bind(host: "127.0.0.1", port: try udp.localAddress.port ?? 0)
+            return BoundPair(listener: listener, udp: udp)
+        } catch {
+            attempts += 1
+            if attempts >= 250 { throw error }
+        }
+    }
+}
+
 private func tempPath(_ name: String) -> String {
-    "/tmp/vega-\(getpid())-\(name)"
+    "\(testTempDirectory())/vega-\(getpid())-\(name)"
 }
 
 @Suite struct ResolverConfigTests {
@@ -372,6 +394,7 @@ private func tempPath(_ name: String) -> String {
         #expect(config.search == ["only.internal"])
     }
 
+    #if !os(Windows) // no fifos there
     /// A fifo would block the reader, and a directory isn't a file: both
     /// refused by the open itself.
     @Test func onlyRegularFilesAreRead() {
@@ -388,6 +411,7 @@ private func tempPath(_ name: String) -> String {
         // Longer than the limit is refused, not cut.
         #expect(buf.withUnsafeMutableBytes { cv_read_small_file(path, $0.baseAddress, 19) } == -1)
     }
+    #endif
 
     @Test func hostsFile() {
         let hosts = HostsFile.parse("""
@@ -459,9 +483,10 @@ private final class FakeNameserver: @unchecked Sendable {
     var questions: [String] { lock.withLock { log } }
 
     init(_ rt: Runtime, answer: @escaping @Sendable (String, UInt16) -> Reply) throws {
-        let listener = try TCPListener.bind(host: "127.0.0.1", port: 0)
-        port = listener.localPort
-        let udp = try UDPSocket.bind(host: "127.0.0.1", port: port)
+        let pair = try bindPair()
+        port = pair.listener.localPort
+        let listener = pair.listener
+        let udp = pair.udp
         let udpTask = rt.spawn(with: udp) { [self] udp in
             var buf = IOBuffer(capacity: 1500)
             while true {

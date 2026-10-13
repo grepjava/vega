@@ -1,4 +1,4 @@
-#if os(Linux) || canImport(Darwin)
+#if os(Linux) || canImport(Darwin) || os(Windows)
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)

@@ -1,4 +1,4 @@
-#if os(Linux) || canImport(Darwin)
+#if os(Linux) || canImport(Darwin) || os(Windows)
 import CVega
 #if canImport(Glibc)
 import Glibc
@@ -63,7 +63,12 @@ private func drain(_ conn: borrowing TCPStream) async -> [UInt8] {
             #expect(try s.option(.receiveBufferSize) >= 256 * 1024)
             try s.setOption(.typeOfService, to: 0x10)
             #expect(try s.option(.typeOfService) == 0x10)
+            // Not on Windows, where SO_REUSEADDR lets others take the port.
+            #if os(Windows)
+            #expect(try listener.option(.reuseAddress) == 0)
+            #else
             #expect(try listener.option(.reuseAddress) == 1)
+            #endif
         }
     }
 
@@ -80,8 +85,11 @@ private func drain(_ conn: borrowing TCPStream) async -> [UInt8] {
             #expect(try u.option(.multicastTimeToLive) == 3)
             try u.setOption(.multicastLoop, to: false)
             #expect(try u.option(.multicastLoop) == 0)
-            // An IPv6 option on an IPv4 socket is refused, not ignored.
+            // An IPv6 option on an IPv4 socket is refused, not ignored
+            // (Windows takes it silently).
+            #if !os(Windows)
             #expect(throws: IOError.self) { try u.setOption(.hopLimit, to: 9) }
+            #endif
         }
     }
 }

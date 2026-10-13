@@ -291,7 +291,7 @@ public final class Runtime: Sendable {
             return m
         }
         #endif
-        #if os(Linux) || canImport(Darwin)
+        #if os(Linux) || canImport(Darwin) || os(Windows)
         if let d = scheduler.driver {
             let s = cv_driver_get_stats(d.raw)
             return IOMetrics(parkedPolls: s.parked_turns, busyPolls: s.busy_turns, events: s.events,

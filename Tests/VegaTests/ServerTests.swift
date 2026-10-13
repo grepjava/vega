@@ -1,4 +1,4 @@
-#if os(Linux) || canImport(Darwin)
+#if os(Linux) || canImport(Darwin) || os(Windows)
 import Synchronization
 import Testing
 @testable import Vega
@@ -194,7 +194,7 @@ private func roundTrip(_ stream: borrowing TCPStream, _ text: String) async thro
         defer { rt.shutdown() }
         let (reply, keepAlive) = try rt.block { () async throws -> (String, Int) in
             let server = try TCPServer.bind(host: "127.0.0.1", port: 0) { await echoAll($0) }
-            let path = "/tmp/vega-\(getpid())-client-hosts"
+            let path = "\(testTempDirectory())/vega-\(getpid())-client-hosts"
             let file = fopen(path, "w")!
             fputs("127.0.0.1 echo.internal\n", file)
             fclose(file)

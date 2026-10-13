@@ -1,4 +1,4 @@
-#if os(Linux) || canImport(Darwin)
+#if os(Linux) || canImport(Darwin) || os(Windows)
 import CVega
 #if canImport(Glibc)
 import Glibc
@@ -29,8 +29,19 @@ func registered() throws(IOError) -> Int {
     return Int(cv_driver_registered(raw)) + network
 }
 
+/// Where tests put scratch files: %TEMP% on Windows, /tmp elsewhere.
+func testTempDirectory() -> String {
+    #if os(Windows)
+    var dir = getenv("TEMP").map { String(cString: $0) } ?? #"C:\Windows\Temp"#
+    while dir.hasSuffix("\\") { dir.removeLast() }
+    return dir
+    #else
+    return "/tmp"
+    #endif
+}
+
 func tempSocketPath() -> String {
-    "/tmp/vega-test-\(getpid())-\(UInt32.random(in: 0...UInt32.max)).sock"
+    "\(testTempDirectory())/vega-test-\(getpid())-\(UInt32.random(in: 0...UInt32.max)).sock"
 }
 
 @Suite struct SplitTests {

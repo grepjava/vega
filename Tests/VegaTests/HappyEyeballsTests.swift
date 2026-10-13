@@ -1,4 +1,4 @@
-#if os(Linux) || canImport(Darwin)
+#if os(Linux) || canImport(Darwin) || os(Windows)
 import CVega
 #if canImport(Glibc)
 import Glibc
@@ -44,7 +44,13 @@ private func settle(to n: Int) async throws(IOError) -> Int {
             return (elapsed, try stream.peerAddress.isIPv6, try await settle(to: before + 1) - (before + 1))
         }
         #expect(!family) // connected over IPv4
+        #if os(Windows)
+        // Windows retries a SYN that met a reset for about 2 s before it
+        // calls the port refused; the delay (2 s) runs out about then too.
+        #expect(elapsed < 3000, "took \(elapsed) ms")
+        #else
         #expect(elapsed < 500, "took \(elapsed) ms")
+        #endif
         #expect(leaked == 0)
     }
 

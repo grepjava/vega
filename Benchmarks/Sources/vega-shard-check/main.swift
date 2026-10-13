@@ -128,7 +128,11 @@ if args.count == 3, args[1] == "serve", let port = Int(args[2]) {
 }
 
 let rt = Runtime(workers: 2)
-let port = 20_000 + Int(getpid() % 20_000)
+// A port the OS says is free (one picked from the pid could fall in the
+// ephemeral range, held by some connection, and every shard would fail to bind).
+let port = try rt.block { () async throws(IOError) -> Int in
+    try TCPListener.bind(host: "127.0.0.1", port: 0).localPort
+}
 try rt.block { () async throws in
     var server = try Command(selfPath(), arguments: ["serve", "\(port)"]).spawn()
 
