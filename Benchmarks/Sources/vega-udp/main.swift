@@ -9,7 +9,11 @@
 //   single  one receiveFrom and one send per datagram
 //   batch   DatagramBatch: recvmmsg up to 64, then sendmmsg them back
 //   gso     UDP GRO receive, UDP GSO send: one syscall per coalesced burst
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 import Vega
 
 var port = 7100
