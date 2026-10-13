@@ -195,8 +195,13 @@ fileprivate final class Pipe: @unchecked Sendable {
                 await Runtime.consumeBudget()
                 return n
             }
-            if state.withLock({ $0.writeClosed }) { return 0 }
-            guard await park(.reader) else { throw .cancelled }
+            // End of stream only when closed with nothing left: the writer
+            // may have added its last bytes and closed since we looked.
+            switch state.withLock({ s -> Bool? in s.buffered > 0 ? nil : s.writeClosed }) {
+            case nil: continue
+            case true?: return 0
+            case false?: guard await park(.reader) else { throw .cancelled }
+            }
         }
     }
 
@@ -267,7 +272,7 @@ fileprivate final class Pipe: @unchecked Sendable {
     private func park(_ side: Side) async -> Bool {
         let id = nextID.add(1, ordering: .relaxed).newValue
         let capacity = self.capacity
-        return await withTaskCancellationHandler {
+        let woken = await withTaskCancellationHandler {
             await withUnsafeContinuation { (c: UnsafeContinuation<Bool, Never>) in
                 let now = state.withLock { s -> Bool? in
                     // Checked under the lock: either the cancel handler runs
@@ -293,6 +298,9 @@ fileprivate final class Pipe: @unchecked Sendable {
             }
             waiter?.continuation.resume(returning: false)
         }
+        // The other side can resume us before we suspend; see cv_tsan_acquire.
+        cv_tsan_acquire(cv_task_current())
+        return woken
     }
 }
 
