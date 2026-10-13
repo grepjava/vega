@@ -1,3 +1,4 @@
+import Synchronization
 import Testing
 import Vega
 import VegaIO
@@ -119,15 +120,18 @@ private func roundTrip(_ stream: borrowing TCPStream, _ text: String) async thro
             let seen = Box()
             rt.spawn(with: listener) { l async in
                 while let conn = try? await l.accept() {
-                    var buf = IOBuffer(capacity: 1024)
-                    _ = try? await conn.read(into: &buf)
-                    let line = buf.string.split(separator: "\r\n").first.map(String.init) ?? ""
-                    seen.value = line
-                    var reply = IOBuffer(capacity: 256)
-                    reply.append(line.contains("blocked") ? "HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n"
-                                                          : "HTTP/1.1 200 Connection established\r\n\r\nSSH-2.0-banner\r\n")
-                    try? await conn.write(reply)
-                    _ = try? await copy(from: conn, to: conn)
+                    rt.spawn(with: conn) { conn async in
+                        var buf = IOBuffer(capacity: 1024)
+                        _ = try? await conn.read(into: &buf)
+                        let line = buf.string.split(separator: "\r\n").first.map(String.init) ?? ""
+                        let blocked = line.contains("blocked")
+                        if !blocked { seen.value = line }
+                        var reply = IOBuffer(capacity: 256)
+                        reply.append(blocked ? "HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n"
+                                             : "HTTP/1.1 200 Connection established\r\n\r\nSSH-2.0-banner\r\n")
+                        try? await conn.write(reply)
+                        _ = try? await copy(from: conn, to: conn)
+                    }
                 }
             }
             let tcp = try await TCPStream.connect(host: "127.0.0.1", port: port)
@@ -179,6 +183,10 @@ private func roundTrip(_ stream: borrowing TCPStream, _ text: String) async thro
     }
 }
 
-private final class Box: @unchecked Sendable {
-    var value = ""
+private final class Box: Sendable {
+    private let stored = Mutex("")
+    var value: String {
+        get { stored.withLock { $0 } }
+        set { stored.withLock { $0 = newValue } }
+    }
 }

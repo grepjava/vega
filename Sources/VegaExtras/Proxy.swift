@@ -107,8 +107,9 @@ public enum SOCKS5 {
         let head = try await readExactly(4, from: stream)
         guard head[0] == 5 else { throw .malformed("version \(head[0])") }
         guard let reply = Reply(rawValue: head[1]) else { throw .malformed("reply \(head[1])") }
-        // The bound address, read so nothing of it is left for the tunnel.
+        // The bound address and port, read so nothing of them is left for the tunnel.
         _ = try await readAddress(type: head[3], from: stream)
+        _ = try await readExactly(2, from: stream)
         guard reply == .succeeded else { throw .socksRefused(reply) }
     }
 
