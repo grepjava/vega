@@ -36,11 +36,23 @@ enum Check {
             expect(await Task { onWorker() }.value, "Task {} runs on a Vega worker")
             expect(await Task.detached { onWorker() }.value, "Task.detached runs on a Vega worker")
 
-            let start = ContinuousClock.now
-            try? await Task.sleep(for: .milliseconds(20))
-            let slept = ContinuousClock.now - start
-            expect(slept >= .milliseconds(20) && slept < .seconds(1), "Task.sleep(20ms) took \(slept)")
-            expect(onWorker(), "resumes on a Vega worker after sleep")
+            // Each form of Task.sleep comes back to a Vega worker. (On Linux it
+            // runs on Vega's timer wheel; on Darwin on Dispatch's timers, and
+            // the resume returns through the enqueue hook: docs/PLAN.md.)
+            let sleeps: [(String, @Sendable () async -> Void)] = [
+                ("for: (continuous)", { try? await Task.sleep(for: .milliseconds(20)) }),
+                ("until: suspending", {
+                    try? await Task.sleep(until: .now + .milliseconds(20), clock: SuspendingClock())
+                }),
+                ("nanoseconds:", { try? await Task.sleep(nanoseconds: 20_000_000) }),
+            ]
+            for (form, sleep) in sleeps {
+                let start = ContinuousClock.now
+                await sleep()
+                let slept = ContinuousClock.now - start
+                expect(slept >= .milliseconds(20) && slept < .seconds(1), "Task.sleep(\(form) 20ms) took \(slept)")
+                expect(onWorker(), "resumes on a Vega worker after Task.sleep(\(form))")
+            }
 
             let n = 20_000
             let sum = await withTaskGroup(of: Int.self) { g in

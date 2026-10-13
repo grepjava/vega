@@ -160,6 +160,12 @@ public final class Runtime: Sendable {
         scheduler.workers.map { ($0.jobsRun.load(ordering: .relaxed), $0.steals.load(ordering: .relaxed)) }
     }
 
+    /// Enqueues since start: timed ones (sleeps and timeouts, and on Linux
+    /// `Task.sleep` too), and ones from threads outside the runtime.
+    public var enqueueCounts: (timed: UInt64, foreign: UInt64) {
+        (scheduler.timedEnqueues.load(ordering: .relaxed), scheduler.foreignEnqueues.load(ordering: .relaxed))
+    }
+
     /// I/O driver counters since start (zeros where there is no driver).
     public var ioMetrics: IOMetrics {
         #if os(Linux)
