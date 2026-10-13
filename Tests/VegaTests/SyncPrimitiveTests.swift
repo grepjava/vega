@@ -175,21 +175,20 @@ import Testing
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
         let barrier = Barrier(count: 3)
-        let passed = Atomic<Int>(0)
-        let seen = try withUnsafePointer(to: passed) { p in
-            nonisolated(unsafe) let passed = p
-            return try rt.block { () async throws -> Int in
-                for _ in 0..<2 {
-                    rt.spawn {
-                        await barrier.wait()
-                        passed.pointee.add(1, ordering: .relaxed)
-                    }
+        // On the heap: the spawned tasks count after the barrier, possibly
+        // once block has returned.
+        let passed = PassCount()
+        let seen = try rt.block { () async throws -> Int in
+            for _ in 0..<2 {
+                rt.spawn {
+                    await barrier.wait()
+                    passed.value.add(1, ordering: .relaxed)
                 }
-                try await Runtime.sleep(for: .milliseconds(20))
-                let before = passed.pointee.load(ordering: .relaxed)
-                await barrier.wait()
-                return before
             }
+            try await Runtime.sleep(for: .milliseconds(20))
+            let before = passed.value.load(ordering: .relaxed)
+            await barrier.wait()
+            return before
         }
         #expect(seen == 0)
     }
@@ -362,4 +361,8 @@ import Testing
         #expect(second == "second")
         #expect(!cell.set("third"))
     }
+}
+
+private final class PassCount: Sendable {
+    let value = Atomic<Int>(0)
 }
