@@ -28,29 +28,27 @@ public struct FramedRead<Reader: AsyncReader & ~Copyable, Decoding: Decoder>: ~C
     /// decoded.
     public mutating func next() async throws(FramedError) -> Decoding.Item? {
         while true {
-            if start < buffer.count {
-                let s = start
-                let decoded: (item: Decoding.Item, consumed: Int)?
-                do throws(CodecError) {
-                    decoded = try buffer.withUnsafeBytes { all throws(CodecError) in
-                        let rest = UnsafeRawBufferPointer(rebasing: all[s...])
-                        return ended ? try decoder.decodeAtEnd(rest) : try decoder.decode(rest)
-                    }
-                } catch {
-                    throw .codec(error)
+            // Offered even when empty: a decoder may have an item that needs
+            // no more bytes (the end of an HTTP message without a body).
+            let s = start
+            let decoded: (item: Decoding.Item, consumed: Int)?
+            do throws(CodecError) {
+                decoded = try buffer.withUnsafeBytes { all throws(CodecError) in
+                    let rest = UnsafeRawBufferPointer(rebasing: all[s...])
+                    return ended ? try decoder.decodeAtEnd(rest) : try decoder.decode(rest)
                 }
-                if let decoded {
-                    precondition(decoded.consumed > 0 && decoded.consumed <= buffer.count - s,
-                                 "a Decoder consumed a bad byte count")
-                    start += decoded.consumed
-                    return decoded.item
-                }
-                if ended {
-                    // decodeAtEnd declined the leftovers.
-                    start = buffer.count
-                    return nil
-                }
-            } else if ended {
+            } catch {
+                throw .codec(error)
+            }
+            if let decoded {
+                precondition(decoded.consumed >= 0 && decoded.consumed <= buffer.count - s,
+                             "a Decoder consumed a bad byte count")
+                start += decoded.consumed
+                return decoded.item
+            }
+            if ended {
+                // decodeAtEnd declined the leftovers.
+                start = buffer.count
                 return nil
             }
             try await fill()
@@ -75,6 +73,14 @@ public struct FramedRead<Reader: AsyncReader & ~Copyable, Decoding: Decoder>: ~C
     /// Give back the reader, with any bytes read but not decoded lost.
     public consuming func intoReader() -> Reader {
         reader
+    }
+
+    /// The bytes read but not decoded yet: after a protocol switch (an HTTP
+    /// upgrade), what arrived with the request for the new protocol. Take
+    /// them before `intoReader()`.
+    public var leftover: [UInt8] {
+        let s = start
+        return buffer.withUnsafeBytes { Array($0[s...]) }
     }
 }
 

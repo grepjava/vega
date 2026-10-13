@@ -14,6 +14,7 @@ let package = Package(
         .library(name: "VegaProcess", targets: ["VegaProcess"]),
         .library(name: "VegaMetrics", targets: ["VegaMetrics"]),
         .library(name: "VegaTLS", targets: ["VegaTLS"]),
+        .library(name: "VegaHTTP1", targets: ["VegaHTTP1"]),
         .library(name: "VegaTest", targets: ["VegaTest"]),
     ],
     targets: [
@@ -42,6 +43,8 @@ let package = Package(
                                  .linkedLibrary("libcrypto", .when(platforms: [.windows])),
                                  .linkedLibrary("crypt32", .when(platforms: [.windows]))]),
         .target(name: "VegaTLS", dependencies: ["Vega", "VegaIO", "CVegaTLS"], swiftSettings: swiftSettings),
+        .target(name: "VegaHTTP1", dependencies: ["Vega", "VegaIO"], swiftSettings: swiftSettings),
+        .testTarget(name: "VegaTests", dependencies: ["Vega", "VegaIO", "VegaFS", "VegaProcess", "VegaMetrics", "VegaTest", "VegaTLS", "VegaHTTP1", "CVega"], swiftSettings: swiftSettings),
     ],
     cLanguageStandard: .gnu11
 )

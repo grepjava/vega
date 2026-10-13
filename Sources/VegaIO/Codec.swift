@@ -5,19 +5,22 @@ import Vega
 public protocol Decoder {
     associatedtype Item
 
-    /// Decode one item from the start of `bytes`: the item and how many
-    /// bytes it used, or nil if `bytes` doesn't hold a whole one yet. Throw
-    /// on input that can never become one.
+    /// Decode one item from the start of `bytes` (which may be empty): the
+    /// item and how many bytes it used, or nil if `bytes` doesn't hold a whole
+    /// one yet. Throw on input that can never become one. An item may use no
+    /// bytes, as long as the decoder moves on to something else.
     mutating func decode(_ bytes: UnsafeRawBufferPointer) throws(CodecError) -> (item: Item, consumed: Int)?
 
-    /// The stream ended with `bytes` left over (never empty). Return a last
-    /// item from them, or nil to drop them. The default throws `.truncated`.
+    /// The stream ended with `bytes` left over (possibly none). Return a last
+    /// item, or nil when there are no more. The default returns nil for no
+    /// bytes, and otherwise decodes them or throws `.truncated`.
     mutating func decodeAtEnd(_ bytes: UnsafeRawBufferPointer) throws(CodecError) -> (item: Item, consumed: Int)?
 }
 
 extension Decoder {
     public mutating func decodeAtEnd(_ bytes: UnsafeRawBufferPointer) throws(CodecError) -> (item: Item, consumed: Int)? {
         if let whole = try decode(bytes) { return whole }
+        if bytes.isEmpty { return nil }
         throw .truncated(bytes.count)
     }
 }

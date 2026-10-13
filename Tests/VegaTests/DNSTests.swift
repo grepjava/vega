@@ -709,8 +709,18 @@ private let v6: [UInt8] = [0x20, 0x01, 0x0d, 0xb8] + Array(repeating: 0, count: 
         let (first, second) = try rt.block { () async throws -> (Duration, Duration) in
             // Two loopback addresses with one port: a server that never
             // answers (a refused port would fail at once), then a good one.
-            let good = try FakeNameserver(rt, host: "::1") { _, _ in .addresses([v4]) }
-            let silent = try FakeNameserver(rt, host: "127.0.0.1", port: good.port) { _, _ in .silent }
+            // The port is free on ::1 but may be taken on 127.0.0.1 by
+            // another test, so try a few.
+            var pair: (FakeNameserver, FakeNameserver)?
+            for _ in 0..<10 where pair == nil {
+                let good = try FakeNameserver(rt, host: "::1") { _, _ in .addresses([v4]) }
+                if let silent = try? FakeNameserver(rt, host: "127.0.0.1", port: good.port, answer: { _, _ in .silent }) {
+                    pair = (good, silent)
+                } else {
+                    good.stop()
+                }
+            }
+            let (good, silent) = try #require(pair)
             defer { good.stop(); silent.stop() }
             var c = config(good, timeout: .milliseconds(300))
             c.nameservers = ["127.0.0.1", "::1"]

@@ -75,6 +75,7 @@ public struct LinesCodec: Decoder, Encoder, Sendable {
 
     public mutating func decodeAtEnd(_ bytes: UnsafeRawBufferPointer) throws(CodecError) -> (item: String, consumed: Int)? {
         if let line = try decode(bytes) { return line }
+        if bytes.isEmpty { return nil }
         if bytes.count > maxLength { throw .frameTooLong(bytes.count) }
         return (String(decoding: bytes, as: UTF8.self), bytes.count)
     }
