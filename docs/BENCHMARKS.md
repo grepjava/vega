@@ -315,6 +315,27 @@ UDP echo, datagrams per second:
   - It is slower on `spawn_discard` (0.6–0.7×) and `sleep_many` (0.5–0.6×). `sleep_many` is the bench that spin 0 slowed down in the spin analysis above (2,585 ns at 50 µs).
 - **Against Tokio:** Vega is 1.3× slower on the semaphore, 2.8× on fan-in, 3.6–4.6× on spawning and ping-pong, 6.4× on `yield_many` (2.2× with `Runtime.yield`) and 9× on mpsc ping-pong. Most of that is the Swift task and continuation machinery. On the box, Vega beats Tokio on ping-pong and the semaphore and is 2× behind on mpsc ping-pong, but there it runs on the patched Swift runtime (the Option 2 and Round 3 sections); macOS runs Apple's stock runtime. `spawn_many` is about 3.5× behind on both.
 
+### Why `sleep_many` trails Dispatch on macOS
+
+`sleep_many` (10,000 children of one task group, each sleeping 1 ms) costs Vega about 3.1 µs per sleep against Dispatch's 1.7 µs. Profiles (`sample`, 5 s) put the cost here:
+
+- **Not kqueue, and not the timer wheel's own work.** `kevent` shows only as idle parking, and `Runtime.sleep` with the wheel takes 2–3% of busy samples.
+- **Mostly the order in which the children finish.**
+  - `swift::TaskGroup::removeChildTask` is the top busy frame at 18%. It does not appear in Dispatch's profile, where 45% is Dispatch's own spin-yield (`syscall_thread_switch`).
+  - The runtime unlinks a finished child by walking the group's list from its oldest child, so the cost of a completion is its distance from the oldest unfinished child. A scratch test with 10,000 children shows the effect: completed oldest first, the group takes 19 ms; newest first, 315 ms (35 ms against 1,258 ms at 20,000).
+  - Dispatch fires its timers from one heap in deadline order and runs them nearly FIFO. Vega does three things that shuffle the order:
+    - It fires the per-worker timer shards one after another.
+    - A worker whose local queue overflows sends the oldest half to the inject queue.
+    - Idle workers steal batches.
+- **Spin 0 costs about 0.5 µs of it.** With `VEGA_SPIN_NS=50000`, the figure is 2,682 against 3,199 ns.
+
+Experiments, two rounds each:
+
+- **Firing timers through the inject queue**, as the I/O driver does for large batches: `sleep_many` 3,087 / 3,010 → 2,811 / 2,807 ns, `timeout_ok` 2,259 / 2,210 → 2,336 / 2,356, and `sleep_cancel` noisy (1,624 / 1,604 → 1,617 / 2,000).
+- **Putting every sleep on one shard** as well: 2,391 ns, but `sleep_cancel` rises to 1,983 ns from contention on the one shard lock. Even then `removeChildTask` keeps 14%, because workers running children in parallel finish them out of order.
+
+Neither change is in. The remaining cost is the runtime's linear unlink, which only bites a group whose children all finish at once; a doubly linked child list in the patched runtime would remove it on Linux.
+
 ## Sync primitives (2026-10-12)
 
 8 workers, executor preference, median of 9 runs, in ns/op. Tokio's numbers come from the same benchmarks in `tokio-bench`.
