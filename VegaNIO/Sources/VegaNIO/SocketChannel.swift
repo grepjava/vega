@@ -5,6 +5,7 @@ import class Vega.Runtime
 import struct Vega.TCPStream
 import struct Vega.IOBuffer
 import struct Vega.SplitStream
+import struct Vega.WriteHalf
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
@@ -17,8 +18,9 @@ import Darwin
 /// and written by two Vega tasks, a reader and a writer, which are not tied
 /// to the loop and can be stolen by any worker: the reader reads when the
 /// pipeline asks (`read()`, which `autoRead` does after each delivery) and
-/// hands what it read to the loop; the writer sends what `flush()` hands it
-/// and tells the loop when it is out. A delivery runs on the reader's own
+/// hands what it read to the loop. `flush()` sends what the socket takes at
+/// once, as NIO's does; the writer sends the rest when there is room and
+/// tells the loop when it is out. A delivery runs on the reader's own
 /// task when nobody is running the loop, so a quiet connection costs no
 /// hop.
 ///
@@ -292,7 +294,9 @@ final class VegaSocketChannel: Channel, ChannelCore, @unchecked Sendable {
             inFlight.append((buffer.readableBytes, promise))
             buffers.append(buffer)
         }
-        io.send(buffers)
+        // What the socket took at once is done now, as on NIO.
+        let sent = io.send(buffers)
+        if sent > 0 { didWrite(sent) }
     }
 
     func read0() {
@@ -471,23 +475,48 @@ final class StreamBox: @unchecked Sendable {
     init(_ stream: consuming TCPStream) { self.stream = .some(stream) }
 }
 
+/// The write half, shared by the loop (sending at flush) and the writer
+/// task: whoever set `writing` uses it, one at a time.
+final class WriterBox: @unchecked Sendable {
+    var half: WriteHalf?
+    init(_ half: consuming WriteHalf) { self.half = .some(half) }
+}
+
 /// What a connection's loop and its reader and writer share.
 final class StreamIO: Sendable {
     private struct Shared {
         var wantRead = false
         var reader: UnsafeContinuation<Bool, Never>?
+        /// Flushed and not sent, for the writer.
         var writes: [ByteBuffer] = []
+        /// The write half is in use: by the writer, or by a flush.
+        var writing = false
         var shutdownOutput = false
-        var writer: UnsafeContinuation<Bool, Never>?
+        var writer: UnsafeContinuation<Void, Never>?
         var closed = false
+
+        /// The writer has something to do and the half is free.
+        var writerReady: Bool { !writing && (closed || shutdownOutput || !writes.isEmpty) }
+
+        mutating func takeWriter() -> UnsafeContinuation<Void, Never>? {
+            defer { writer = nil }
+            return writer
+        }
     }
 
     private let shared = NIOLockedValueBox(Shared())
     private let readerTask = NIOLockedValueBox<Task<Void, Never>?>(nil)
     private let writerTask = NIOLockedValueBox<Task<Void, Never>?>(nil)
+    private let out: WriterBox
+    private let loop: VegaEventLoop
+    /// The channel owns this; a back reference that costs no count.
+    private unowned(unsafe) let channel: VegaSocketChannel
 
     init(_ halves: consuming SplitStream, channel: VegaSocketChannel) {
         let loop = channel.loop
+        self.loop = loop
+        self.channel = channel
+        out = WriterBox(halves.writer)
         let reader = loop.runtime.spawn(with: halves.reader) { [self] half in
             var buffer = IOBuffer(capacity: 64 * 1024)
             while await waitToRead() {
@@ -509,10 +538,12 @@ final class StreamIO: Sendable {
                 await loop.run { [bytes] in channel.didRead(bytes) }
             }
         }
-        let writer = loop.runtime.spawn(with: halves.writer) { [self] half in
+        let out = self.out
+        let writer = loop.runtime.spawn { [self] in
             var parts = UnsafeMutableBufferPointer<UnsafeRawBufferPointer>.allocate(capacity: 16)
             defer { parts.deallocate() }
             while true {
+                // The half is ours (`writing`) from here until doneWriting.
                 let (batch, shutdown) = await waitToWrite()
                 if !batch.isEmpty {
                     if parts.count < batch.count {
@@ -522,8 +553,9 @@ final class StreamIO: Sendable {
                     // The buffers' storage stays put while `batch` holds them.
                     for (i, b) in batch.enumerated() { parts[i] = b.withUnsafeReadableBytes { $0 } }
                     do throws(VegaIOError) {
-                        try await half.write(vectored: UnsafeBufferPointer(rebasing: parts[..<batch.count]))
+                        try await out.half?.write(vectored: UnsafeBufferPointer(rebasing: parts[..<batch.count]))
                     } catch {
+                        out.half = nil
                         await loop.run { channel.writeFailed(nioError(error)) }
                         return
                     }
@@ -533,17 +565,24 @@ final class StreamIO: Sendable {
                 if shutdown {
                     let failure: VegaIOError?
                     do throws(VegaIOError) {
-                        try half.shutdownWrite()
+                        try out.half?.shutdownWrite()
                         failure = nil
                     } catch {
                         failure = error
                     }
+                    out.half = nil
                     await loop.run {
                         if let failure { channel.writeFailed(nioError(failure)) } else { channel.didShutdownOutput() }
                     }
                     return
                 }
-                if batch.isEmpty { return }
+                if batch.isEmpty {
+                    // Closed with nothing left: drop the half (the socket
+                    // closes once the reader's goes too).
+                    out.half = nil
+                    return
+                }
+                doneWriting()
             }
         }
         readerTask.withLockedValue { $0 = reader }
@@ -570,28 +609,39 @@ final class StreamIO: Sendable {
         }
     }
 
-    /// Wait for flushed writes: an empty batch without `shutdown` once
-    /// closed with nothing left to send.
-    // Not inlined: Swift 6.3.3's optimizer miscompiles a continuation stored
-    // under a pthread lock (NIOLock) once this is inlined into a loop whose
-    // body also awaits; resuming it then jumps to address 0 (release only).
-    @inline(never)
+    /// Wait for writes to send, and take the half: an empty batch without
+    /// `shutdown` once closed with nothing left to send.
     private func waitToWrite() async -> (batch: [ByteBuffer], shutdown: Bool) {
-        _ = await withUnsafeContinuation { (c: UnsafeContinuation<Bool, Never>) in
-            let now: Bool = shared.withLockedValue { s in
-                if s.closed || s.shutdownOutput || !s.writes.isEmpty { return true }
+        while true {
+            let taken = shared.withLockedValue { s -> (batch: [ByteBuffer], shutdown: Bool)? in
+                guard s.writerReady else { return nil }
+                s.writing = true
+                let batch = s.writes
+                s.writes.removeAll(keepingCapacity: true)
+                let shutdown = s.shutdownOutput && !s.closed
+                if shutdown { s.shutdownOutput = false }
+                return (batch, shutdown)
+            }
+            if let taken { return taken }
+            await parkWriter()
+        }
+    }
+
+    // Not inlined: see waitToRead.
+    @inline(never)
+    private func parkWriter() async {
+        await withUnsafeContinuation { (c: UnsafeContinuation<Void, Never>) in
+            let ready = shared.withLockedValue { s -> Bool in
+                if s.writerReady { return true }
                 s.writer = c
                 return false
             }
-            if now { c.resume(returning: true) }
+            if ready { c.resume() }
         }
-        return shared.withLockedValue { s in
-            let batch = s.writes
-            s.writes.removeAll(keepingCapacity: true)
-            let shutdown = s.shutdownOutput && !s.closed
-            if shutdown { s.shutdownOutput = false }
-            return (batch, shutdown)
-        }
+    }
+
+    private func doneWriting() {
+        shared.withLockedValue { $0.writing = false }
     }
 
     func wantRead() {
@@ -606,45 +656,80 @@ final class StreamIO: Sendable {
         c?.resume(returning: true)
     }
 
-    func send(_ buffers: [ByteBuffer]) {
-        let c = shared.withLockedValue { s -> UnsafeContinuation<Bool, Never>? in
-            s.writes.append(contentsOf: buffers)
-            defer { s.writer = nil }
-            return s.writer
+    /// Send `buffers`, on the loop: what the socket takes now goes at once,
+    /// the rest to the writer. Returns how many of them went whole.
+    func send(_ buffers: [ByteBuffer]) -> Int {
+        let mine = shared.withLockedValue { s -> Bool in
+            guard !s.writing, s.writes.isEmpty, !s.closed, !s.shutdownOutput else { return false }
+            s.writing = true
+            return true
         }
-        c?.resume(returning: true)
+        guard mine else {
+            shared.withLockedValue { s in
+                s.writes.append(contentsOf: buffers)
+                return s.takeWriter()
+            }?.resume()
+            return 0
+        }
+        let sent: Int
+        do throws(VegaIOError) {
+            sent = try withUnsafeTemporaryAllocation(of: UnsafeRawBufferPointer.self, capacity: buffers.count) {
+                parts throws(VegaIOError) -> Int in
+                for (i, b) in buffers.enumerated() { parts[i] = b.withUnsafeReadableBytes { $0 } }
+                return try out.half?.tryWrite(vectored: UnsafeBufferPointer(parts)) ?? 0
+            }
+        } catch {
+            doneWriting()
+            let channel = self.channel
+            loop.execute { channel.writeFailed(nioError(error)) }
+            return 0
+        }
+        var whole = 0, left = sent
+        while whole < buffers.count && left >= buffers[whole].readableBytes {
+            left -= buffers[whole].readableBytes
+            whole += 1
+        }
+        var rest: [ByteBuffer] = []
+        if whole < buffers.count {
+            var first = buffers[whole]
+            first.moveReaderIndex(forwardBy: left)
+            rest.reserveCapacity(buffers.count - whole)
+            rest.append(first)
+            rest.append(contentsOf: buffers[(whole + 1)...])
+        }
+        shared.withLockedValue { s -> UnsafeContinuation<Void, Never>? in
+            s.writing = false
+            guard !rest.isEmpty else { return nil }
+            s.writes.insert(contentsOf: rest, at: 0)
+            return s.takeWriter()
+        }?.resume()
+        return whole
     }
 
     func shutdownOutput() {
-        let c = shared.withLockedValue { s -> UnsafeContinuation<Bool, Never>? in
+        shared.withLockedValue { s in
             s.shutdownOutput = true
-            defer { s.writer = nil }
-            return s.writer
-        }
-        c?.resume(returning: true)
+            return s.takeWriter()
+        }?.resume()
     }
 
     /// Stop reading now; let the writer send what it has, for up to `linger`.
     func close(linger: Duration, runtime: Runtime) {
-        let (r, w, pending) = shared.withLockedValue { s -> (UnsafeContinuation<Bool, Never>?, UnsafeContinuation<Bool, Never>?, Bool) in
+        let (r, w, pending) = shared.withLockedValue {
+            s -> (UnsafeContinuation<Bool, Never>?, UnsafeContinuation<Void, Never>?, Bool) in
             s.closed = true
-            defer {
-                s.reader = nil
-                s.writer = nil
-            }
-            return (s.reader, s.writer, !s.writes.isEmpty)
+            defer { s.reader = nil }
+            return (s.reader, s.takeWriter(), s.writing || !s.writes.isEmpty)
         }
         r?.resume(returning: false)
-        w?.resume(returning: true)
+        w?.resume()
         readerTask.withLockedValue { $0?.cancel() }
         let writer = writerTask.withLockedValue { $0 }
-        guard let writer else { return }
+        guard let writer, pending else { return }
         // The writer is mid-write, or has more to write: give it a while.
-        if w == nil || pending {
-            runtime.spawn {
-                try? await Runtime.sleep(for: linger)
-                writer.cancel()
-            }
+        runtime.spawn {
+            try? await Runtime.sleep(for: linger)
+            writer.cancel()
         }
     }
 }
