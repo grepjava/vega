@@ -12,7 +12,7 @@ Vega aims for feature parity with Tokio and SwiftNIO. It can be swapped in for S
 |---|---|
 | `Sources/Vega` | runtime, scheduler, I/O drivers, sockets, timers, sync primitives |
 | `Sources/VegaIO` | stream protocols, `Framed`, codecs (length-delimited, lines, bytes) |
-| `Sources/VegaTest` | test support: `MockClock` (paused time) |
+| `Sources/VegaTest` | test support: `MockClock` (paused time), `duplex()` (in-memory byte streams) |
 | `Sources/CVega` | C shim: parking, threads, the epoll/kqueue/io_uring drivers, sockets |
 | `Tests/VegaTests` | swift-testing suite |
 | `Benchmarks/` | separate package, so Vega itself keeps zero dependencies |
