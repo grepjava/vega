@@ -56,6 +56,24 @@ public struct SocketAddress: Sendable, Hashable, CustomStringConvertible {
         }
     }
 
+    /// An IPv4 (4 bytes) or IPv6 (16 bytes) address in network order.
+    init?(ip: [UInt8], port: Int) {
+        var raw = cv_sockaddr()
+        guard ip.withUnsafeBufferPointer({ cv_sockaddr_ip(&raw, $0.baseAddress, Int32($0.count), Int32(port)) }) == 0
+        else { return nil }
+        self.raw = raw
+    }
+
+    /// The IP address's bytes in network order, or nil for a Unix address.
+    var ipBytes: [UInt8]? {
+        withUnsafePointer(to: raw) { a in
+            withUnsafeTemporaryAllocation(of: UInt8.self, capacity: 16) { buf in
+                let n = cv_sockaddr_ip_bytes(a, buf.baseAddress!)
+                return n > 0 ? Array(buf[..<Int(n)]) : nil
+            }
+        }
+    }
+
     /// The port, or nil for a Unix address.
     public var port: Int? {
         let p = withUnsafePointer(to: raw) { cv_sockaddr_port($0) }

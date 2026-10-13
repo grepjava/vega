@@ -23,6 +23,21 @@ extension TCPStream {
                                  attemptDelay: attemptDelay)
     }
 
+    /// Connect to `host` and `port`, looking a name up with `resolver`
+    /// (`Resolver.system` asks the system's nameservers without blocking a
+    /// thread), then racing its addresses as `connect(host:port:)` does.
+    public static func connect(host: String, port: Int, resolver: Resolver,
+                               attemptDelay: Duration = .milliseconds(250)) async throws(IOError) -> TCPStream {
+        _ = try IODriver.current()
+        let addresses: [SocketAddress]
+        do {
+            addresses = try await resolver.lookup(host: host, port: port)
+        } catch {
+            throw error.ioError
+        }
+        return try await connect(to: addresses, attemptDelay: attemptDelay)
+    }
+
     /// Connect to the first of `addresses` that answers, Happy Eyeballs v2
     /// style (RFC 8305): IPv6 and IPv4 addresses are interleaved, IPv6
     /// first, and tried one after another. The next attempt starts when the

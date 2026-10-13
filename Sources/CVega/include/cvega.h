@@ -205,6 +205,18 @@ int cv_sockaddr_port(const cv_sockaddr *a);
 int cv_sockaddr_host(const cv_sockaddr *a, char *buf, int buflen);
 /// The family (AF_INET, AF_INET6, AF_UNIX).
 int cv_sockaddr_family(const cv_sockaddr *a);
+/// An IPv4 (len 4) or IPv6 (len 16) address in network order, with a port.
+/// 0, or -1 for any other length.
+int cv_sockaddr_ip(cv_sockaddr *out, const uint8_t *ip, int len, int port);
+/// The raw address bytes of an IPv4/IPv6 address into ip (room for 16): 4,
+/// 16, or -1 for another family.
+int cv_sockaddr_ip_bytes(const cv_sockaddr *a, uint8_t *ip);
+/// n bytes from the system's CSPRNG (getrandom, arc4random_buf).
+void cv_random_bytes(void *buf, long n);
+/// Read a small regular file whole into buf: its length, or -1 if it is
+/// missing, not a regular file (a fifo would block), longer than max, or
+/// unreadable.
+long cv_read_small_file(const char *path, void *buf, long max);
 /// getsockname / getpeername. 0 or an errno value.
 int cv_local_address(int fd, cv_sockaddr *out);
 int cv_peer_address(int fd, cv_sockaddr *out);

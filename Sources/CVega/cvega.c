@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -26,6 +27,7 @@
 #include <linux/futex.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/random.h>
 #include <sys/syscall.h>
 #elif defined(__APPLE__)
 #include <mach/mach_time.h>
@@ -700,6 +702,92 @@ int cv_resolve_all(const char *host, int port, int numeric_only, cv_sockaddr *ou
 
 int cv_sockaddr_family(const cv_sockaddr *a) {
     return ((const struct sockaddr *)a->storage)->sa_family;
+}
+
+int cv_sockaddr_ip(cv_sockaddr *out, const uint8_t *ip, int len, int port) {
+    memset(out, 0, sizeof *out);
+    if (len == 4) {
+        struct sockaddr_in *sa = (struct sockaddr_in *)out->storage;
+        sa->sin_family = AF_INET;
+        sa->sin_port = htons((uint16_t)port);
+        memcpy(&sa->sin_addr, ip, 4);
+        out->len = sizeof *sa;
+#if defined(__APPLE__)
+        sa->sin_len = sizeof *sa;
+#endif
+        return 0;
+    }
+    if (len == 16) {
+        struct sockaddr_in6 *sa = (struct sockaddr_in6 *)out->storage;
+        sa->sin6_family = AF_INET6;
+        sa->sin6_port = htons((uint16_t)port);
+        memcpy(&sa->sin6_addr, ip, 16);
+        out->len = sizeof *sa;
+#if defined(__APPLE__)
+        sa->sin6_len = sizeof *sa;
+#endif
+        return 0;
+    }
+    return -1;
+}
+
+int cv_sockaddr_ip_bytes(const cv_sockaddr *a, uint8_t *ip) {
+    const struct sockaddr *sa = (const struct sockaddr *)a->storage;
+    if (sa->sa_family == AF_INET) {
+        memcpy(ip, &((const struct sockaddr_in *)sa)->sin_addr, 4);
+        return 4;
+    }
+    if (sa->sa_family == AF_INET6) {
+        memcpy(ip, &((const struct sockaddr_in6 *)sa)->sin6_addr, 16);
+        return 16;
+    }
+    return -1;
+}
+
+void cv_random_bytes(void *buf, long n) {
+#if defined(__linux__)
+    uint8_t *p = buf;
+    while (n > 0) {
+        ssize_t got = getrandom(p, (size_t)n, 0);
+        if (got < 0) {
+            if (errno == EINTR) continue;
+            abort();  // no entropy source at all: nothing safe to fall back on
+        }
+        p += got;
+        n -= got;
+    }
+#else
+    arc4random_buf(buf, (size_t)n);
+#endif
+}
+
+long cv_read_small_file(const char *path, void *buf, long max) {
+    // O_NONBLOCK so opening a fifo doesn't wait for a writer; fstat then
+    // refuses it.
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return -1;
+    struct stat st;
+    long total = 0;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) goto fail;
+    for (;;) {
+        if (total == max) {
+            char probe;
+            if (read(fd, &probe, 1) != 0) goto fail;  // longer than max
+            break;
+        }
+        ssize_t n = read(fd, (char *)buf + total, (size_t)(max - total));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            goto fail;
+        }
+        if (n == 0) break;
+        total += n;
+    }
+    close(fd);
+    return total;
+fail:
+    close(fd);
+    return -1;
 }
 
 int cv_sockaddr_port(const cv_sockaddr *a) {
