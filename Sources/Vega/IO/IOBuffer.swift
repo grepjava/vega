@@ -35,6 +35,10 @@ public struct IOBuffer: ~Copyable, @unchecked Sendable {
         self.capacity = capacity
     }
 
+    /// Where the spare capacity starts, for I/O that fills it across a
+    /// suspension (the caller holds the buffer `inout` meanwhile).
+    package var spareBytes: UnsafeMutableRawPointer { base + count }
+
     /// Room left after the readable bytes.
     @inlinable public var spareCapacity: Int { capacity - count }
 

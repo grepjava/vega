@@ -217,6 +217,9 @@ void cv_random_bytes(void *buf, long n);
 /// missing, not a regular file (a fifo would block), longer than max, or
 /// unreadable.
 long cv_read_small_file(const char *path, void *buf, long max);
+/// Copy everything from in's position to out's: the bytes copied, or
+/// -errno. Uses copy_file_range on Linux where it can.
+long long cv_copy_fd(int in, int out);
 /// getsockname / getpeername. 0 or an errno value.
 int cv_local_address(int fd, cv_sockaddr *out);
 int cv_peer_address(int fd, cv_sockaddr *out);
@@ -371,6 +374,16 @@ cv_uring_op *cv_uring_accept(cv_uring *r, uintptr_t waiter, int fd, uint64_t *ge
 /// One-shot readiness of direction dir (CV_IO_READ / CV_IO_WRITE). Result:
 /// the poll mask.
 cv_uring_op *cv_uring_poll_ready(cv_uring *r, uintptr_t waiter, int fd, int dir, uint64_t *gen);
+/// File I/O: pread (write != 0: pwrite) of up to len bytes at offset, or at
+/// the file position (advancing it) when offset is -1. Result: the bytes.
+cv_uring_op *cv_uring_file_rw(cv_uring *r, uintptr_t waiter, int write, int fd, void *buf, size_t len,
+                              int64_t offset, uint64_t *gen);
+/// fsync, or fdatasync when datasync != 0. Result: 0.
+cv_uring_op *cv_uring_fsync(cv_uring *r, uintptr_t waiter, int fd, int datasync, uint64_t *gen);
+/// openat(AT_FDCWD, path, flags, mode); path stays valid until completion.
+/// Result: the fd.
+cv_uring_op *cv_uring_openat(cv_uring *r, uintptr_t waiter, const char *path, int flags, unsigned mode,
+                             uint64_t *gen);
 /// Any thread: cancel op if it is still generation gen and pending. Wakes
 /// the owner, which submits the cancel; the waiter is resumed as usual.
 void cv_uring_cancel(cv_uring_op *op, uint64_t gen);

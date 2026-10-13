@@ -27,6 +27,12 @@ enum URingRequest: @unchecked Sendable {
     /// with no completion form here: writes that found the socket full,
     /// connect, datagram batches.
     case poll(Int32, Int32)
+    /// File reads and writes at an offset (-1: the file position).
+    case fileRead(Int32, UnsafeMutableRawPointer, Int, Int64)
+    case fileWrite(Int32, UnsafeRawPointer, Int, Int64)
+    /// fsync; fdatasync when true.
+    case fsync(Int32, Bool)
+    case open(UnsafePointer<CChar>, Int32, UInt32)
 }
 
 #if os(Linux)
@@ -63,6 +69,11 @@ enum URing {
         case let .recv(fd, buf, len): return cv_uring_recv(ring, waiter, fd, buf, len, gen)
         case let .accept(fd): return cv_uring_accept(ring, waiter, fd, gen)
         case let .poll(fd, dir): return cv_uring_poll_ready(ring, waiter, fd, dir, gen)
+        case let .fileRead(fd, buf, len, off): return cv_uring_file_rw(ring, waiter, 0, fd, buf, len, off, gen)
+        case let .fileWrite(fd, buf, len, off):
+            return cv_uring_file_rw(ring, waiter, 1, fd, UnsafeMutableRawPointer(mutating: buf), len, off, gen)
+        case let .fsync(fd, data): return cv_uring_fsync(ring, waiter, fd, data ? 1 : 0, gen)
+        case let .open(path, flags, mode): return cv_uring_openat(ring, waiter, path, flags, mode, gen)
         }
     }
 

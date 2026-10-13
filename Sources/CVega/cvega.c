@@ -790,6 +790,51 @@ fail:
     return -1;
 }
 
+long long cv_copy_fd(int in, int out) {
+    long long total = 0;
+#if defined(__linux__)
+    // In the kernel where the file systems allow (reflinks on btrfs/XFS,
+    // server-side copies on NFS); a plain loop where they don't.
+    for (;;) {
+        ssize_t n = copy_file_range(in, NULL, out, NULL, 1 << 30, 0);
+        if (n > 0) {
+            total += n;
+            continue;
+        }
+        if (n == 0) return total;
+        if (errno == EINTR) continue;
+        if (total > 0 || (errno != EXDEV && errno != ENOSYS && errno != EINVAL && errno != EOPNOTSUPP &&
+                          errno != EPERM && errno != EBADF))
+            return -errno;
+        break;
+    }
+#endif
+    enum { CHUNK = 128 * 1024 };
+    char *buf = malloc(CHUNK);
+    if (!buf) return -ENOMEM;
+    for (;;) {
+        ssize_t n = read(in, buf, CHUNK);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            total = -errno;
+            break;
+        }
+        if (n == 0) break;
+        for (ssize_t done = 0; done < n;) {
+            ssize_t w = write(out, buf + done, (size_t)(n - done));
+            if (w < 0) {
+                if (errno == EINTR) continue;
+                free(buf);
+                return -errno;
+            }
+            done += w;
+        }
+        total += n;
+    }
+    free(buf);
+    return total;
+}
+
 int cv_sockaddr_port(const cv_sockaddr *a) {
     const struct sockaddr *sa = (const struct sockaddr *)a->storage;
     if (sa->sa_family == AF_INET) return ntohs(((const struct sockaddr_in *)sa)->sin_port);
@@ -1671,6 +1716,32 @@ cv_uring_op *cv_uring_poll_ready(cv_uring *r, uintptr_t waiter, int fd, int dir,
     // HUP and ERR are always reported: a closed or failed socket is "ready"
     // and the retried syscall says how.
     r->sqes[r->sq_tail & r->sq_mask].poll32_events = dir == CV_IO_READ ? POLLIN | POLLRDHUP : POLLOUT;
+    push_sqe(r);
+    return op;
+}
+
+cv_uring_op *cv_uring_file_rw(cv_uring *r, uintptr_t waiter, int write, int fd, void *buf, size_t len,
+                              int64_t offset, uint64_t *gen) {
+    if (len > 0x7ffff000) len = 0x7ffff000;
+    cv_uring_op *op = submit_op(r, waiter, gen, write ? IORING_OP_WRITE : IORING_OP_READ, fd,
+                                (uintptr_t)buf, (uint32_t)len);
+    // -1 (all ones) reads or writes at the file position and advances it.
+    r->sqes[r->sq_tail & r->sq_mask].off = (uint64_t)offset;
+    push_sqe(r);
+    return op;
+}
+
+cv_uring_op *cv_uring_fsync(cv_uring *r, uintptr_t waiter, int fd, int datasync, uint64_t *gen) {
+    cv_uring_op *op = submit_op(r, waiter, gen, IORING_OP_FSYNC, fd, 0, 0);
+    if (datasync) r->sqes[r->sq_tail & r->sq_mask].fsync_flags = IORING_FSYNC_DATASYNC;
+    push_sqe(r);
+    return op;
+}
+
+cv_uring_op *cv_uring_openat(cv_uring *r, uintptr_t waiter, const char *path, int flags, unsigned mode,
+                             uint64_t *gen) {
+    cv_uring_op *op = submit_op(r, waiter, gen, IORING_OP_OPENAT, AT_FDCWD, (uintptr_t)path, mode);
+    r->sqes[r->sq_tail & r->sq_mask].open_flags = (uint32_t)flags;
     push_sqe(r);
     return op;
 }

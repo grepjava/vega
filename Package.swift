@@ -10,6 +10,7 @@ let package = Package(
     products: [
         .library(name: "Vega", targets: ["Vega"]),
         .library(name: "VegaIO", targets: ["VegaIO"]),
+        .library(name: "VegaFS", targets: ["VegaFS"]),
         .library(name: "VegaTest", targets: ["VegaTest"]),
     ],
     targets: [
@@ -17,8 +18,9 @@ let package = Package(
                 linkerSettings: [.linkedLibrary("dl", .when(platforms: [.linux]))]),
         .target(name: "Vega", dependencies: ["CVega"], swiftSettings: swiftSettings),
         .target(name: "VegaIO", dependencies: ["Vega"], swiftSettings: swiftSettings),
+        .target(name: "VegaFS", dependencies: ["Vega", "VegaIO", "CVega"], swiftSettings: swiftSettings),
         .target(name: "VegaTest", dependencies: ["Vega", "VegaIO", "CVega"], swiftSettings: swiftSettings),
-        .testTarget(name: "VegaTests", dependencies: ["Vega", "VegaIO", "VegaTest", "CVega"], swiftSettings: swiftSettings),
+        .testTarget(name: "VegaTests", dependencies: ["Vega", "VegaIO", "VegaFS", "VegaTest", "CVega"], swiftSettings: swiftSettings),
     ],
     cLanguageStandard: .gnu11
 )
