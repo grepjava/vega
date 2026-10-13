@@ -92,6 +92,7 @@ typedef struct cv_io {
     /// let go unregisters (only through __atomic builtins).
     int refs;
     struct cv_io *next; // deferred-release list
+    int *count;         // uring driver: the runtime's open sockets
 } cv_io;
 
 #define CV_IO_READ 0
@@ -368,12 +369,13 @@ typedef struct cv_uring_wake {
 cv_uring_wake *cv_uring_wakes(cv_uring *r);
 cv_driver_stats cv_uring_get_stats(cv_uring *r);
 
-/// A cv_io for an fd of a uring runtime (no registration). NULL on ENOMEM.
-cv_io *cv_uring_io_new(int fd);
+/// A cv_io for an fd of a uring runtime (no registration), counted in
+/// *count until freed. NULL on ENOMEM.
+cv_io *cv_uring_io_new(int fd, int *count);
+/// Read such a count.
+int cv_count_load(int *count);
 /// Drop one owner; the last closes the fd and frees the cv_io.
 void cv_uring_io_release(cv_io *io);
-/// cv_ios of uring runtimes alive now, process-wide (for tests).
-int cv_uring_io_count(void);
 /// TCP_NODELAY on an accepted TCP connection, as cv_tcp_accept sets it.
 void cv_tcp_accepted(int fd);
 

@@ -34,6 +34,8 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     #endif
     /// Whether each worker has an io_uring (the uring driver).
     let usesRings: Bool
+    /// Open sockets under the uring driver (C atomics; for tests).
+    let socketCount = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
     let isShutdown = Atomic<Bool>(false)
     /// The time timers run on; paused in tests.
     let clock = RuntimeClock()
@@ -53,6 +55,7 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     init(workers count: Int, name: String, pin: Bool, io: IOBackend = .automatic,
          blockingThreads: Int = 512, blockingKeepAlive: Duration = .seconds(10)) {
         precondition(count >= 1, "a runtime needs at least one worker")
+        socketCount.initialize(to: 0)
         idle = Idle(workers: count)
         workerCount = count
         timers = TimerWheel(shards: count, origin: cv_now_ns())
@@ -117,6 +120,7 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     deinit {
         queues.deallocate()
         parkers.deallocate()
+        socketCount.deallocate()
         #if os(Linux) || canImport(Darwin)
         driver?.destroy()
         #endif

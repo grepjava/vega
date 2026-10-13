@@ -214,7 +214,13 @@ io_uring matches epoll at 64 connections, is 2% behind at 256, and is 9% ahead a
 1. **Writes go through the syscall first.** Sending through the ring suspends the task until the completion, which is one more trip through the scheduler per request: each worker ran twice as many jobs. At 64 connections that cost 16% (263k against 312k). The socket almost always has room, so a write tries `send` directly and waits on the ring only on `EAGAIN`.
 2. **Poll first on reads.** A task reads after handling the previous request, so the socket is usually empty. A plain `IORING_OP_RECV` first tries the receive inline, fails, then arms a poll. `IORING_RECVSEND_POLL_FIRST` skips that attempt. This took 64 connections from 269k to 308k and 1,024 connections from 227k to 241k.
 
-**Next:** multishot receive with a provided-buffer ring, which arms once per connection instead of once per read, and `SEND_ZC` for large writes.
+**Tried and dropped: multishot receive.** One `IORING_RECV_MULTISHOT` per connection, with a ring of 512 provided 4 KiB buffers per worker. Arrived data was queued on the socket, and reads copied it out. It measured 265k / 257k / 240k requests/s, against single-shot's 308k / 289k / 241k:
+- **Why it lost.** A receive armed once stays on the ring of the worker where the connection was first read, which is mostly the worker running the accept loop. Every completion then wakes its task on that worker, even after another worker has stolen the task. Steals per interval ranged from 129 to 1,091 across workers.
+- **Why single-shot doesn't.** It resubmits on whichever worker the task runs on, so it follows the task.
+- **Moving the receive** to the reader's ring needs a cross-ring cancel, which made the bookkeeping fragile.
+- **Conclusion.** With a ring per worker and work stealing, single-shot with POLL_FIRST is the better fit. The attempt is kept out of the tree.
+
+**Next:** `SEND_ZC` for large writes, and deciding whether io_uring becomes the default.
 
 ## Sync primitives (2026-10-12)
 

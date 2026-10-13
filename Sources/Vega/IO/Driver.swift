@@ -99,7 +99,8 @@ struct IORegistration: @unchecked Sendable {
             }
             self.io = io
         } else {
-            guard let io = cv_uring_io_new(fd) else {
+            let s = Unmanaged<Scheduler>.fromOpaque(driver.owner.unsafelyUnwrapped).takeUnretainedValue()
+            guard let io = cv_uring_io_new(fd, s.socketCount) else {
                 closeDescriptor(fd)
                 throw IOError(code: ENOMEM)
             }

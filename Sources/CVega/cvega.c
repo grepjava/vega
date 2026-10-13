@@ -1740,14 +1740,13 @@ int cv_uring_probe(void) { return ENOSYS; }
 #endif
 
 // Used by every driver's socket code, so outside the Linux block.
-static _Atomic int uring_ios;
+int cv_count_load(int *count) { return __atomic_load_n(count, __ATOMIC_ACQUIRE); }
 
-int cv_uring_io_count(void) { return atomic_load_explicit(&uring_ios, memory_order_relaxed); }
-
-cv_io *cv_uring_io_new(int fd) {
+cv_io *cv_uring_io_new(int fd, int *count) {
     cv_io *io = calloc(1, sizeof *io);
     if (!io) return NULL;
-    atomic_fetch_add_explicit(&uring_ios, 1, memory_order_relaxed);
+    io->count = count;
+    __atomic_add_fetch(count, 1, __ATOMIC_RELAXED);
     io->fd = fd;
     io->refs = 1;
     return io;
@@ -1755,9 +1754,10 @@ cv_io *cv_uring_io_new(int fd) {
 
 void cv_uring_io_release(cv_io *io) {
     if (__atomic_sub_fetch(&io->refs, 1, __ATOMIC_ACQ_REL) != 0) return; // the other half has it
+    int *count = io->count;
     close(io->fd);
     free(io);
-    atomic_fetch_sub_explicit(&uring_ios, 1, memory_order_relaxed);
+    __atomic_sub_fetch(count, 1, __ATOMIC_RELEASE);
 }
 
 void cv_tcp_accepted(int fd) {
