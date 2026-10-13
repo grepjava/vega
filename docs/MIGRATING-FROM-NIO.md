@@ -105,7 +105,7 @@ await server.waitForShutdown()
 
 - Call `TCPServer.bind` from a task on the runtime. Each connection runs the handler in its own task, and the connection closes when the handler returns.
 - `TCPServer.Configuration` holds what the bootstrap's options held: `backlog`, `acceptors` (several accept loops sharing the port with `SO_REUSEPORT`), `maxConnections`, and socket options for the listener and for each connection.
-- `server.shutdown(gracePeriod:)` stops accepting, lets open connections finish for the grace period, then cancels the rest: NIO's quiescing helper, built in. A handler that keeps connections open between requests can check `server.isShuttingDown` or await `waitForShutdown()`.
+- `server.shutdown(gracePeriod:)` stops accepting, lets open connections finish for the grace period, then cancels the rest: NIO's quiescing helper, built in. It first triggers the server's `ShutdownSignal`, which you can supply through `Configuration.shutdownSignal`. Pass the same signal to `HTTP1Server.serve(_:shutdown:)` or `HTTP2Server.serve(_:shutdown:)`. HTTP/1 then closes idle keep-alive connections at once, and answers a request already in progress with `connection: close`. HTTP/2 sends GOAWAY and finishes its open streams. Your own handlers can await `signal.wait()`, or wrap their wait for more input in `signal.cancelOnTrigger { }`.
 - Backpressure needs no `isWritable` or `channelWritabilityChanged`. `send` returns once the bytes are written, so a slow peer slows the loop that writes to it. `FramedWrite.feed` buffers items, and `flush` writes them out, as with NIO's `write` and `flush`.
 - `stream.split()` gives a read half and a write half that separate tasks can use at once.
 

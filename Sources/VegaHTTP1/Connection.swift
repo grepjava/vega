@@ -73,9 +73,15 @@ public enum HTTP1Server {
     /// Serve requests on `stream` until the client closes it, a request asks
     /// to close, or one is malformed (answered with its 4xx and a close). A
     /// handler that throws is answered with 500.
+    ///
+    /// Once `shutdown` triggers, an idle connection (waiting for a request's
+    /// head) returns at once, and a request in progress is answered with
+    /// `connection: close` before returning. Waiting for a head, the task is
+    /// cancelled by the trigger; the caller then closes the connection.
     public static func serve<Stream: AsyncReader & AsyncWriter & ~Copyable>(
         _ stream: borrowing Stream,
         configuration: Configuration = .init(),
+        shutdown: ShutdownSignal? = nil,
         _ handler: (HTTPRequest) async throws -> HTTPResponse
     ) async throws(IOError) {
         var reading = Reading(HTTP1RequestDecoder(limits: configuration.limits), capacity: configuration.bufferSize)
@@ -87,10 +93,21 @@ public enum HTTP1Server {
         while true {
             let part: HTTPRequestPart?
             do throws(HTTP1Error) {
-                part = try await reading.next(from: stream)
+                if head == nil, let shutdown {
+                    // Between requests: shutdown ends the wait for the next.
+                    if shutdown.isTriggered && !reading.hasBuffered { return }
+                    part = try await shutdown.cancelOnTrigger { () async throws(HTTP1Error) in
+                        try await reading.next(from: stream)
+                    }
+                    if shutdown.isTriggered && Task.isCancelled { return }
+                } else {
+                    part = try await reading.next(from: stream)
+                }
             } catch {
                 switch error {
-                case .io(let e): throw e
+                case .io(let e):
+                    if shutdown?.isTriggered == true && e == .cancelled { return }
+                    throw e
                 case .truncated: return // the client went away mid-request
                 default:
                     try await refuse(error.status, on: stream)
@@ -127,7 +144,7 @@ public enum HTTP1Server {
                     response = HTTPResponse(status: 500)
                 }
                 body = []
-                let close = prepare(&response, for: requestHead)
+                let close = prepare(&response, for: requestHead, closing: shutdown?.isTriggered == true)
                 encoder.requestReceived(requestHead.method)
                 output.clear()
                 do throws(HTTP1Error) {
@@ -145,7 +162,8 @@ public enum HTTP1Server {
     }
 
     /// Frame `response` for `request`. Returns whether to close afterwards.
-    private static func prepare(_ response: inout HTTPResponse, for request: HTTPRequestHead) -> Bool {
+    private static func prepare(_ response: inout HTTPResponse, for request: HTTPRequestHead,
+                                closing: Bool) -> Bool {
         let status = response.head.status
         let fields = response.head.fields
         if !(status < 200 || status == 204 || status == 304),
@@ -153,7 +171,7 @@ public enum HTTP1Server {
             response.head.fields["content-length"] = String(response.body.count)
         }
         if request.method == .head { response.body = [] }
-        let close = !request.keepAlive || !response.head.keepAlive || status == 101
+        let close = closing || !request.keepAlive || !response.head.keepAlive || status == 101
         if close && status != 101 && !fields.containsToken("close", in: "connection") {
             response.head.fields.append(name: "connection", value: "close")
         }
@@ -282,6 +300,9 @@ struct Reading<D: PartDecoder>: ~Copyable {
         self.decoder = decoder
         buffer = IOBuffer(capacity: capacity)
     }
+
+    /// Whether bytes past the last part are waiting to be decoded.
+    var hasBuffered: Bool { buffer.count > start }
 
     var leftover: [UInt8] {
         let s = start

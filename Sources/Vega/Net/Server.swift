@@ -27,9 +27,9 @@ import ucrt
 /// - Transient accept failures (out of fds or memory, a connection aborted
 ///   before it was accepted) don't stop the server; it backs off and goes on.
 /// - `shutdown(gracePeriod:)` stops accepting, lets open connections finish
-///   for the grace period, then cancels the rest. Handlers that keep a
-///   connection open across requests can watch `waitForShutdown()` to close
-///   between requests.
+///   for the grace period, then cancels the rest. It triggers
+///   `shutdownSignal` first: give that to `HTTP1Server` and `HTTP2Server`
+///   (or watch it) to close keep-alive connections between requests.
 public final class TCPServer: Sendable {
     public struct Configuration: Sendable {
         /// Accept loops, each with its own listener on the port. More than
@@ -44,12 +44,15 @@ public final class TCPServer: Sendable {
         /// Set on each accepted connection before its handler runs; one that
         /// fails drops the connection.
         public var connectionOptions: [SocketOption: Int] = [:]
+        /// Triggered when `shutdown` begins; nil for one of the server's own.
+        public var shutdownSignal: ShutdownSignal?
 
         public init(acceptors: Int = 1, maxConnections: Int? = nil,
-                    connectionOptions: [SocketOption: Int] = [:]) {
+                    connectionOptions: [SocketOption: Int] = [:], shutdownSignal: ShutdownSignal? = nil) {
             self.acceptors = acceptors
             self.maxConnections = maxConnections
             self.connectionOptions = connectionOptions
+            self.shutdownSignal = shutdownSignal
         }
     }
 
@@ -76,9 +79,9 @@ public final class TCPServer: Sendable {
     private let scheduler: Scheduler
     private let permits: Semaphore?
     private let state = Watch(State())
-    /// Apart from `state`, so handlers waiting for shutdown aren't woken by
-    /// every connection coming and going.
-    private let shuttingDown = Watch(false)
+    /// Triggered when `shutdown` begins (`configuration.shutdownSignal`, if
+    /// given).
+    public let shutdownSignal: ShutdownSignal
     private let nextID = Atomic<UInt64>(0)
     private let open = Atomic<Int>(0)
 
@@ -160,6 +163,7 @@ public final class TCPServer: Sendable {
         self.configuration = configuration
         self.handler = handler
         self.scheduler = scheduler
+        shutdownSignal = configuration.shutdownSignal ?? ShutdownSignal()
         permits = configuration.maxConnections.map { Semaphore(permits: max($0, 1)) }
     }
 
@@ -170,7 +174,7 @@ public final class TCPServer: Sendable {
     public var connectionCount: Int { open.load(ordering: .relaxed) }
 
     /// Whether `shutdown` has begun.
-    public var isShuttingDown: Bool { shuttingDown.value }
+    public var isShuttingDown: Bool { shutdownSignal.isTriggered }
 
     /// Why an accept loop stopped, if one stopped on an error it couldn't
     /// ride out.
@@ -178,14 +182,7 @@ public final class TCPServer: Sendable {
 
     /// Return once `shutdown` begins (or the task is cancelled).
     public func waitForShutdown() async {
-        var r = shuttingDown.subscribe()
-        while !r.value {
-            do {
-                try await r.changed()
-            } catch {
-                return
-            }
-        }
+        await shutdownSignal.wait()
     }
 
     /// Return once the server has stopped: no accept loop running (after
@@ -213,7 +210,7 @@ public final class TCPServer: Sendable {
     }
 
     private func stopAccepting() {
-        shuttingDown.send(true)
+        shutdownSignal.trigger()
         var acceptors: [Task<Void, Never>] = []
         state.modify { acceptors = $0.acceptorTasks }
         for task in acceptors { task.cancel() }
@@ -242,7 +239,7 @@ public final class TCPServer: Sendable {
         state.modify { $0.acceptorTasks.append(task) }
         // stopAccepting sets the flag before reading the tasks: one of the
         // two sees the other.
-        if shuttingDown.value { task.cancel() }
+        if shutdownSignal.isTriggered { task.cancel() }
     }
 
     private func acceptLoop(_ listener: consuming TCPListener) async {

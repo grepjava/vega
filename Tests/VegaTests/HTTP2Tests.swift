@@ -305,6 +305,48 @@ private func get(_ path: String) -> HTTPRequest {
         #expect(after == 200)
     }
 
+    /// Shutdown sends GOAWAY: the request in progress is answered, a new
+    /// one is turned away, and the server returns.
+    @Test func gracefulShutdown() throws {
+        let rt = Runtime(workers: 4)
+        defer { rt.shutdown() }
+        let signal = ShutdownSignal()
+        let entered = Notify(), release = Notify()
+        let (slow, late, served) = try rt.block { () async throws -> (String, Bool, Bool) in
+            let pair = duplex(capacity: 256 * 1024)
+            let server = rt.spawn(with: pair.second) { stream async -> Bool in
+                let halves = stream.split()
+                return (try? await HTTP2Server.serve(reader: halves.reader, writer: halves.writer, shutdown: signal) { request in
+                    if request.head.path == "/slow" {
+                        entered.notifyOne()
+                        await release.notifiedIgnoringCancellation()
+                    }
+                    return HTTPResponse(body: "ok")
+                }) != nil
+            }
+            let halves = pair.first.split()
+            let (slow, late) = try await HTTP2Client.withConnection(reader: halves.reader, writer: halves.writer,
+                                                                    scheme: "http", authority: "x") { client in
+                let first = rt.spawn { try await client.send(get("/slow")).text }
+                await entered.notified()
+                signal.trigger()
+                // Served until the loop hears of the trigger, then refused, by
+                // GOAWAY or (if sent before it arrived) RST_STREAM.
+                var late = false
+                for _ in 0..<200 where !late {
+                    late = (try? await client.send(get("/late"))) == nil
+                    if !late { try await Runtime.sleep(for: .milliseconds(5)) }
+                }
+                release.notifyOne()
+                return (try await first.value, late)
+            }
+            return (slow, late, await server.value)
+        }
+        #expect(slow == "ok")
+        #expect(late)
+        #expect(served)
+    }
+
     @Test func overTCP() throws {
         let rt = Runtime(workers: 4)
         defer { rt.shutdown() }

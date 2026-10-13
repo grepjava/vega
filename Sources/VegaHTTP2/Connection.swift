@@ -18,10 +18,14 @@ public enum HTTP2Server {
     /// Serve the connection until the client closes it or breaks the
     /// protocol (answered with GOAWAY, then thrown). A handler that throws
     /// is answered with 500.
+    ///
+    /// Once `shutdown` triggers, the server sends GOAWAY, refuses new
+    /// streams, and returns when the open ones are done.
     public static func serve<Reader: AsyncReader & ~Copyable & Sendable, Writer: AsyncWriter & ~Copyable>(
         reader: consuming Reader,
         writer: consuming Writer,
         configuration: HTTP2Configuration = .init(),
+        shutdown: ShutdownSignal? = nil,
         _ handler: @escaping @Sendable (HTTPRequest) async throws -> HTTPResponse
     ) async throws(HTTP2Error) {
         let readerBox = Handoff(reader)
@@ -32,6 +36,12 @@ public enum HTTP2Server {
             var inbox = channel.receiver
             group.addTask {
                 await readFrames(readerBox.take(), preface: true, maxFrameSize: configuration.maxFrameSize, to: mailbox)
+            }
+            if let shutdown {
+                group.addTask {
+                    await shutdown.wait() // returns early when the group is cancelled
+                    if shutdown.isTriggered { _ = await mailbox.post(.shutdown) }
+                }
             }
             let writer = writerBox.take()
             var core = H2Core(isServer: true, configuration: configuration)
@@ -49,7 +59,7 @@ public enum HTTP2Server {
                     }
                     out.clear()
                 }
-                if readerDone && inFlight == 0 { break }
+                if inFlight == 0 && (readerDone || core.goawaySent && core.openStreamCount == 0) { break }
                 var event: LoopEvent
                 do throws(ChannelError) { event = try await inbox.receive() } catch { break }
                 while true {
@@ -89,6 +99,11 @@ public enum HTTP2Server {
                         failure = error
                         readerDone = true
                         inFlight = 0
+                    case .shutdown:
+                        if !core.goawaySent {
+                            core.goawaySent = true
+                            goaway(core.highestPeerStream, .noError, into: &out)
+                        }
                     case .request, .bodyDone:
                         break
                     }
@@ -108,15 +123,18 @@ public enum HTTP2Server {
     /// Serve the halves of a split stream (`stream.halves()`).
     public static func serve<Reader: AsyncReader & ~Copyable & Sendable, Writer: AsyncWriter & ~Copyable>(
         _ halves: consuming StreamHalves<Reader, Writer>, configuration: HTTP2Configuration = .init(),
+        shutdown: ShutdownSignal? = nil,
         _ handler: @escaping @Sendable (HTTPRequest) async throws -> HTTPResponse
     ) async throws(HTTP2Error) {
-        try await serve(reader: halves.reader, writer: halves.writer, configuration: configuration, handler)
+        try await serve(reader: halves.reader, writer: halves.writer, configuration: configuration,
+                        shutdown: shutdown, handler)
     }
 
     /// Serve a TCP connection.
     public static func serve(_ stream: consuming TCPStream, configuration: HTTP2Configuration = .init(),
+                             shutdown: ShutdownSignal? = nil,
                              _ handler: @escaping @Sendable (HTTPRequest) async throws -> HTTPResponse) async throws(HTTP2Error) {
-        try await serve(stream.halves(), configuration: configuration, handler)
+        try await serve(stream.halves(), configuration: configuration, shutdown: shutdown, handler)
     }
 }
 
@@ -282,7 +300,7 @@ public final class HTTP2Client: Sendable {
                 failAll(.closed)
                 inbox.close()
                 return
-            case .response:
+            case .response, .shutdown:
                 break
             }
             if failure == nil {
@@ -320,6 +338,8 @@ enum LoopEvent: Sendable {
     case request(HTTPRequest, ResponseSlot)
     /// The client's scope ended.
     case bodyDone
+    /// The server's shutdown signal triggered.
+    case shutdown
 }
 
 /// The sending side of a loop's channel, shared by the tasks that feed it.

@@ -309,6 +309,44 @@ import Testing
     }
 }
 
+@Suite struct ShutdownSignalTests {
+    /// A trigger wakes waiters and cancels tasks inside `cancelOnTrigger`,
+    /// but not ones that have left it; later entries are cancelled at once.
+    @Test func triggers() throws {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let signal = ShutdownSignal()
+        let (woke, cut, leftAlone, late) = try rt.block { () async throws -> (Bool, Bool, Bool, Bool) in
+            let waiter = rt.spawn { () async -> Bool in
+                await signal.wait()
+                return signal.isTriggered
+            }
+            let sleeper = rt.spawn { () async -> Bool in
+                do {
+                    try await signal.cancelOnTrigger { try await Runtime.sleep(for: .seconds(30)) }
+                    return false
+                } catch {
+                    return Task.isCancelled
+                }
+            }
+            await signal.cancelOnTrigger { () async in }
+            try await Runtime.sleep(for: .milliseconds(20))
+            #expect(!signal.isTriggered)
+            signal.trigger()
+            signal.trigger()
+            let leftAlone = !Task.isCancelled
+            let late = await rt.spawn { () async -> Bool in
+                await signal.cancelOnTrigger { () async in Task.isCancelled }
+            }.value
+            return (await waiter.value, await sleeper.value, leftAlone, late)
+        }
+        #expect(woke)
+        #expect(cut)
+        #expect(leftAlone)
+        #expect(late)
+    }
+}
+
 @Suite struct OnceCellTests {
     /// Many tasks ask at once; the initializer runs once.
     @Test func initializesOnce() throws {

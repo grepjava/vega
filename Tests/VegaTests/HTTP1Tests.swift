@@ -454,6 +454,75 @@ private func encoded(_ body: (inout IOBuffer) throws -> Void) rethrows -> String
         #expect(got.last == .end(nil))
     }
 
+    /// On shutdown a request in progress is answered with a close, and an
+    /// idle keep-alive connection ends at once.
+    @Test func gracefulShutdown() throws {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let signal = ShutdownSignal()
+        let entered = Notify(), release = Notify()
+        try rt.block {
+            let handler: @Sendable (HTTPRequest) async throws -> HTTPResponse = { request in
+                if request.head.path == "/slow" {
+                    entered.notifyOne()
+                    await release.notifiedIgnoringCancellation()
+                }
+                return HTTPResponse(body: "ok")
+            }
+            let idle = duplex()
+            let idleServer = rt.spawn(with: idle.second) { stream async -> Bool in
+                (try? await HTTP1Server.serve(stream, shutdown: signal, handler)) != nil
+            }
+            let busy = duplex()
+            let busyServer = rt.spawn(with: busy.second) { stream async -> Bool in
+                (try? await HTTP1Server.serve(stream, shutdown: signal, handler)) != nil
+            }
+            var idleClient = HTTP1Connection(idle.first)
+            let first = try await idleClient.send(HTTPRequest(target: "/", fields: ["host": "x"]))
+            #expect(first.text == "ok")
+            #expect(first.head.fields["connection"] == nil)
+
+            rt.spawn {
+                await entered.notified()
+                signal.trigger()
+                release.notifyOne()
+            }
+            var busyClient = HTTP1Connection(busy.first)
+            let slow = try await busyClient.send(HTTPRequest(target: "/slow", fields: ["host": "x"]))
+            #expect(slow.text == "ok")
+            #expect(slow.head.fields["connection"] == "close")
+            let reusable = busyClient.isReusable
+            #expect(!reusable)
+            #expect(await busyServer.value)
+            #expect(await idleServer.value)
+            let after = try? await idleClient.send(HTTPRequest(target: "/", fields: ["host": "x"]))
+            #expect(after == nil)
+        }
+    }
+
+    /// TCPServer's shutdown triggers the signal it was given, so an idle
+    /// keep-alive client doesn't hold shutdown for the grace period.
+    @Test func serverShutdownClosesIdleConnections() throws {
+        let rt = Runtime(workers: 4)
+        defer { rt.shutdown() }
+        let (elapsed, after) = try rt.block { () async throws -> (Duration, HTTPResponse?) in
+            let signal = ShutdownSignal()
+            let server = try TCPServer.bind(host: "127.0.0.1", port: 0,
+                                            configuration: .init(shutdownSignal: signal)) { conn in
+                try? await HTTP1Server.serve(conn, shutdown: signal) { _ in HTTPResponse(body: "ok") }
+            }
+            var client = HTTP1Connection(try await TCPStream.connect(host: "127.0.0.1", port: server.port))
+            let first = try await client.send(HTTPRequest(target: "/", fields: ["host": "x"]))
+            #expect(first.text == "ok")
+            let start = ContinuousClock.now
+            await server.shutdown(gracePeriod: .seconds(10))
+            let elapsed = start.duration(to: .now)
+            return (elapsed, try? await client.send(HTTPRequest(target: "/", fields: ["host": "x"])))
+        }
+        #expect(elapsed < .seconds(5))
+        #expect(after == nil)
+    }
+
     @Test func overTCP() throws {
         let rt = Runtime(workers: 4)
         defer { rt.shutdown() }

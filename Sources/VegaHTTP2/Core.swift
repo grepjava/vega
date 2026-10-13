@@ -102,6 +102,9 @@ struct H2Core {
     /// A header block waiting for CONTINUATION frames.
     private var pendingBlock: (stream: UInt32, block: [UInt8], endStream: Bool)?
     private(set) var goawayReceived: UInt32?
+    /// This end sent GOAWAY to shut down: new streams from the peer are
+    /// refused.
+    var goawaySent = false
 
     private struct Stream {
         var recvWindow: Int
@@ -330,7 +333,7 @@ struct H2Core {
             return []
         }
         highestPeerStream = id
-        if streams.count >= config.maxConcurrentStreams {
+        if goawaySent || streams.count >= config.maxConcurrentStreams {
             reset(id, .refusedStream, into: &out)
             return []
         }
@@ -426,6 +429,9 @@ struct H2Core {
     }
 
     // MARK: - Sending
+
+    /// Streams open, in either direction.
+    var openStreamCount: Int { streams.count }
 
     /// Streams this end has open.
     var localStreamCount: Int { streams.keys.count { ($0 % 2 == 1) != isServer } }
