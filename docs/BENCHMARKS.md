@@ -288,6 +288,33 @@ UDP echo, datagrams per second:
   With spin 0, Vega is also ahead of the default at 256 connections (198.6k against 196.3k, Tokio 196.0k) and at 1,024 (198.2k against 195.7k, Tokio 193.7k), and with 8 workers it does 189k against 170k (Tokio 193k). On `vega-bench` (8 workers, median of 5 runs), spin 0 is level on ping-pong, faster on `spawn_many` (863 against 1,071 ns), `pool_spawn` (495 against 801), `mpsc_fan_in` (337 against 618) and `sleep_cancel` (1,733 against 1,986), and slower on `sleep_many` (3,117 against 2,585 ns). Since then **Darwin defaults to spin 0** (`Worker.spinNanos`; `VEGA_SPIN_NS` still overrides it). At the new default, 64 connections measure 197,330 / 197,374 against Tokio's 201,845 / 201,184, with p99 598 µs against 592 µs. Linux keeps 50 µs: there server and load have their own cores, and on the box the spin is what took `spawn_many` from 3,670 to 2,210 ns. The tables above were run at the old 50 µs default.
 - Batch at 4 flows needed 1–3 window refills per run (a few datagrams dropped on loopback); no other run lost any.
 
+## macOS scheduler microbenchmarks, indicative (2026-10-13, commit e9c26a6)
+
+`vega-bench` and `tokio-bench` on the same Apple M1 laptop as the section above: **not the bench box, and not comparable with its numbers.** 8 workers, median of 9 runs, in ns per operation; two rounds, given as round 1 / round 2. Other work on the machine kept the load average around 5 throughout. Vega runs through executor preference only: `--global` needs the executor SPI, which the macOS SDK hides. "Swift default" here is Dispatch's cooperative pool, a stronger baseline than Swift's default executor on Linux. Workers don't spin before parking (the Darwin default).
+
+| Bench | Vega | Swift default (Dispatch) | Tokio |
+|---|---|---|---|
+| spawn_many | 781 / 781 | 803 / 804 | **219 / 215** |
+| spawn_discard | 1,009 / 1,055 | **673 / 667** | |
+| pool_spawn | 485 / 496 | 480 / 488 | |
+| chained_spawn | 1,118 / 1,106 | 1,893 / 1,890 | **279 / 272** |
+| ping_pong | 884 / 886 | 1,558 / 1,565 | **192 / 191** |
+| ping_pong_notify | 1,383 / 1,385 | 2,320 / 2,354 | |
+| yield_many | 255 / 246 | 341 / 337 | **41 / 38** |
+| yield_vega | 86 / 88 | 377 / 365 | |
+| mpsc_ping_pong | 1,983 / 1,993 | 3,287 / 3,219 | **223 / 221** |
+| mpsc_fan_in | 342 / 342 | 323 / 325 | **120 / 120** |
+| semaphore | 381 / 378 | 1,082 / 1,092 | **298 / 296** |
+| sleep_cancel | 1,518 / 1,411 | 1,689 / 1,645 | |
+| sleep_many | 3,104 / 3,197 | **1,742 / 1,744** | |
+| timeout_ok | 2,382 / 2,489 | 3,588 / 3,702 | |
+
+- **Against Dispatch:**
+  - Vega is 1.6–1.8× faster on hand-offs (ping-pong, mpsc ping-pong, chained spawn), 2.5–2.9× on the semaphore and 4× on `yield_vega`.
+  - It is level on `spawn_many`, `pool_spawn` and `mpsc_fan_in`.
+  - It is slower on `spawn_discard` (0.6–0.7×) and `sleep_many` (0.5–0.6×). `sleep_many` is the bench that spin 0 slowed down in the spin analysis above (2,585 ns at 50 µs).
+- **Against Tokio:** Vega is 1.3× slower on the semaphore, 2.8× on fan-in, 3.6–4.6× on spawning and ping-pong, 6.4× on `yield_many` (2.2× with `Runtime.yield`) and 9× on mpsc ping-pong. Most of that is the Swift task and continuation machinery, as on the box. These gaps are wider than the box's, and the box remains the reference.
+
 ## Sync primitives (2026-10-12)
 
 8 workers, executor preference, median of 9 runs, in ns/op. Tokio's numbers come from the same benchmarks in `tokio-bench`.
