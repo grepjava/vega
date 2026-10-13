@@ -3,6 +3,20 @@
 #endif
 #include "cvega.h"
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <bcrypt.h>
+#include <errno.h>
+#include <process.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+// aligned_alloc isn't in the MSVC CRT.
+#define cv_aligned_alloc(align, size) _aligned_malloc((size), (align))
+#define cv_aligned_free(p) _aligned_free(p)
+#else
 #include <arpa/inet.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -44,6 +58,9 @@
 #include <os/os_sync_wait_on_address.h>
 #include <sys/event.h>
 #endif
+#define cv_aligned_alloc(align, size) aligned_alloc((align), (size))
+#define cv_aligned_free(p) free(p)
+#endif
 
 #if defined(__has_feature)
 #if __has_feature(thread_sanitizer)
@@ -51,8 +68,27 @@
 #endif
 #endif
 
-__thread void *cv_current_tls;
+_Thread_local void *cv_current_tls;
 
+#if defined(_WIN32)
+uint64_t cv_now_ns(void) {
+    static LARGE_INTEGER freq;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    // Split to keep the multiply in range: QPC runs at 10 MHz or more.
+    uint64_t sec = (uint64_t)t.QuadPart / (uint64_t)freq.QuadPart;
+    uint64_t rem = (uint64_t)t.QuadPart % (uint64_t)freq.QuadPart;
+    return sec * 1000000000ull + rem * 1000000000ull / (uint64_t)freq.QuadPart;
+}
+
+uint64_t cv_now_coarse_ns(void) { return (uint64_t)GetTickCount64() * 1000000ull; }
+
+int cv_cpu_count(void) {
+    DWORD n = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    return n > 0 ? (int)n : 1;
+}
+#else
 uint64_t cv_now_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -75,6 +111,7 @@ int cv_cpu_count(void) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n > 0 ? (int)n : 1;
 }
+#endif
 
 // ---- parker --------------------------------------------------------------
 
@@ -89,14 +126,14 @@ struct cv_parker {
 };
 
 cv_parker *cv_parker_new(void) {
-    cv_parker *p = aligned_alloc(128, sizeof(cv_parker));
+    cv_parker *p = cv_aligned_alloc(128, sizeof(cv_parker));
     if (!p) abort();
     atomic_init(&p->state, EMPTY);
     p->wake_fd = -1;
     return p;
 }
 
-void cv_parker_free(cv_parker *p) { free(p); }
+void cv_parker_free(cv_parker *p) { cv_aligned_free(p); }
 
 static void wait_on(_Atomic uint32_t *addr, uint32_t expected, int64_t timeout_ns) {
 #if defined(__linux__)
@@ -113,6 +150,10 @@ static void wait_on(_Atomic uint32_t *addr, uint32_t expected, int64_t timeout_n
     else if (timeout_ns > 0) // the timeout is in nanoseconds; 0 is an error
         os_sync_wait_on_address_with_timeout((void *)addr, expected, 4, OS_SYNC_WAIT_ON_ADDRESS_NONE,
                                              OS_CLOCK_MACH_ABSOLUTE_TIME, (uint64_t)timeout_ns);
+#elif defined(_WIN32)
+    // Milliseconds, rounded up so a short timeout still waits.
+    DWORD ms = timeout_ns < 0 ? INFINITE : (DWORD)((timeout_ns + 999999) / 1000000);
+    WaitOnAddress((volatile void *)addr, &expected, sizeof expected, ms);
 #else
 #error "cv_park: unsupported platform"
 #endif
@@ -123,6 +164,8 @@ static void wake_one(_Atomic uint32_t *addr) {
     syscall(SYS_futex, (uint32_t *)addr, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
 #elif defined(__APPLE__)
     os_sync_wake_by_address_any((void *)addr, 4, OS_SYNC_WAKE_BY_ADDRESS_NONE);
+#elif defined(_WIN32)
+    WakeByAddressSingle((void *)addr);
 #endif
 }
 
@@ -212,13 +255,13 @@ void cv_unpark(cv_parker *p) {
 
 cv_lock *cv_lock_new(void) {
     // A cache line of its own: the word is written by every locker.
-    cv_lock *l = aligned_alloc(128, 128);
+    cv_lock *l = cv_aligned_alloc(128, 128);
     if (!l) abort();
     __atomic_store_n(&l->state, 0, __ATOMIC_RELAXED);
     return l;
 }
 
-void cv_lock_free(cv_lock *l) { free(l); }
+void cv_lock_free(cv_lock *l) { cv_aligned_free(l); }
 
 void cv_lock_lock_slow(cv_lock *l) {
     // Spin while the holder is likely mid-critical-section: they are short.
@@ -251,6 +294,35 @@ struct start {
     char name[16];
 };
 
+#if defined(_WIN32)
+static unsigned __stdcall trampoline(void *raw) {
+    struct start s = *(struct start *)raw;
+    free(raw);
+    if (s.cpu >= 0 && s.cpu < 64) SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)1 << s.cpu);
+    wchar_t wide[16];
+    MultiByteToWideChar(CP_UTF8, 0, s.name, -1, wide, 16);
+    SetThreadDescription(GetCurrentThread(), wide);
+    s.fn(s.arg);
+    return 0;
+}
+
+int cv_thread_spawn(cv_thread_fn fn, void *arg, const char *name, int cpu) {
+    struct start *s = malloc(sizeof *s);
+    if (!s) return ENOMEM;
+    s->fn = fn;
+    s->arg = arg;
+    s->cpu = cpu;
+    strncpy(s->name, name ? name : "vega", sizeof s->name - 1);
+    s->name[sizeof s->name - 1] = 0;
+    uintptr_t h = _beginthreadex(NULL, 2u << 20, trampoline, s, 0, NULL);
+    if (h == 0) {
+        free(s);
+        return errno ? errno : EAGAIN;
+    }
+    CloseHandle((HANDLE)h); // detached
+    return 0;
+}
+#else
 static void *trampoline(void *raw) {
     struct start s = *(struct start *)raw;
     free(raw);
@@ -288,6 +360,7 @@ int cv_thread_spawn(cv_thread_fn fn, void *arg, const char *name, int cpu) {
     if (rc != 0) free(s);
     return rc;
 }
+#endif
 
 // ---- I/O driver ----------------------------------------------------------
 // Edge-triggered readiness: epoll with EPOLLET on Linux, kqueue with EV_CLEAR
@@ -607,6 +680,7 @@ void cv_driver_free(cv_driver *d) { (void)d; }
 
 #endif
 
+#if !defined(_WIN32) // sockets, pipes, processes, the supervisor: POSIX
 // ---- sockets -------------------------------------------------------------
 
 static int set_nonblocking_cloexec(int fd) {
@@ -1440,6 +1514,26 @@ int cv_unix_pair(int fds[2]) {
     return 0;
 }
 
+#else // _WIN32: the few of those the portable code uses
+
+void cv_random_bytes(void *buf, long n) {
+    if (BCryptGenRandom(NULL, (PUCHAR)buf, (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) abort();
+}
+
+long cv_read_small_file(const char *path, void *buf, long max) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    long total = (long)fread(buf, 1, (size_t)max, f);
+    int more = total == max && fgetc(f) != EOF;
+    int failed = ferror(f);
+    fclose(f);
+    return more || failed ? -1 : total;
+}
+
+int cv_thread_count(void) { return -1; }
+
+#endif
+
 // ---- Swift runtime hooks -------------------------------------------------
 
 static cv_enqueue_fn enqueue_fn;
@@ -1463,7 +1557,12 @@ static CV_SWIFTCC void enqueue_global(void *job, enqueue_original original) {
 }
 
 int cv_install_enqueue_global_hook(cv_enqueue_fn fn, void *ctx) {
+#if defined(_WIN32)
+    HMODULE rt = GetModuleHandleA("swift_Concurrency.dll");
+    enqueue_hook *slot = rt ? (enqueue_hook *)GetProcAddress(rt, "swift_task_enqueueGlobal_hook") : NULL;
+#else
     enqueue_hook *slot = (enqueue_hook *)dlsym(RTLD_DEFAULT, "swift_task_enqueueGlobal_hook");
+#endif
     if (!slot) return -1;
     enqueue_fn = fn;
     enqueue_ctx = ctx;
@@ -1472,6 +1571,7 @@ int cv_install_enqueue_global_hook(cv_enqueue_fn fn, void *ctx) {
 }
 
 
+#if !defined(_WIN32) // socket options, vectored I/O, io_uring, signals: POSIX
 // ---- socket options ------------------------------------------------------
 
 #include <netinet/udp.h>
@@ -2496,6 +2596,8 @@ void cv_signal_wait(void) {
     ssize_t r = read(fd, buf, sizeof buf); // EINTR too: the caller looks anyway
     (void)r;
 }
+
+#endif // !_WIN32
 
 // ---- ThreadSanitizer -----------------------------------------------------
 

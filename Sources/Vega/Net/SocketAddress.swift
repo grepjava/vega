@@ -4,6 +4,8 @@ import CVega
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 
 // Socket types as the Int32 that cv_connect_new takes (Glibc imports them as enums).

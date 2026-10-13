@@ -17,7 +17,9 @@ let package = Package(
     ],
     targets: [
         .target(name: "CVega", cSettings: [.define("_GNU_SOURCE")],
-                linkerSettings: [.linkedLibrary("dl", .when(platforms: [.linux]))]),
+                linkerSettings: [.linkedLibrary("dl", .when(platforms: [.linux])),
+                                 .linkedLibrary("Synchronization", .when(platforms: [.windows])),
+                                 .linkedLibrary("bcrypt", .when(platforms: [.windows]))]),
         .target(name: "Vega", dependencies: ["CVega"], swiftSettings: swiftSettings),
         .target(name: "VegaIO", dependencies: ["Vega"], swiftSettings: swiftSettings),
         .target(name: "VegaFS", dependencies: ["Vega", "VegaIO", "CVega"], swiftSettings: swiftSettings),

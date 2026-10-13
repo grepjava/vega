@@ -4,6 +4,8 @@ import CVega
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 
 /// The read end of a pipe (or a FIFO, or a terminal): Tokio's

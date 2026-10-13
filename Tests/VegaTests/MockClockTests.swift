@@ -7,6 +7,8 @@ import VegaTest
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 
 private final class ClockLog: Sendable {

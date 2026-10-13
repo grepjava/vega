@@ -7,6 +7,8 @@ import Testing
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 
 /// Builds a message by hand, so a test says what is on the wire rather than

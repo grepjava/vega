@@ -5,6 +5,8 @@ import Synchronization
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 
 // Happy Eyeballs v2 (RFC 8305): connection attempts to a host's addresses

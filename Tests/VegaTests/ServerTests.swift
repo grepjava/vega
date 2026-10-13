@@ -6,6 +6,8 @@ import Testing
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 
 private func bytes(_ s: String) -> IOBuffer {

@@ -1,8 +1,12 @@
+// POSIX for now; Windows comes with the IOCP driver.
+#if os(Linux) || canImport(Darwin)
 import Vega
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 
 /// What a path names.
@@ -109,3 +113,4 @@ public struct FileMetadata: Sendable, Hashable {
         #endif
     }
 }
+#endif

@@ -2,6 +2,8 @@
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 import Testing
 @testable import Vega
@@ -16,6 +18,7 @@ struct PoolStarvationTests {
     }
 }
 
+#if os(Linux) // glibc diagnostics
 @_silgen_name("pthread_getname_np") func pthread_getname_np(_ t: pthread_t, _ buf: UnsafeMutablePointer<CChar>, _ n: Int) -> Int32
 @_silgen_name("backtrace") func c_backtrace(_ buf: UnsafeMutablePointer<UnsafeMutableRawPointer?>, _ n: Int32) -> Int32
 @_silgen_name("backtrace_symbols_fd") func c_backtrace_symbols_fd(_ buf: UnsafePointer<UnsafeMutableRawPointer?>, _ n: Int32, _ fd: Int32)
@@ -49,3 +52,4 @@ struct SleepTraceTests {
         print("TRACE timed +\(after.0 - before.0), foreign +\(after.1 - before.1) (1 foreign = block's own start)")
     }
 }
+#endif

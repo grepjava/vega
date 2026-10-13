@@ -1,8 +1,12 @@
+// POSIX for now; Windows comes with the IOCP driver.
+#if os(Linux) || canImport(Darwin)
 import Vega
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 
 // Thin syscall wrappers. At file scope, so File's own `read`, `write` and
@@ -77,3 +81,4 @@ func posixFstat(_ fd: Int32) throws(IOError) -> stat {
     _ = try retrying { fstat(fd, &st) }
     return st
 }
+#endif

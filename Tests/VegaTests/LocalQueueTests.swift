@@ -3,6 +3,8 @@ import CVega
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 import Synchronization
 import Testing

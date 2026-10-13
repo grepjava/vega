@@ -1,9 +1,13 @@
+// POSIX for now; Windows comes with the IOCP driver.
+#if os(Linux) || canImport(Darwin)
 import CVega
 import Vega
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 
 /// One name in a directory.
@@ -328,3 +332,4 @@ private func removeTree(_ path: String) throws(IOError) {
     }
     _ = try retrying { rmdir(path) }
 }
+#endif

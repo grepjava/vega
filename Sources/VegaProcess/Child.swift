@@ -1,3 +1,5 @@
+// POSIX for now; Windows comes with the IOCP driver.
+#if os(Linux) || canImport(Darwin)
 import CVega
 import Vega
 import VegaIO
@@ -5,6 +7,8 @@ import VegaIO
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 
 /// A running (or finished, not yet waited for) child process: Tokio's
@@ -203,3 +207,4 @@ enum Orphans {
         return pids.count
     }
 }
+#endif

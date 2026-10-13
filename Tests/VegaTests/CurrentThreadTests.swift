@@ -2,6 +2,8 @@
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 import CVega
 import Synchronization
@@ -9,7 +11,7 @@ import Testing
 @testable import Vega
 
 private func pthread_self_id() -> Int {
-    #if canImport(Glibc)
+    #if canImport(Glibc) || os(Windows)
     return Int(bitPattern: UInt(pthread_self()))
     #else
     return Int(bitPattern: pthread_self())
@@ -72,6 +74,7 @@ private func pthread_self_id() -> Int {
         #expect(rt.block { 3 } == 3)
     }
 
+    #if os(Linux) || canImport(Darwin)
     /// I/O on the driving thread: a TCP echo, both ends on this runtime.
     @Test func tcpEchoOnOneThread() throws {
         let rt = Runtime.currentThread()
@@ -88,6 +91,7 @@ private func pthread_self_id() -> Int {
         }
         #expect(reply == "one thread")
     }
+    #endif
 
     @Test func blockingJobsAndTimers() throws {
         let rt = Runtime.currentThread()

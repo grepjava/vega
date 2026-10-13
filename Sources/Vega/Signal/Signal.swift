@@ -5,6 +5,8 @@ import Synchronization
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 
 // Unix signals as async sequences, as tokio::signal::unix. A sigaction

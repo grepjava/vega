@@ -1,9 +1,13 @@
+// POSIX for now; Windows comes with the IOCP driver.
+#if os(Linux) || canImport(Darwin)
 import CVega
 import Vega
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 
 /// A program to run: Tokio's `tokio::process::Command`.
@@ -227,3 +231,4 @@ private func withOptionalCStrings<R>(_ strings: [String]?, _ body: (UnsafePointe
 private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeMutablePointer<CChar>?>) -> R) -> R {
     withOptionalCStrings(strings) { body($0!) }
 }
+#endif

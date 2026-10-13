@@ -4,6 +4,8 @@ import CVega
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 
 // The byte-stream operations TCP and Unix sockets (and their split halves)

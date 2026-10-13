@@ -1,9 +1,13 @@
+// POSIX for now; Windows comes with the IOCP driver.
+#if os(Linux) || canImport(Darwin)
 import Vega
 import VegaIO
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 
 /// An open file: Tokio's `tokio::fs::File`.
@@ -303,3 +307,4 @@ public struct File: ~Copyable, Sendable {
 }
 
 extension File: AsyncReader, AsyncWriter {}
+#endif

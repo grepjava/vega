@@ -5,6 +5,8 @@ import Synchronization
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 
 /// A TCP server: accept loops that spawn a task per connection, NIO's

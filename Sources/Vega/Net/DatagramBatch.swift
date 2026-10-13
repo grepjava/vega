@@ -4,6 +4,8 @@ import CVega
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 
 /// A set of datagrams in one block of memory, for receiving or sending many

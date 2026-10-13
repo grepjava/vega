@@ -12,7 +12,7 @@ extern "C" {
 
 // ---- current worker (thread-local) -------------------------------------
 // static inline so the read inlines into Swift callers: no call, one TLS load.
-extern __thread void *cv_current_tls;
+extern _Thread_local void *cv_current_tls;
 static inline void *cv_current_get(void) { return cv_current_tls; }
 static inline void cv_current_set(void *worker) { cv_current_tls = worker; }
 

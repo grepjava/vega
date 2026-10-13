@@ -4,6 +4,8 @@ import Synchronization
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
+#elseif os(Windows)
+import ucrt
 #endif
 
 /// One scheduler thread. Everything below the `let`s is touched only by the
