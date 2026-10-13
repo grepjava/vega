@@ -321,3 +321,8 @@ UDP echo, datagrams per second:
 
 - **mpsc_ping_pong and semaphore.** Both park on most operations, so skipping the status record pays off.
 - **mpsc_fan_in.** The receiver rarely parks, so the status record costs little there. It got slower in both modes, and the cause isn't known yet.
+
+## Measurement notes
+
+- **`sleep_many` is bimodal on the box.** A run lands near 2.8 µs per op or near 5.8 µs, with nothing in between. A bisect over eight commits, from bebf35b to 87d7874, run alternately on 2026-10-13, showed both modes at every commit. So `sleep_many` can't confirm a regression from a single run. The likely causes are the 1 ms timer tick against each run's start time, and the box's `powersave` governor, which leaves idle cores at 400 MHz. Compare `sleep_many` only A/B and alternated, across several rounds.
+- **Compare commits A/B on the box,** with both binaries in the same session and alternated. Absolute numbers drift between sessions with the CPU frequency.
