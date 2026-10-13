@@ -451,7 +451,27 @@ Closed-loop p50 at 512 connections was 8.5 ms for Hummingbird on both groups, an
 - **Hummingbird's own layers halve NIO's throughput:** nio-http does 2.0× (closed) to 2.2× (ramp) Hummingbird on the same NIOPosix. So of native Vega's 2.5–2.9× over Hummingbird, about 2× is the framework and 1.15–1.3× is NIO against Vega.
 - **The load generator is likely the limit for both bare servers,** more so closed-loop: oha costs more CPU per request than zrk, and it shares the 8 threads with the server. The closed-loop ratio is the one most likely understated. The plan's target is 1.5× NIO on HTTP/1. Measuring it properly needs the load generator on other cores (`PIN=`) or another machine.
 
+**Pinned, with drivers and profiles, sweep 5** (e8fb356). The server runs with `--workers 4` on physical cores 0–1 (CPUs 0,1,4,5), and oha runs closed-loop on cores 2–3 (CPUs 2,3,6,7), so the two no longer compete for CPU. 512 connections, 15 s, 2 rounds alternated, no errors. System calls are counted by `perf stat -e raw_syscalls:sys_enter` on the server.
+
+| Server | req/s | p50 | p99 | Syscalls per request |
+|---|---|---|---|---|
+| vega-http, io_uring (default) | 126,511 / 122,043 | 4.0–4.2 ms | **5.4–5.9 ms** | **1.0** |
+| vega-http, epoll (`VEGA_DRIVER=epoll`) | 135,821 / 123,027 | 3.7–4.1 ms | 7.7–8.5 ms | 2.0 |
+| nio-http (NIOPosix, epoll) | 100,568 / 98,532 | 5.1 ms | 9.9 ms | 2.0 |
+
+- **Vega is 1.22–1.35× NIO on either driver.** On epoll it makes the same two syscalls per request as NIO (a `read` and a `send`), so the gain is in user space, not in io_uring.
+- **io_uring buys tail latency, not throughput, here.** Multishot receive leaves one syscall per request, the `send`, and p99 is 30–45% lower than on epoll. Throughput is level within the noise between rounds.
+- **Where vega-http's time goes** (`perf record` on the server, io_uring):
+  - The kernel takes 48%. `send` alone is 38%, because on loopback the sender's syscall also runs the receiver's TCP path in softirq. That part would leave the server on a real NIC.
+  - vega-http's own code takes 23%: HTTP parsing (`parseFields`, `findHeadEnd`, the request decoder), `HTTPFields` lookups and the scheduler.
+  - libswiftCore takes 14%: String and Array allocation; retain and release are only about 2%.
+  - libswift_Concurrency takes 9.5%: task switches at each `await`, namely `withStatusRecordLock`, the task allocator and `getPreferredTaskExecutor`.
+- **NIO's profile, for comparison:** kernel 41%, libswiftCore 27% (`swift_retain` and `swift_release` alone are 12.8%), plus `tryCast` and exclusivity checks (`swift_beginAccess`).
+- **Next for Vega's HTTP/1 path:** header names as bytes and allocation-free lookups of `content-length` and `connection`; fewer String allocations per response; and sending through io_uring, or coalescing pipelined responses.
+
 ## Measurement notes
+
+- **Wi-Fi can't drive the HTTP benchmarks.** A load generator on the dev machine reaches the box only over Wi-Fi, with a 7–80 ms round trip. Over Wi-Fi at 512 connections, vega-http and nio-http both measured 15–21k req/s, with no consistent order between rounds, and both measured about 6.4k at 64 connections: the round trip sets the rate. A second machine needs a wired gigabit link.
 
 - **`sleep_many` is bimodal on the box.** A run lands near 2.8 µs per op or near 5.8 µs, with nothing in between. A bisect over eight commits, from bebf35b to 87d7874, run alternately on 2026-10-13, showed both modes at every commit. So `sleep_many` can't confirm a regression from a single run. The likely causes are the 1 ms timer tick against each run's start time, and the box's `powersave` governor, which leaves idle cores at 400 MHz. Compare `sleep_many` only A/B and alternated, across several rounds.
 - **Compare commits A/B on the box,** with both binaries in the same session and alternated. Absolute numbers drift between sessions with the CPU frequency.
