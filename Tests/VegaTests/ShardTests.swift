@@ -1,5 +1,10 @@
 #if os(Linux) || canImport(Darwin)
 import CVega
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 import Testing
 @testable import Vega
 
@@ -40,6 +45,57 @@ import Testing
     /// and Darwin, and more than one in a test process.
     @Test func countsThreads() {
         #expect(cv_thread_count() > 1)
+    }
+
+    @Test func readsTheShardCountFromTheEnvironment() {
+        unsetenv("VEGA_SHARDS")
+        #expect(Runtime.shardsFromEnvironment() == nil)
+        setenv("VEGA_SHARDS", "0", 1)
+        #expect(Runtime.shardsFromEnvironment() == 0)
+        setenv("VEGA_SHARDS", "4", 1)
+        #expect(Runtime.shardsFromEnvironment() == 4)
+        unsetenv("VEGA_SHARDS")
+    }
+}
+
+/// `shards` 0: the sharded body runs here, with threads already running,
+/// and its listeners work as in a shard.
+@Suite struct InProcessShardTests {
+    @Test func runsTheBodyOnceInThisProcess() throws {
+        var options = ShardOptions(shards: 0, workersPerShard: 2)
+        options.listeners = [.tcp(host: "127.0.0.1", port: 0)]
+        var runs = 0
+        var replies: [String] = []
+        var layout: (index: Int, count: Int, workers: Int) = (-1, -1, -1)
+        Runtime.runInProcess(options) { shard in
+            runs += 1
+            layout = (shard.index, shard.count, shard.runtime.workerCount)
+            let port = shard.port()
+            replies = (try? shard.runtime.block { () async throws(IOError) -> [String] in
+                // Two accept loops on the one listener, as a shard may have.
+                var servers: [TCPServer] = []
+                for name in ["a", "b"] {
+                    servers.append(try TCPServer.serve(try shard.listener()) { conn in
+                        var out = IOBuffer(capacity: 8)
+                        out.append(name)
+                        try? await conn.write(out)
+                    })
+                }
+                var got: [String] = []
+                for _ in 0..<4 {
+                    let conn = try await TCPStream.connect(to: SocketAddress(host: "127.0.0.1", port: port))
+                    var buf = IOBuffer(capacity: 8)
+                    while try await conn.read(into: &buf) > 0 {}
+                    got.append(buf.string)
+                }
+                for server in servers { await server.shutdown(gracePeriod: .seconds(1)) }
+                return got
+            }) ?? []
+        }
+        #expect(runs == 1)
+        #expect(layout.index == 0 && layout.count == 1 && layout.workers == 2)
+        #expect(replies.count == 4)
+        #expect(replies.allSatisfy { $0 == "a" || $0 == "b" })
     }
 }
 #endif

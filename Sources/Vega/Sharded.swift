@@ -157,7 +157,9 @@ public enum ShardEvent: Sendable, Equatable {
 @available(visionOS, unavailable)
 public struct ShardOptions: Sendable {
     /// Shard processes; nil: one per last-level cache domain (L3, read from
-    /// sysfs on Linux), else one.
+    /// sysfs on Linux), else one. 0: no shards, `body` runs once in this
+    /// process (see `Runtime.sharded`). The environment variable
+    /// `VEGA_SHARDS`, when set, overrides it.
     public var shards: Int?
     /// Workers in each shard; nil: as many as the shard has CPUs.
     public var workersPerShard: Int?
@@ -231,11 +233,27 @@ extension Runtime {
     /// In a shard, `body` runs on the process's main thread with the
     /// shard's runtime; when it returns, the shard exits 0. A shard gets
     /// SIGTERM if the supervisor dies.
+    ///
+    /// With `shards` 0 (or `VEGA_SHARDS=0` in the environment, which
+    /// overrides `shards`), there is no supervisor and no shard process:
+    /// `body` runs once, in this process, as shard 0 of 1, with a plain
+    /// multi-threaded runtime (`workersPerShard` workers, else one per CPU,
+    /// never pinned) and the listeners bound here. The same `main` then
+    /// serves as one process or as K shards, chosen at deploy time. Nothing
+    /// restarts it and no signal is handled for it; `Runtime.signals` in
+    /// `body` works as in a shard. It may be called after threads exist.
+    /// When `body` returns, the process exits 0.
     public static func sharded(_ options: ShardOptions = ShardOptions(),
                                _ body: @escaping (Shard) -> Void) -> Never {
         if let launched = ExecShard.fromEnvironment(options) {
             Supervisor.runShard(options, launched.index, count: launched.count, cpus: launched.cpus,
                                 listeners: launched.listeners, body: body)
+        }
+        var options = options
+        if let shards = shardsFromEnvironment() { options.shards = shards }
+        if options.shards == 0 {
+            runInProcess(options, body)
+            exit(0)
         }
         let threads = cv_thread_count()
         precondition(threads <= 1, "Runtime.sharded must run before any thread starts (\(threads) running)")
@@ -245,6 +263,34 @@ extension Runtime {
         let listeners = prepareListeners(options)
         var supervisor = Supervisor(options: options, layout: layout, listeners: listeners, body: body)
         supervisor.run()
+    }
+
+    /// `VEGA_SHARDS`: a shard count, or nil when unset. Anything but a
+    /// count ends the process.
+    static func shardsFromEnvironment() -> Int? {
+        guard let raw = getenv("VEGA_SHARDS") else { return nil }
+        let text = String(cString: raw)
+        guard let shards = Int(text), shards >= 0 else {
+            let msg = "vega: VEGA_SHARDS=\(text) is not a shard count (0 runs in-process)\n"
+            _ = msg.withCString { write(2, $0, strlen($0)) }
+            exit(1)
+        }
+        return shards
+    }
+
+    /// `shards` 0: `body` as shard 0 of 1 on a runtime of this process,
+    /// with every listener bound here once and shared by its `listener()`
+    /// calls. Returns when `body` does, with the runtime shut down.
+    static func runInProcess(_ options: ShardOptions, _ body: (Shard) -> Void) {
+        let cpus = Topology.cacheDomains().flatMap { $0 }
+        let workers = options.workersPerShard ?? Int(cv_cpu_count())
+        var local = options
+        local.listenerMode = .shared
+        let listeners = prepareListeners(local)
+        let rt = Runtime(scheduler: Scheduler(workers: max(workers, 1), name: "\(options.name)0", pin: false))
+        body(Shard(index: 0, count: 1, cpus: cpus, runtime: rt, listeners: listeners))
+        rt.shutdown()
+        for l in listeners where l.shared >= 0 { close(l.shared) }
     }
 
     /// Bind the shared listeners, or hold the ports of per-shard ones that

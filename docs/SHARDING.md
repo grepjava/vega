@@ -51,7 +51,7 @@ Runtime.sharded(options) { shard in
 
 | `ShardOptions` | Default | Meaning |
 |---|---|---|
-| `shards` | one per cache domain | Number of shard processes |
+| `shards` | one per cache domain | Number of shard processes; 0 runs in-process (see below). `VEGA_SHARDS` overrides it |
 | `workersPerShard` | the shard's CPU count | Workers in each shard's runtime |
 | `pinThreads` | `true` | Pin each shard's workers to its CPUs (Linux; Darwin can't pin) |
 | `listeners` | `[]` | Listening sockets the shards serve (`.tcp(host:port:backlog:)`) |
@@ -63,6 +63,26 @@ Runtime.sharded(options) { shard in
 | `onEvent` | `nil` | Called in the supervisor for each `ShardEvent` |
 
 **Cache domains.** On Linux they are read from sysfs: CPUs that share a last-level cache (L3 on most x86 parts) form one domain. On Darwin they are the performance levels (`hw.perflevelN.logicalcpu`), each a cluster with its own L2. An M1 has two domains of 4 CPUs, so the default there is 2 shards of 4 workers. Elsewhere, or when the system reports nothing, all CPUs form one domain. If `shards` doesn't match the number of domains, the CPUs are split into even contiguous slices.
+
+## Running without shards
+
+With `shards` 0, `Runtime.sharded` starts no supervisor and no shard processes. It runs the closure once, in the calling process, the way a plain Tokio-style runtime would:
+
+- The closure gets shard 0 of 1. `shard.runtime` is a multi-threaded runtime with `workersPerShard` workers, or one per CPU. Its threads are never pinned.
+- `options.listeners` are bound in this process, once each. `shard.listener(i)` works as in a shard, and every call shares the one socket.
+- Nothing restarts the process, and the supervisor's signal handling doesn't apply. A `Runtime.signals(SIGTERM)` drain in the closure works the same as in a shard.
+- There is no single-thread check, so threads may already exist.
+- When the closure returns, the process exits 0.
+
+The environment variable `VEGA_SHARDS` overrides `options.shards`. One `main` therefore runs as one process or as K shards, chosen at deploy time:
+
+```sh
+VEGA_SHARDS=0 ./server   # one process, one runtime
+VEGA_SHARDS=4 ./server   # a supervisor and 4 shards
+./server                 # whatever ShardOptions.shards says
+```
+
+A value that isn't a count ends the process with exit code 1 and a message.
 
 ## Launch modes
 
