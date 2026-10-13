@@ -336,6 +336,29 @@ Experiments, two rounds each:
 
 Neither change is in. The remaining cost is the runtime's linear unlink, which only bites a group whose children all finish at once; a doubly linked child list in the patched runtime would remove it on Linux.
 
+## Network.framework backend, indicative (2026-10-13)
+
+TCP echo on the same M1 laptop as the macOS sections above, measuring what `IOBackend.network` costs against kqueue: `vega-echo` with 4 workers, driven by `echo-load` with 64-byte requests, 4 load threads, 10 s after a 2 s warm-up. The two backends ran in alternating rounds with a load average of about 4. "Pure Network.framework" is a 20-line server with no Vega, echoing on each connection's own dispatch queue. That server was measured in a single round of 8 s runs.
+
+| Connections | Vega, kqueue | Vega, Network.framework | Pure Network.framework |
+|---|---|---|---|
+| 1, req/s (p50) | 49,400 / 49,612 (20 µs) | 19,078 / 19,202 (51 µs) | 28,563 (35 µs) |
+| 64, req/s (p99) | 196,324 / 197,366 (600 µs) | 82,539 / 81,620 (1.23 ms) | 70,113 (1.14 ms) |
+| 256, req/s (p99) | 197,711 / 198,331 (2.5 ms) | 86,892 / 84,128 (3.9–4.6 ms) | 68,874 (4.4 ms) |
+
+- **The ceiling is Network.framework itself.**
+  - On its own, Network.framework echoes about 70k requests per second, a third of what Vega does over kqueue.
+  - A profile of Vega on Network.framework at 64 connections (`sample`, 4 s) puts 24% of busy samples in dispatch thread start-up (`start_wqthread`), 27% in the kernel (`sendmsg`, `recvmsg`, wakes), and 17% in Objective-C retain and release and malloc.
+  - Vega's own code, bridging included, is 3.9%.
+- **The bridge costs about 16 µs of latency.**
+  - With one connection, a round trip takes 51 µs against 35 µs for the pure server.
+  - That is the hop from Network.framework's callback queue to a Vega worker and back, twice per request.
+- **Under load the bridge pays for itself.** At 64 and 256 connections Vega over Network.framework is 16–26% ahead of the pure server, because Vega's workers run connection tasks in parallel while Network.framework only delivers callbacks.
+- **Routing the callbacks through fewer queues didn't help.** Giving every connection one of 4 serial target queues instead of one concurrent queue measured 77,620 req/s at 64 connections. That is slightly worse, so it was not kept.
+- **No cost to kqueue.** Every stream operation now checks whether the socket is a Network.framework one. Through that branch, kqueue measures 196,324 / 197,366 req/s at 64 connections, against 197,330 / 197,374 before.
+
+So on macOS, kqueue stays the default for servers. `.network` is for iOS, tvOS, watchOS and visionOS, and for clients that need what only Network.framework provides: cellular and VPN bring-up, interface choice, system proxies, and the system's own name resolution and Happy Eyeballs. In this test, Vega served 16–26% more than callback-style Network.framework code under load; the iOS simulator runs the network suites but wasn't benchmarked.
+
 ## Sync primitives (2026-10-12)
 
 8 workers, executor preference, median of 9 runs, in ns/op. Tokio's numbers come from the same benchmarks in `tokio-bench`.
