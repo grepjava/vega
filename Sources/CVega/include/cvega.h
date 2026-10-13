@@ -203,6 +203,65 @@ int cv_shutdown_write(int fd);
 /// The system's DNS servers and search suffixes (adapters that are up), as
 /// resolv.conf text in out. Its length, or -1.
 int cv_system_dns_config(char *out, int len);
+
+// Files on Windows, for VegaFS: Win32 handles in the int descriptor, UTF-8
+// paths. Functions return 0 or an errno value unless they say otherwise.
+#define CV_FILE_READ 1
+#define CV_FILE_WRITE 2
+#define CV_FILE_APPEND 4
+#define CV_FILE_CREATE 8
+#define CV_FILE_EXCL 16
+#define CV_FILE_TRUNC 32
+#define CV_FILE_KIND_OTHER 0
+#define CV_FILE_KIND_FILE 1
+#define CV_FILE_KIND_DIR 2
+#define CV_FILE_KIND_LINK 3
+typedef struct cv_file_stat {
+    int kind;
+    uint32_t mode;  // 0444 or 0666 (read-only or not), plus 0111 for a directory
+    uint32_t nlink;
+    uint64_t size;
+    uint64_t device; // volume serial
+    uint64_t inode;  // file index
+    int64_t atime_s, mtime_s, ctime_s;
+    int32_t atime_ns, mtime_ns, ctime_ns;
+} cv_file_stat;
+typedef struct cv_dir_entry {
+    char *name;
+    int kind;
+} cv_dir_entry;
+int cv_file_open(const char *path, int flags, unsigned mode, int *fd);
+int cv_file_close(int fd);
+int cv_file_dup(int fd, int *out);
+/// At `offset`, or at the position (advancing it) when offset < 0. Bytes,
+/// or -errno. An offset leaves the position alone.
+intptr_t cv_file_read(int fd, void *buf, intptr_t len, int64_t offset);
+intptr_t cv_file_write(int fd, const void *buf, intptr_t len, int64_t offset);
+/// whence 0 start, 1 current, 2 end: the new position, or -errno.
+int64_t cv_file_seek(int fd, int64_t offset, int whence);
+int cv_file_sync(int fd);
+int cv_file_set_length(int fd, int64_t length);
+int cv_file_fstat(int fd, cv_file_stat *out);
+int cv_file_stat_path(const char *path, int follow, cv_file_stat *out);
+/// Only the write bits count: none makes it read-only.
+int cv_file_chmod(int fd, unsigned mode);
+int cv_fs_chmod(const char *path, unsigned mode);
+int cv_fs_mkdir(const char *path);
+int cv_fs_rmdir(const char *path);
+int cv_fs_unlink(const char *path);
+int cv_fs_rename(const char *from, const char *to);
+int cv_fs_link(const char *existing, const char *link);
+int cv_fs_symlink(const char *target, const char *link);
+/// The link's target as stored, in out: its length, or -errno.
+int cv_fs_readlink(const char *path, char *out, int len);
+int cv_fs_realpath(const char *path, char *out, int len);
+/// The names in a directory (no . or ..): free with cv_fs_list_free.
+int cv_fs_list(const char *path, cv_dir_entry **entries, int *count);
+void cv_fs_list_free(cv_dir_entry *entries, int count);
+/// A new directory in the temp directory: its path in out.
+int cv_fs_temp_dir(const char *prefix, char *out, int len);
+/// Copy a file, replacing `to`: the bytes, or -errno.
+int64_t cv_fs_copy(const char *from, const char *to);
 #endif
 
 // ---- sockets -------------------------------------------------------------

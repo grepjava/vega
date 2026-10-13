@@ -1,5 +1,3 @@
-// POSIX for now; Windows comes with the IOCP driver.
-#if os(Linux) || canImport(Darwin)
 import CVega
 import Vega
 #if canImport(Glibc)
@@ -23,6 +21,11 @@ public struct DirectoryEntry: Sendable, Hashable {
 /// Operations on paths: Tokio's `tokio::fs` functions. Each runs on the
 /// blocking pool (path lookups have no non-blocking form on any driver),
 /// and runs to completion even if the caller is cancelled.
+///
+/// On Windows, permissions are the read-only attribute: a mode without
+/// write bits makes a file read-only, and metadata reports 0o444 or 0o666
+/// (0o555 or 0o777 for a directory). Creating a symbolic link needs
+/// developer mode or the privilege to.
 public enum FileSystem {
     // MARK: - Whole files
 
@@ -30,11 +33,11 @@ public enum FileSystem {
     public static func read(_ path: String) async throws(IOError) -> [UInt8] {
         try checkPath(path)
         return try await Runtime.blocking { () throws(IOError) -> [UInt8] in
-            let fd = try posixOpen(path, O_RDONLY | O_CLOEXEC, 0)
-            defer { _ = posixClose(fd) }
+            let fd = try Sys.open(path, .reading)
+            defer { _ = Sys.close(fd) }
             // The size is a hint: the file may grow or shrink meanwhile, and
             // /proc files say 0.
-            let hint = (try? posixFstat(fd)).map { Int($0.st_size) } ?? 0
+            let hint = (try? Sys.fstat(fd)).map(\.size) ?? 0
             var bytes = [UInt8](repeating: 0, count: max(hint, 0) + 1)
             var count = 0
             while true {
@@ -42,7 +45,7 @@ public enum FileSystem {
                 // (withUnsafeMutableBytes rethrows untyped: carry the error out.)
                 let n = try bytes.withUnsafeMutableBytes { raw in
                     Result { () throws(IOError) -> Int in
-                        try posixRead(fd, raw.baseAddress! + count, raw.count - count, -1)
+                        try Sys.read(fd, raw.baseAddress! + count, raw.count - count, -1)
                     }
                 }.get()
                 if n == 0 { break }
@@ -62,11 +65,11 @@ public enum FileSystem {
     public static func write(_ path: String, contents bytes: [UInt8]) async throws(IOError) {
         try checkPath(path)
         try await Runtime.blocking { () throws(IOError) in
-            let fd = try posixOpen(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0o666)
-            defer { _ = posixClose(fd) }
+            let fd = try Sys.open(path, .replacing)
+            defer { _ = Sys.close(fd) }
             try bytes.withUnsafeBytes { raw in
                 Result { () throws(IOError) in
-                    if let base = raw.baseAddress { try posixWriteAll(fd, base, raw.count, -1) }
+                    if let base = raw.baseAddress { try Sys.writeAll(fd, base, raw.count, -1) }
                 }
             }.get()
         }
@@ -83,18 +86,7 @@ public enum FileSystem {
         try checkPath(source)
         try checkPath(destination)
         return try await Runtime.blocking { () throws(IOError) -> Int in
-            let src = try posixOpen(source, O_RDONLY | O_CLOEXEC, 0)
-            defer { _ = posixClose(src) }
-            let st = try posixFstat(src)
-            guard FileKind(mode: UInt32(st.st_mode)) == .file else { throw IOError(code: EINVAL) }
-            let mode = UInt32(st.st_mode) & 0o7777
-            let dst = try posixOpen(destination, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode)
-            defer { _ = posixClose(dst) }
-            let n = cv_copy_fd(src, dst)
-            if n < 0 { throw IOError(code: Int32(-n)) }
-            // An existing destination keeps its mode through O_CREAT.
-            _ = try retrying { fchmod(dst, mode_t(mode)) }
-            return Int(n)
+            try Sys.copy(source, destination)
         }
     }
 
@@ -104,7 +96,7 @@ public enum FileSystem {
     public static func metadata(_ path: String, followingSymbolicLinks: Bool = true) async throws(IOError) -> FileMetadata {
         try checkPath(path)
         return try await Runtime.blocking { () throws(IOError) -> FileMetadata in
-            FileMetadata(try posixStat(path, follow: followingSymbolicLinks))
+            try Sys.stat(path, follow: followingSymbolicLinks)
         }
     }
 
@@ -123,7 +115,7 @@ public enum FileSystem {
     public static func setPermissions(_ path: String, _ permissions: UInt32) async throws(IOError) {
         try checkPath(path)
         try await Runtime.blocking { () throws(IOError) in
-            _ = try retrying { chmod(path, mode_t(permissions)) }
+            try Sys.chmod(path, permissions)
         }
     }
 
@@ -133,7 +125,7 @@ public enum FileSystem {
     public static func removeFile(_ path: String) async throws(IOError) {
         try checkPath(path)
         try await Runtime.blocking { () throws(IOError) in
-            _ = try retrying { unlink(path) }
+            try Sys.unlink(path)
         }
     }
 
@@ -143,7 +135,7 @@ public enum FileSystem {
         try checkPath(source)
         try checkPath(destination)
         try await Runtime.blocking { () throws(IOError) in
-            _ = try retrying { sysRename(source, destination) }
+            try Sys.rename(source, destination)
         }
     }
 
@@ -152,7 +144,7 @@ public enum FileSystem {
         try checkPath(link)
         try checkPath(original)
         try await Runtime.blocking { () throws(IOError) in
-            _ = try retrying { sysLink(original, link) }
+            try Sys.link(original, link)
         }
     }
 
@@ -162,7 +154,7 @@ public enum FileSystem {
         try checkPath(link)
         try checkPath(target)
         try await Runtime.blocking { () throws(IOError) in
-            _ = try retrying { symlink(target, link) }
+            try Sys.symlink(target, link)
         }
     }
 
@@ -170,15 +162,7 @@ public enum FileSystem {
     public static func readSymbolicLink(_ path: String) async throws(IOError) -> String {
         try checkPath(path)
         return try await Runtime.blocking { () throws(IOError) -> String in
-            var size = 256
-            while true {
-                var buf = [CChar](repeating: 0, count: size)
-                let n = try retrying { readlink(path, &buf, size) }
-                if n < size {
-                    return String(decoding: buf[..<n].map { UInt8(bitPattern: $0) }, as: UTF8.self)
-                }
-                size *= 2 // it may have been cut short
-            }
+            try Sys.readlink(path)
         }
     }
 
@@ -187,9 +171,7 @@ public enum FileSystem {
     public static func canonicalPath(_ path: String) async throws(IOError) -> String {
         try checkPath(path)
         return try await Runtime.blocking { () throws(IOError) -> String in
-            guard let resolved = realpath(path, nil) else { throw IOError(code: errno) }
-            defer { free(resolved) }
-            return String(cString: resolved)
+            try Sys.realpath(path)
         }
     }
 
@@ -213,7 +195,7 @@ public enum FileSystem {
             if recursive {
                 try removeTree(path)
             } else {
-                _ = try retrying { rmdir(path) }
+                try Sys.rmdir(path)
             }
         }
     }
@@ -228,33 +210,26 @@ public enum FileSystem {
     }
 
     /// Create a new, empty directory in the system's temporary directory
-    /// (`$TMPDIR`, else /tmp), readable by its owner only. Returns its path.
+    /// (`$TMPDIR`, else /tmp; on Windows, %TEMP%), readable by its owner
+    /// only on POSIX. Returns its path.
     public static func createTemporaryDirectory(prefix: String = "vega-") async throws(IOError) -> String {
         try checkPath(prefix)
         return try await Runtime.blocking { () throws(IOError) -> String in
-            var base = getenv("TMPDIR").map { String(cString: $0) } ?? "/tmp"
-            while base.count > 1 && base.hasSuffix("/") { base.removeLast() }
-            var template = Array("\(base)/\(prefix)XXXXXX".utf8CString)
-            guard let made = mkdtemp(&template) else { throw IOError(code: errno) }
-            return String(cString: made)
+            try Sys.temporaryDirectory(prefix: prefix)
         }
     }
 }
 
 // MARK: - On the blocking pool
 
-// rename(2) and link(2), under names FileSystem's own methods don't shadow.
-private func sysRename(_ from: String, _ to: String) -> Int32 { rename(from, to) }
-private func sysLink(_ from: String, _ to: String) -> Int32 { link(from, to) }
-
 /// Whether `path` is a directory, or a link to one.
 private func isDirectory(_ path: String) -> Bool {
-    (try? posixStat(path, follow: true)).map { FileKind(mode: UInt32($0.st_mode)) } == .directory
+    (try? Sys.stat(path, follow: true))?.kind == .directory
 }
 
 private func makeDirectory(_ path: String, intermediates: Bool, mode: UInt32) throws(IOError) {
-    if mkdir(path, mode_t(mode)) == 0 { return }
-    let err = errno
+    let err = Sys.mkdir(path, mode)
+    if err == 0 { return }
     guard intermediates else { throw IOError(code: err) }
     switch err {
     case EEXIST:
@@ -264,10 +239,15 @@ private func makeDirectory(_ path: String, intermediates: Bool, mode: UInt32) th
     case ENOENT:
         let parent = parentPath(path)
         guard !parent.isEmpty, parent != path else { throw IOError(code: ENOENT) }
+        // A parent that is there but isn't a directory: ENOTDIR, as POSIX
+        // says it (Windows reports a missing path).
+        if let kind = (try? Sys.stat(parent, follow: true))?.kind, kind != .directory {
+            throw IOError(code: ENOTDIR)
+        }
         try makeDirectory(parent, intermediates: true, mode: mode)
-        if mkdir(path, mode_t(mode)) == 0 { return }
+        let again = Sys.mkdir(path, mode)
+        if again == 0 { return }
         // Another process may have made it meanwhile.
-        let again = errno
         if again == EEXIST && isDirectory(path) { return }
         throw IOError(code: again)
     default:
@@ -275,48 +255,44 @@ private func makeDirectory(_ path: String, intermediates: Bool, mode: UInt32) th
     }
 }
 
+/// Whether `c` separates path components here.
+private func isSeparator(_ c: Character) -> Bool {
+    #if os(Windows)
+    c == "/" || c == "\\"
+    #else
+    c == "/"
+    #endif
+}
+
 /// `path` without its last component ("" when there's none).
 private func parentPath(_ path: String) -> String {
     var p = Substring(path)
-    while p.count > 1 && p.hasSuffix("/") { p.removeLast() }
-    guard let slash = p.lastIndex(of: "/") else { return "" }
-    if slash == p.startIndex { return "/" }
+    while p.count > 1, let last = p.last, isSeparator(last) { p.removeLast() }
+    guard let slash = p.lastIndex(where: isSeparator) else { return "" }
+    if slash == p.startIndex { return String(p[slash]) }
+    #if os(Windows)
+    // "C:\x" → "C:\", not the drive-relative "C:".
+    if p.distance(from: p.startIndex, to: slash) == 2, p.dropFirst().first == ":" { return String(p[...slash]) }
+    #endif
     return String(p[..<slash])
 }
 
 private func joined(_ directory: String, _ name: String) -> String {
-    directory.hasSuffix("/") ? directory + name : directory + "/" + name
+    if let last = directory.last, isSeparator(last) { return directory + name }
+    return directory + "/" + name
 }
 
 private func listDirectory(_ path: String) throws(IOError) -> [DirectoryEntry] {
-    guard let dir = opendir(path) else { throw IOError(code: errno) }
-    defer { closedir(dir) }
-    var entries: [DirectoryEntry] = []
-    while true {
-        errno = 0
-        guard let entry = readdir(dir) else {
-            if errno != 0 { throw IOError(code: errno) }
-            return entries
-        }
-        let name = withUnsafePointer(to: &entry.pointee.d_name) { field in
-            // 256 bytes on Linux, 1024 on Darwin.
-            field.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: field.pointee)) {
-                String(cString: $0)
-            }
-        }
-        if name == "." || name == ".." { continue }
-        let full = joined(path, name)
-        let kind = FileKind(direntType: entry.pointee.d_type)
-            ?? (try? posixStat(full, follow: false)).map { FileKind(mode: UInt32($0.st_mode)) }
-            ?? .unknown
-        entries.append(DirectoryEntry(name: name, path: full, kind: kind))
+    try Sys.list(path).map { entry in
+        let full = joined(path, entry.name)
+        let kind = entry.kind ?? (try? Sys.stat(full, follow: false))?.kind ?? .unknown
+        return DirectoryEntry(name: entry.name, path: full, kind: kind)
     }
 }
 
 private func removeTree(_ path: String) throws(IOError) {
-    let st = try posixStat(path, follow: false)
-    guard FileKind(mode: UInt32(st.st_mode)) == .directory else {
-        _ = try retrying { unlink(path) }
+    guard try Sys.stat(path, follow: false).kind == .directory else {
+        try Sys.unlink(path)
         return
     }
     for entry in try listDirectory(path) {
@@ -324,12 +300,11 @@ private func removeTree(_ path: String) throws(IOError) {
             try removeTree(entry.path)
         } else {
             do {
-                _ = try retrying { unlink(entry.path) }
+                try Sys.unlink(entry.path)
             } catch where error.code == ENOENT {
                 // Gone already.
             }
         }
     }
-    _ = try retrying { rmdir(path) }
+    try Sys.rmdir(path)
 }
-#endif

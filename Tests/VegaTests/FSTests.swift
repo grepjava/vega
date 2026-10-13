@@ -1,4 +1,4 @@
-#if os(Linux) || canImport(Darwin)
+#if os(Linux) || canImport(Darwin) || os(Windows)
 import Testing
 @testable import Vega
 import VegaFS
@@ -10,6 +10,16 @@ import Darwin
 #elseif os(Windows)
 import ucrt
 #endif
+
+/// The permissions a file set to `mode` reports: Windows keeps only
+/// whether it's writable.
+private func reported(_ mode: UInt32) -> UInt32 {
+    #if os(Windows)
+    mode & 0o222 != 0 ? 0o666 : 0o444
+    #else
+    mode
+    #endif
+}
 
 private func bytes(_ s: String) -> IOBuffer {
     var b = IOBuffer(capacity: max(s.utf8.count, 1))
@@ -154,6 +164,7 @@ private func withScratch<T: Sendable>(
         #expect(text == "abcd")
     }
 
+    #if os(Linux)
     /// On the uring driver, File's reads, writes, syncs and opens go through
     /// the ring: no blocking thread starts.
     @Test func ringOperationsSkipTheBlockingPool() throws {
@@ -176,6 +187,7 @@ private func withScratch<T: Sendable>(
         #expect(text == "ring")
         #expect(rt.scheduler.blocking.threadCount == 0)
     }
+    #endif
 
     /// Files are byte streams: VegaIO's copy and codecs work on them.
     @Test func filesAreStreams() throws {
@@ -206,10 +218,10 @@ private func withScratch<T: Sendable>(
             let mode = try await f.metadata().permissions
             return (meta, mode, try await FileSystem.metadata(dir))
         }
-        #expect(meta.isFile && meta.size == 5 && meta.permissions == 0o640)
+        #expect(meta.isFile && meta.size == 5 && meta.permissions == reported(0o640))
         #expect(meta.linkCount == 1)
         #expect(meta.modified.seconds > 1_600_000_000)
-        #expect(mode == 0o600)
+        #expect(mode == reported(0o600))
         #expect(dirMeta.isDirectory)
     }
 
@@ -282,7 +294,7 @@ private func withScratch<T: Sendable>(
         #expect(r.2)
         #expect(r.3)
         #expect(r.4 == 8)
-        #expect(r.5 == 0o604)
+        #expect(r.5 == reported(0o604))
         #expect(r.6 == "contents")
         #expect(r.7)
         #expect(r.8)

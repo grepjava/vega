@@ -1,5 +1,3 @@
-// POSIX for now; Windows comes with the IOCP driver.
-#if os(Linux) || canImport(Darwin)
 import Vega
 import VegaIO
 #if canImport(Glibc)
@@ -66,32 +64,27 @@ public struct File: ~Copyable, Sendable {
         /// Append, creating the file if needed.
         public static let appending = Options(append: true, create: true)
 
-        /// The open(2) flags, or EINVAL for a combination that makes no sense.
-        var flags: Int32 {
+        /// What to open for, or EINVAL for a combination that makes no sense.
+        var request: OpenRequest {
             get throws(IOError) {
                 let writes = write || append
-                var flags: Int32
-                switch (read, writes) {
-                case (true, false): flags = O_RDONLY
-                case (false, true): flags = O_WRONLY
-                case (true, true): flags = O_RDWR
-                case (false, false): throw IOError(code: EINVAL)
-                }
-                if append { flags |= O_APPEND }
+                guard read || writes else { throw IOError(code: EINVAL) }
+                var r = OpenRequest(read: read, write: write, append: append, permissions: permissions)
                 if createNew {
                     guard writes else { throw IOError(code: EINVAL) }
-                    flags |= O_CREAT | O_EXCL
+                    r.create = true
+                    r.exclusive = true
                 } else {
                     if truncate {
                         guard write, !append else { throw IOError(code: EINVAL) }
-                        flags |= O_TRUNC
+                        r.truncate = true
                     }
                     if create {
                         guard writes else { throw IOError(code: EINVAL) }
-                        flags |= O_CREAT
+                        r.create = true
                     }
                 }
-                return flags | O_CLOEXEC
+                return r
             }
         }
     }
@@ -111,22 +104,23 @@ public struct File: ~Copyable, Sendable {
         self.descriptor = descriptor
     }
 
-    deinit { _ = posixClose(descriptor) }
+    deinit { _ = Sys.close(descriptor) }
 
     /// Open `path` with `options` (read only by default).
     public static func open(_ path: String, options: Options = .reading) async throws(IOError) -> File {
         try checkPath(path)
-        let flags = try options.flags
-        let mode = options.permissions
+        let request = try options.request
+        #if !os(Windows)
         // The ring reads the path until the open completes, which the call
         // waits for even when cancelled.
         let cpath = strdup(path)!
         defer { free(cpath) }
-        if let res = await FileIO.open(cpath, flags: flags, mode: mode) {
+        if let res = await FileIO.open(cpath, flags: request.posixFlags, mode: request.permissions) {
             return File(adopting: Int32(try ringResult(res)))
         }
+        #endif
         return File(adopting: try await Runtime.blocking { () throws(IOError) -> Int32 in
-            try posixOpen(path, flags, mode)
+            try Sys.open(path, request)
         })
     }
 
@@ -177,7 +171,7 @@ public struct File: ~Copyable, Sendable {
         } else {
             nonisolated(unsafe) let dst = buffer.spareBytes
             n = try await Runtime.blocking { () throws(IOError) -> Int in
-                try posixRead(fd, dst, want, offset)
+                try Sys.read(fd, dst, want, offset)
             }
         }
         buffer.count += n
@@ -221,7 +215,7 @@ public struct File: ~Copyable, Sendable {
                 nonisolated(unsafe) let rest = base + done
                 let left = count - done
                 try await Runtime.blocking { () throws(IOError) in
-                    try posixWriteAll(fd, rest, left, at)
+                    try Sys.writeAll(fd, rest, left, at)
                 }
                 return
             }
@@ -237,12 +231,11 @@ public struct File: ~Copyable, Sendable {
     @discardableResult
     public func seek(_ origin: SeekOrigin) throws(IOError) -> Int {
         let (offset, whence): (Int, Int32) = switch origin {
-        case .start(let n): (n, SEEK_SET)
-        case .current(let n): (n, SEEK_CUR)
-        case .end(let n): (n, SEEK_END)
+        case .start(let n): (n, 0)
+        case .current(let n): (n, 1)
+        case .end(let n): (n, 2)
         }
-        let fd = descriptor
-        return Int(try retrying { lseek(fd, off_t(offset), whence) })
+        return try Sys.seek(descriptor, offset, whence)
     }
 
     /// Flush the file's data and metadata to the device (fsync).
@@ -264,13 +257,13 @@ public struct File: ~Copyable, Sendable {
             return
         }
         #endif
-        try await Runtime.blocking { () throws(IOError) in try posixSync(fd, dataOnly: dataOnly) }
+        try await Runtime.blocking { () throws(IOError) in try Sys.sync(fd, dataOnly: dataOnly) }
     }
 
     public func metadata() async throws(IOError) -> FileMetadata {
         let fd = descriptor
         return try await Runtime.blocking { () throws(IOError) -> FileMetadata in
-            FileMetadata(try posixFstat(fd))
+            try Sys.fstat(fd)
         }
     }
 
@@ -278,7 +271,7 @@ public struct File: ~Copyable, Sendable {
     public func setLength(_ length: Int) async throws(IOError) {
         let fd = descriptor
         try await Runtime.blocking { () throws(IOError) in
-            _ = try retrying { ftruncate(fd, off_t(length)) }
+            try Sys.setLength(fd, length)
         }
     }
 
@@ -286,14 +279,14 @@ public struct File: ~Copyable, Sendable {
     public func setPermissions(_ permissions: UInt32) async throws(IOError) {
         let fd = descriptor
         try await Runtime.blocking { () throws(IOError) in
-            _ = try retrying { fchmod(fd, mode_t(permissions)) }
+            try Sys.chmod(fd, permissions)
         }
     }
 
     /// A second descriptor for the same open file, sharing its position.
     public func duplicate() throws(IOError) -> File {
         let fd = descriptor
-        return File(adopting: try retrying { fcntl(fd, F_DUPFD_CLOEXEC, 0) })
+        return File(adopting: try Sys.duplicate(fd))
     }
 
     /// Close the file, reporting an error close(2) returns (some file
@@ -302,9 +295,9 @@ public struct File: ~Copyable, Sendable {
     public consuming func close() throws(IOError) {
         let fd = descriptor
         discard self
-        if posixClose(fd) != 0 && errno != EINTR { throw IOError(code: errno) }
+        let e = Sys.close(fd)
+        if e != 0 { throw IOError(code: e) }
     }
 }
 
 extension File: AsyncReader, AsyncWriter {}
-#endif

@@ -9,6 +9,7 @@
 #include <mstcpip.h>
 #include <mswsock.h>
 #include <iphlpapi.h>
+#include <winioctl.h>
 #include <windows.h>
 #include <errno.h>
 #include <limits.h>
@@ -503,6 +504,512 @@ int cv_signal_raise(int signo) {
     if (signo <= 0 || signo >= CV_NSIG || !InterlockedCompareExchange(&sig_installed[signo], 0, 0)) return EINVAL;
     sig_deliver(signo);
     return 0;
+}
+
+// ---- files (VegaFS) -------------------------------------------------------
+// Files as Win32 handles (they fit the int descriptor, as sockets do), with
+// paths in UTF-8 converted to UTF-16. Errors come back as errno values.
+
+static int map_win_error(DWORD e) {
+    switch (e) {
+    case ERROR_FILE_NOT_FOUND: case ERROR_PATH_NOT_FOUND: case ERROR_INVALID_DRIVE:
+    case ERROR_BAD_NETPATH: case ERROR_BAD_PATHNAME: return ENOENT;
+    case ERROR_ACCESS_DENIED: case ERROR_SHARING_VIOLATION: case ERROR_LOCK_VIOLATION:
+    case ERROR_PRIVILEGE_NOT_HELD: return EACCES;
+    case ERROR_FILE_EXISTS: case ERROR_ALREADY_EXISTS: return EEXIST;
+    case ERROR_DIR_NOT_EMPTY: return ENOTEMPTY;
+    case ERROR_DIRECTORY: return ENOTDIR;
+    case ERROR_INVALID_NAME: case ERROR_INVALID_PARAMETER: return EINVAL;
+    case ERROR_FILENAME_EXCED_RANGE: return ENAMETOOLONG;
+    case ERROR_DISK_FULL: case ERROR_HANDLE_DISK_FULL: return ENOSPC;
+    case ERROR_NOT_ENOUGH_MEMORY: case ERROR_OUTOFMEMORY: return ENOMEM;
+    case ERROR_TOO_MANY_OPEN_FILES: return EMFILE;
+    case ERROR_NOT_SAME_DEVICE: return EXDEV;
+    case ERROR_INVALID_HANDLE: return EBADF;
+    case ERROR_NOT_SUPPORTED: case ERROR_NOT_A_REPARSE_POINT: return EINVAL;
+    case ERROR_NOT_READY: return EAGAIN;
+    default: return EIO;
+    }
+}
+
+static int last_win_error(void) { return map_win_error(GetLastError()); }
+
+/// UTF-8 to a malloc'd UTF-16 string, forward slashes turned back (some
+/// calls, symbolic link targets among them, take the path as written).
+static wchar_t *wide(const char *s) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    if (n <= 0) return NULL;
+    wchar_t *w = malloc((size_t)n * sizeof(wchar_t));
+    if (!w) return NULL;
+    MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
+    for (wchar_t *p = w; *p; p++)
+        if (*p == L'/') *p = L'\\';
+    return w;
+}
+
+/// UTF-16 to UTF-8 in out; the length, or -1 if it doesn't fit.
+static int narrow(const wchar_t *w, int wlen, char *out, int len) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, wlen, out, len - 1, NULL, NULL);
+    if (n <= 0 && wlen != 0) return -1;
+    out[n] = 0;
+    return n;
+}
+
+static HANDLE as_handle(int fd) { return (HANDLE)(intptr_t)fd; }
+
+int cv_file_open(const char *path, int flags, unsigned mode, int *fd) {
+    wchar_t *w = wide(path);
+    if (!w) return EINVAL;
+    DWORD access = 0;
+    if (flags & CV_FILE_READ) access |= GENERIC_READ;
+    // Appending: data goes to the end however the position moves.
+    if (flags & CV_FILE_APPEND) access |= FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE;
+    else if (flags & CV_FILE_WRITE) access |= GENERIC_WRITE;
+    DWORD disposition;
+    if (flags & CV_FILE_EXCL) disposition = CREATE_NEW;
+    else if ((flags & CV_FILE_CREATE) && (flags & CV_FILE_TRUNC)) disposition = CREATE_ALWAYS;
+    else if (flags & CV_FILE_CREATE) disposition = OPEN_ALWAYS;
+    else if (flags & CV_FILE_TRUNC) disposition = TRUNCATE_EXISTING;
+    else disposition = OPEN_EXISTING;
+    // Without write permission bits, a new file is read-only.
+    DWORD attrs = (mode & 0222) ? FILE_ATTRIBUTE_NORMAL : FILE_ATTRIBUTE_READONLY;
+    HANDLE h = CreateFileW(w, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                           disposition, attrs | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(w);
+    if (h == INVALID_HANDLE_VALUE) return last_win_error();
+    BY_HANDLE_FILE_INFORMATION info;
+    if ((flags & (CV_FILE_WRITE | CV_FILE_APPEND)) && GetFileInformationByHandle(h, &info) &&
+        (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        CloseHandle(h);
+        return EISDIR;
+    }
+    *fd = (int)(intptr_t)h;
+    return 0;
+}
+
+int cv_file_close(int fd) { return CloseHandle(as_handle(fd)) ? 0 : last_win_error(); }
+
+int cv_file_dup(int fd, int *out) {
+    HANDLE dup;
+    if (!DuplicateHandle(GetCurrentProcess(), as_handle(fd), GetCurrentProcess(), &dup, 0, FALSE,
+                         DUPLICATE_SAME_ACCESS))
+        return last_win_error();
+    *out = (int)(intptr_t)dup;
+    return 0;
+}
+
+intptr_t cv_file_read(int fd, void *buf, intptr_t len, int64_t offset) {
+    HANDLE h = as_handle(fd);
+    DWORD want = len > 0x7ffff000 ? 0x7ffff000 : (DWORD)len, got = 0;
+    if (offset < 0) {
+        if (!ReadFile(h, buf, want, &got, NULL)) {
+            DWORD e = GetLastError();
+            return e == ERROR_HANDLE_EOF || e == ERROR_BROKEN_PIPE ? 0 : -(intptr_t)map_win_error(e);
+        }
+        return (intptr_t)got;
+    }
+    // At an offset, leaving the position where it was (as pread does): a
+    // synchronous handle moves it to the end of what was read.
+    LARGE_INTEGER zero = {0}, pos;
+    if (!SetFilePointerEx(h, zero, &pos, FILE_CURRENT)) return -(intptr_t)last_win_error();
+    OVERLAPPED ov = {0};
+    ov.Offset = (DWORD)offset;
+    ov.OffsetHigh = (DWORD)((uint64_t)offset >> 32);
+    BOOL ok = ReadFile(h, buf, want, &got, &ov);
+    DWORD e = ok ? 0 : GetLastError();
+    SetFilePointerEx(h, pos, NULL, FILE_BEGIN);
+    if (!ok) return e == ERROR_HANDLE_EOF ? 0 : -(intptr_t)map_win_error(e);
+    return (intptr_t)got;
+}
+
+intptr_t cv_file_write(int fd, const void *buf, intptr_t len, int64_t offset) {
+    HANDLE h = as_handle(fd);
+    DWORD want = len > 0x7ffff000 ? 0x7ffff000 : (DWORD)len, done = 0;
+    if (offset < 0) {
+        if (!WriteFile(h, buf, want, &done, NULL)) return -(intptr_t)last_win_error();
+        return (intptr_t)done;
+    }
+    LARGE_INTEGER zero = {0}, pos;
+    if (!SetFilePointerEx(h, zero, &pos, FILE_CURRENT)) return -(intptr_t)last_win_error();
+    OVERLAPPED ov = {0};
+    ov.Offset = (DWORD)offset;
+    ov.OffsetHigh = (DWORD)((uint64_t)offset >> 32);
+    BOOL ok = WriteFile(h, buf, want, &done, &ov);
+    DWORD e = ok ? 0 : GetLastError();
+    SetFilePointerEx(h, pos, NULL, FILE_BEGIN);
+    return ok ? (intptr_t)done : -(intptr_t)map_win_error(e);
+}
+
+int64_t cv_file_seek(int fd, int64_t offset, int whence) {
+    LARGE_INTEGER d, out;
+    d.QuadPart = offset;
+    DWORD method = whence == 0 ? FILE_BEGIN : whence == 1 ? FILE_CURRENT : FILE_END;
+    if (!SetFilePointerEx(as_handle(fd), d, &out, method)) return -(int64_t)last_win_error();
+    return out.QuadPart;
+}
+
+int cv_file_sync(int fd) { return FlushFileBuffers(as_handle(fd)) ? 0 : last_win_error(); }
+
+int cv_file_set_length(int fd, int64_t length) {
+    FILE_END_OF_FILE_INFO info;
+    info.EndOfFile.QuadPart = length;
+    return SetFileInformationByHandle(as_handle(fd), FileEndOfFileInfo, &info, sizeof info) ? 0 : last_win_error();
+}
+
+static void file_time(FILETIME ft, int64_t *sec, int32_t *nsec) {
+    // 100 ns ticks since 1601 to the Unix epoch.
+    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    int64_t since = (int64_t)(t - 116444736000000000ull);
+    *sec = since / 10000000;
+    *nsec = (int32_t)(since % 10000000) * 100;
+    if (*nsec < 0) {
+        *nsec += 1000000000;
+        *sec -= 1;
+    }
+}
+
+static void fill_stat(const BY_HANDLE_FILE_INFORMATION *info, int is_link, cv_file_stat *out) {
+    memset(out, 0, sizeof *out);
+    DWORD a = info->dwFileAttributes;
+    out->kind = is_link ? CV_FILE_KIND_LINK : (a & FILE_ATTRIBUTE_DIRECTORY) ? CV_FILE_KIND_DIR : CV_FILE_KIND_FILE;
+    out->size = ((uint64_t)info->nFileSizeHigh << 32) | info->nFileSizeLow;
+    // Windows has one permission bit to show: read-only.
+    unsigned perm = (a & FILE_ATTRIBUTE_READONLY) ? 0444 : 0666;
+    if (out->kind == CV_FILE_KIND_DIR) perm |= 0111;
+    out->mode = perm;
+    out->nlink = info->nNumberOfLinks;
+    out->device = info->dwVolumeSerialNumber;
+    out->inode = ((uint64_t)info->nFileIndexHigh << 32) | info->nFileIndexLow;
+    file_time(info->ftLastAccessTime, &out->atime_s, &out->atime_ns);
+    file_time(info->ftLastWriteTime, &out->mtime_s, &out->mtime_ns);
+    file_time(info->ftLastWriteTime, &out->ctime_s, &out->ctime_ns);
+}
+
+int cv_file_fstat(int fd, cv_file_stat *out) {
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(as_handle(fd), &info)) return last_win_error();
+    fill_stat(&info, 0, out);
+    return 0;
+}
+
+static int is_symlink_attrs(const wchar_t *w, DWORD *attrs_out) {
+    WIN32_FIND_DATAW fd;
+    HANDLE f = FindFirstFileW(w, &fd);
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    FindClose(f);
+    if (attrs_out) *attrs_out = fd.dwFileAttributes;
+    return (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+           (fd.dwReserved0 == IO_REPARSE_TAG_SYMLINK || fd.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT);
+}
+
+int cv_file_stat_path(const char *path, int follow, cv_file_stat *out) {
+    wchar_t *w = wide(path);
+    if (!w) return EINVAL;
+    int link = !follow && is_symlink_attrs(w, NULL);
+    HANDLE h = CreateFileW(w, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | (link ? FILE_FLAG_OPEN_REPARSE_POINT : 0),
+                           NULL);
+    free(w);
+    if (h == INVALID_HANDLE_VALUE) return last_win_error();
+    BY_HANDLE_FILE_INFORMATION info;
+    BOOL ok = GetFileInformationByHandle(h, &info);
+    int e = ok ? 0 : last_win_error();
+    CloseHandle(h);
+    if (ok) fill_stat(&info, link, out);
+    return e;
+}
+
+static int set_readonly(const wchar_t *w, unsigned mode) {
+    DWORD a = GetFileAttributesW(w);
+    if (a == INVALID_FILE_ATTRIBUTES) return last_win_error();
+    DWORD next = (mode & 0222) ? (a & ~(DWORD)FILE_ATTRIBUTE_READONLY) : (a | FILE_ATTRIBUTE_READONLY);
+    if (next == 0) next = FILE_ATTRIBUTE_NORMAL;
+    return next == a || SetFileAttributesW(w, next) ? 0 : last_win_error();
+}
+
+int cv_fs_chmod(const char *path, unsigned mode) {
+    wchar_t *w = wide(path);
+    if (!w) return EINVAL;
+    int e = set_readonly(w, mode);
+    free(w);
+    return e;
+}
+
+int cv_file_chmod(int fd, unsigned mode) {
+    FILE_BASIC_INFO info;
+    if (!GetFileInformationByHandleEx(as_handle(fd), FileBasicInfo, &info, sizeof info)) return last_win_error();
+    DWORD a = info.FileAttributes;
+    DWORD next = (mode & 0222) ? (a & ~(DWORD)FILE_ATTRIBUTE_READONLY) : (a | FILE_ATTRIBUTE_READONLY);
+    if (next == a) return 0;
+    info.FileAttributes = next ? next : FILE_ATTRIBUTE_NORMAL;
+    return SetFileInformationByHandle(as_handle(fd), FileBasicInfo, &info, sizeof info) ? 0 : last_win_error();
+}
+
+#define PATH_OP(name, call)                                                                                    \
+    int name(const char *path) {                                                                               \
+        wchar_t *w = wide(path);                                                                               \
+        if (!w) return EINVAL;                                                                                 \
+        int e = (call) ? 0 : last_win_error();                                                                 \
+        free(w);                                                                                               \
+        return e;                                                                                              \
+    }
+
+PATH_OP(cv_fs_mkdir, CreateDirectoryW(w, NULL))
+PATH_OP(cv_fs_rmdir, RemoveDirectoryW(w))
+
+int cv_fs_unlink(const char *path) {
+    wchar_t *w = wide(path);
+    if (!w) return EINVAL;
+    DWORD attrs = 0;
+    int e = 0;
+    // A link to a directory is removed as a directory; a read-only file
+    // can't be deleted until it isn't.
+    if (is_symlink_attrs(w, &attrs) && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+        if (!RemoveDirectoryW(w)) e = last_win_error();
+    } else if (!DeleteFileW(w)) {
+        e = last_win_error();
+        if (e == EACCES && set_readonly(w, 0666) == 0) e = DeleteFileW(w) ? 0 : last_win_error();
+        else if (e == EACCES && (GetFileAttributesW(w) & FILE_ATTRIBUTE_DIRECTORY)) e = EISDIR;
+    }
+    free(w);
+    return e;
+}
+
+int cv_fs_rename(const char *from, const char *to) {
+    wchar_t *a = wide(from), *b = wide(to);
+    int e = a && b ? (MoveFileExW(a, b, MOVEFILE_REPLACE_EXISTING) ? 0 : last_win_error()) : EINVAL;
+    free(a);
+    free(b);
+    return e;
+}
+
+int cv_fs_link(const char *existing, const char *link) {
+    wchar_t *a = wide(existing), *b = wide(link);
+    int e = a && b ? (CreateHardLinkW(b, a, NULL) ? 0 : last_win_error()) : EINVAL;
+    free(a);
+    free(b);
+    return e;
+}
+
+int cv_fs_symlink(const char *target, const char *link) {
+    wchar_t *t = wide(target), *l = wide(link);
+    if (!t || !l) {
+        free(t);
+        free(l);
+        return EINVAL;
+    }
+    // Whether the target is a directory decides the kind of link; a relative
+    // target is relative to the link's directory.
+    DWORD flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+    DWORD ta;
+    int relative = !(t[0] == L'\\' || (t[0] && t[1] == L':'));
+    if (relative) {
+        wchar_t *slash = wcsrchr(l, L'\\');
+        size_t dir = slash ? (size_t)(slash - l) + 1 : 0;
+        size_t n = dir + wcslen(t) + 1;
+        wchar_t *full = malloc(n * sizeof(wchar_t));
+        if (full) {
+            memcpy(full, l, dir * sizeof(wchar_t));
+            wcscpy(full + dir, t);
+            ta = GetFileAttributesW(full);
+            free(full);
+        } else {
+            ta = INVALID_FILE_ATTRIBUTES;
+        }
+    } else {
+        ta = GetFileAttributesW(t);
+    }
+    if (ta != INVALID_FILE_ATTRIBUTES && (ta & FILE_ATTRIBUTE_DIRECTORY)) flags |= SYMBOLIC_LINK_FLAG_DIRECTORY;
+    int e = CreateSymbolicLinkW(l, t, flags) ? 0 : last_win_error();
+    free(t);
+    free(l);
+    return e;
+}
+
+// The reparse data of a symbolic link (from ntifs.h).
+typedef struct {
+    ULONG ReparseTag;
+    USHORT ReparseDataLength;
+    USHORT Reserved;
+    union {
+        struct {
+            USHORT SubstituteNameOffset;
+            USHORT SubstituteNameLength;
+            USHORT PrintNameOffset;
+            USHORT PrintNameLength;
+            ULONG Flags;
+            WCHAR PathBuffer[1];
+        } SymbolicLinkReparseBuffer;
+        struct {
+            USHORT SubstituteNameOffset;
+            USHORT SubstituteNameLength;
+            USHORT PrintNameOffset;
+            USHORT PrintNameLength;
+            WCHAR PathBuffer[1];
+        } MountPointReparseBuffer;
+    };
+} cv_reparse_data;
+
+int cv_fs_readlink(const char *path, char *out, int len) {
+    wchar_t *w = wide(path);
+    if (!w) return -EINVAL;
+    HANDLE h = CreateFileW(w, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    free(w);
+    if (h == INVALID_HANDLE_VALUE) return -last_win_error();
+    union {
+        cv_reparse_data data;
+        char bytes[MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
+    } buf;
+    DWORD got = 0;
+    BOOL ok = DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0, &buf, sizeof buf, &got, NULL);
+    int e = ok ? 0 : last_win_error();
+    CloseHandle(h);
+    if (!ok) return -(e == EIO ? EINVAL : e);
+    const WCHAR *name;
+    USHORT bytes;
+    if (buf.data.ReparseTag == IO_REPARSE_TAG_SYMLINK) {
+        name = buf.data.SymbolicLinkReparseBuffer.PathBuffer + buf.data.SymbolicLinkReparseBuffer.PrintNameOffset / 2;
+        bytes = buf.data.SymbolicLinkReparseBuffer.PrintNameLength;
+    } else if (buf.data.ReparseTag == IO_REPARSE_TAG_MOUNT_POINT) {
+        name = buf.data.MountPointReparseBuffer.PathBuffer + buf.data.MountPointReparseBuffer.PrintNameOffset / 2;
+        bytes = buf.data.MountPointReparseBuffer.PrintNameLength;
+    } else {
+        return -EINVAL;
+    }
+    int n = narrow(name, bytes / 2, out, len);
+    return n < 0 ? -ENAMETOOLONG : n;
+}
+
+int cv_fs_realpath(const char *path, char *out, int len) {
+    wchar_t *w = wide(path);
+    if (!w) return -EINVAL;
+    HANDLE h = CreateFileW(w, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(w);
+    if (h == INVALID_HANDLE_VALUE) return -last_win_error();
+    wchar_t full[32768];
+    DWORD n = GetFinalPathNameByHandleW(h, full, 32768, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    CloseHandle(h);
+    if (n == 0 || n >= 32768) return -EIO;
+    // \\?\C:\x → C:\x; \\?\UNC\server\share → \\server\share.
+    const wchar_t *p = full;
+    wchar_t unc[32768];
+    if (wcsncmp(p, L"\\\\?\\UNC\\", 8) == 0) {
+        unc[0] = L'\\';
+        wcscpy(unc + 1, p + 7);
+        p = unc;
+    } else if (wcsncmp(p, L"\\\\?\\", 4) == 0) {
+        p += 4;
+    }
+    int m = narrow(p, (int)wcslen(p), out, len);
+    return m < 0 ? -ENAMETOOLONG : m;
+}
+
+int cv_fs_list(const char *path, cv_dir_entry **entries, int *count) {
+    *entries = NULL;
+    *count = 0;
+    size_t plen = strlen(path);
+    char *pattern = malloc(plen + 3);
+    if (!pattern) return ENOMEM;
+    memcpy(pattern, path, plen);
+    size_t k = plen;
+    if (k == 0 || (pattern[k - 1] != '/' && pattern[k - 1] != '\\')) pattern[k++] = '\\';
+    pattern[k++] = '*';
+    pattern[k] = 0;
+    wchar_t *w = wide(pattern);
+    free(pattern);
+    if (!w) return EINVAL;
+    WIN32_FIND_DATAW fd;
+    HANDLE f = FindFirstFileW(w, &fd);
+    free(w);
+    if (f == INVALID_HANDLE_VALUE) {
+        int e = last_win_error();
+        return e == ENOENT && GetLastError() == ERROR_FILE_NOT_FOUND ? 0 : e; // empty
+    }
+    int cap = 16;
+    cv_dir_entry *list = malloc((size_t)cap * sizeof *list);
+    if (!list) {
+        FindClose(f);
+        return ENOMEM;
+    }
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        if (*count == cap) {
+            cap *= 2;
+            cv_dir_entry *bigger = realloc(list, (size_t)cap * sizeof *list);
+            if (!bigger) {
+                cv_fs_list_free(list, *count);
+                FindClose(f);
+                return ENOMEM;
+            }
+            list = bigger;
+        }
+        char name[1024];
+        if (narrow(fd.cFileName, -1, name, sizeof name) < 0) continue;
+        list[*count].name = _strdup(name);
+        int link = (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+                   (fd.dwReserved0 == IO_REPARSE_TAG_SYMLINK || fd.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT);
+        list[*count].kind = link ? CV_FILE_KIND_LINK
+                          : (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? CV_FILE_KIND_DIR
+                          : CV_FILE_KIND_FILE;
+        ++*count;
+    } while (FindNextFileW(f, &fd));
+    FindClose(f);
+    *entries = list;
+    return 0;
+}
+
+void cv_fs_list_free(cv_dir_entry *entries, int count) {
+    for (int i = 0; i < count; i++) free(entries[i].name);
+    free(entries);
+}
+
+int cv_fs_temp_dir(const char *prefix, char *out, int len) {
+    wchar_t base[MAX_PATH + 1];
+    DWORD n = GetTempPathW(MAX_PATH + 1, base);
+    if (n == 0 || n > MAX_PATH) return EIO;
+    while (n > 3 && base[n - 1] == L'\\') base[--n] = 0;
+    char dir[MAX_PATH * 3];
+    if (narrow(base, (int)n, dir, sizeof dir) < 0) return ENAMETOOLONG;
+    for (int tries = 0; tries < 100; tries++) {
+        uint8_t r[6];
+        cv_random_bytes(r, sizeof r);
+        char path[MAX_PATH * 3 + 64];
+        snprintf(path, sizeof path, "%s\\%s%02x%02x%02x%02x%02x%02x", dir, prefix, r[0], r[1], r[2], r[3], r[4], r[5]);
+        int e = cv_fs_mkdir(path);
+        if (e == EEXIST) continue;
+        if (e) return e;
+        if ((int)strlen(path) >= len) return ENAMETOOLONG;
+        strcpy(out, path);
+        return 0;
+    }
+    return EEXIST;
+}
+
+int64_t cv_fs_copy(const char *from, const char *to) {
+    wchar_t *a = wide(from), *b = wide(to);
+    if (!a || !b) {
+        free(a);
+        free(b);
+        return -EINVAL;
+    }
+    // CopyFile keeps the attributes (read-only among them) and replaces
+    // the destination; a read-only destination has to stop being one first.
+    set_readonly(b, 0666);
+    BOOL ok = CopyFileW(a, b, FALSE);
+    int64_t result;
+    if (!ok) {
+        result = -(int64_t)last_win_error();
+    } else {
+        WIN32_FILE_ATTRIBUTE_DATA d;
+        result = GetFileAttributesExW(b, GetFileExInfoStandard, &d)
+                     ? (int64_t)(((uint64_t)d.nFileSizeHigh << 32) | d.nFileSizeLow)
+                     : 0;
+    }
+    free(a);
+    free(b);
+    return result;
 }
 
 // ---- Unix domain sockets (AF_UNIX, Windows 10 1803 and later) -------------

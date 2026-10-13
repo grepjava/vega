@@ -1,5 +1,4 @@
-// POSIX for now; Windows comes with the IOCP driver.
-#if os(Linux) || canImport(Darwin)
+import CVega
 import Vega
 #if canImport(Glibc)
 import Glibc
@@ -58,9 +57,11 @@ public struct FileTime: Sendable, Hashable, Comparable {
         self.nanoseconds = nanoseconds
     }
 
+    #if !os(Windows)
     init(_ ts: timespec) {
         self.init(seconds: Int64(ts.tv_sec), nanoseconds: Int32(ts.tv_nsec))
     }
+    #endif
 
     /// Time since the Unix epoch.
     public var sinceEpoch: Duration { .seconds(seconds) + .nanoseconds(nanoseconds) }
@@ -92,6 +93,23 @@ public struct FileMetadata: Sendable, Hashable {
     public var isDirectory: Bool { kind == .directory }
     public var isSymbolicLink: Bool { kind == .symbolicLink }
 
+    #if os(Windows)
+    /// Windows shows one permission bit, read-only: 0o444 or 0o666 (0o777 or
+    /// 0o555 for a directory). No owner IDs; the ctime is the write time.
+    init(_ st: cv_file_stat) {
+        kind = FileKind(windowsKind: st.kind) ?? .unknown
+        size = Int(st.size)
+        permissions = st.mode
+        linkCount = Int(st.nlink)
+        userID = 0
+        groupID = 0
+        device = st.device
+        inode = st.inode
+        accessed = FileTime(seconds: st.atime_s, nanoseconds: st.atime_ns)
+        modified = FileTime(seconds: st.mtime_s, nanoseconds: st.mtime_ns)
+        statusChanged = FileTime(seconds: st.ctime_s, nanoseconds: st.ctime_ns)
+    }
+    #else
     init(_ st: stat) {
         let mode = UInt32(st.st_mode)
         kind = FileKind(mode: mode)
@@ -112,5 +130,17 @@ public struct FileMetadata: Sendable, Hashable {
         statusChanged = FileTime(st.st_ctim)
         #endif
     }
+    #endif
 }
-#endif
+
+extension FileKind {
+    /// From CVega's CV_FILE_KIND_* (Windows).
+    init?(windowsKind: Int32) {
+        switch windowsKind {
+        case 1: self = .file
+        case 2: self = .directory
+        case 3: self = .symbolicLink
+        default: return nil
+        }
+    }
+}
