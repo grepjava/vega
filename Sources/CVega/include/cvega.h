@@ -271,6 +271,8 @@ int cv_thread_count(void);
 int cv_local_address(int fd, cv_sockaddr *out);
 int cv_peer_address(int fd, cv_sockaddr *out);
 /// A listening TCP socket (SO_REUSEADDR, and SO_REUSEPORT if reuse_port).
+/// backlog < 0 binds without listening (to hold a port for SO_REUSEPORT
+/// listeners elsewhere).
 int cv_tcp_listen(const char *host, int port, int backlog, int reuse_port, int *err);
 /// Start a connect to one address on a new socket of `type` (SOCK_STREAM gets
 /// TCP_NODELAY). Returns the fd; *err is 0 when connected already,

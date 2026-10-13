@@ -16,6 +16,71 @@ public struct Shard: Sendable {
     public let cpus: [Int]
     /// The shard's runtime, started for this process.
     public let runtime: Runtime
+    let listeners: [PreparedListener]
+
+    /// A listener for `ShardOptions.listeners[index]`, on this shard's
+    /// runtime: the supervisor's shared socket, or one bound here with
+    /// `reusePort` (see `ShardListenerMode`). Each call gives a new one, for
+    /// several accept loops. Call from a task on the shard's runtime.
+    public func listener(_ index: Int = 0) throws(IOError) -> TCPListener {
+        precondition(listeners.indices.contains(index), "no ShardOptions.listeners[\(index)]")
+        let l = listeners[index]
+        let driver = try IODriver.current()
+        guard l.shared >= 0 else {
+            return try TCPListener.bind(host: l.host, port: l.port, backlog: l.backlog, reusePort: true)
+        }
+        let fd = fcntl(l.shared, F_DUPFD_CLOEXEC, 0)
+        guard fd >= 0 else { throw IOError(code: errno) }
+        return TCPListener(reg: try IORegistration(fd: fd, driver: driver))
+    }
+
+    /// The port of `ShardOptions.listeners[index]` (the one picked, for port 0).
+    public func port(_ index: Int = 0) -> Int { listeners[index].port }
+}
+
+/// A TCP listener the shards share (`ShardOptions.listeners`).
+public struct ShardListener: Sendable, Hashable {
+    public var host: String
+    /// 0 picks a free port, the same for every shard.
+    public var port: Int
+    public var backlog: Int
+
+    public static func tcp(host: String = "", port: Int, backlog: Int = 1024) -> ShardListener {
+        ShardListener(host: host, port: port, backlog: backlog)
+    }
+}
+
+/// How shards share their listeners.
+public enum ShardListenerMode: Sendable, Hashable {
+    /// `.perShard` on Linux, `.shared` elsewhere.
+    case automatic
+    /// The supervisor binds each listener before forking; every shard
+    /// accepts on that one socket, and a connection goes to a shard waiting
+    /// in accept. Balances by who's free; works everywhere.
+    case shared
+    /// Each shard binds its own `SO_REUSEPORT` socket and the kernel hashes
+    /// connections across them. On Linux that spreads them evenly; Darwin
+    /// sends everything to the newest socket, so `.automatic` avoids it
+    /// there.
+    case perShard
+
+    var resolved: ShardListenerMode {
+        guard self == .automatic else { return self }
+        #if os(Linux)
+        return .perShard
+        #else
+        return .shared
+        #endif
+    }
+}
+
+/// A listener as the supervisor set it up.
+struct PreparedListener: Sendable {
+    let host: String
+    let port: Int
+    let backlog: Int
+    /// The listening socket shards adopt, or -1 when each binds its own.
+    let shared: Int32
 }
 
 /// What the supervisor saw, for logging.
@@ -47,6 +112,10 @@ public struct ShardOptions: Sendable {
     /// After SIGTERM or SIGINT, how long shards get to finish before
     /// SIGKILL. A second SIGTERM or SIGINT doesn't wait.
     public var shutdownGracePeriod: Duration = .seconds(30)
+    /// Listeners the shards serve, set up by the supervisor before the
+    /// first fork; a shard takes each with `Shard.listener(_:)`.
+    public var listeners: [ShardListener] = []
+    public var listenerMode: ShardListenerMode = .automatic
     /// Thread name prefix; shard i's runtime is "\(name)\(i)".
     public var name = "vega-s"
     /// Called in the supervisor for each event (synchronously: keep it
@@ -63,17 +132,18 @@ extension Runtime {
     /// Run a server as K shard processes, each with its own multi-threaded
     /// runtime on its own CPUs, under a supervisor (the hybrid fault model:
     /// a trap in one shard takes down 1/K of the connections, and the
-    /// shard comes back). Each shard binds its own listeners with
-    /// `reusePort` so the kernel spreads connections across them.
+    /// shard comes back). Declare the server's ports in
+    /// `ShardOptions.listeners`, and each shard takes them with
+    /// `Shard.listener(_:)` (see `ShardListenerMode` for how they're shared).
     ///
     /// ```swift
     /// @main struct Server {
     ///     static func main() {
-    ///         Runtime.sharded(ShardOptions(shards: 4)) { shard in
-    ///             try! shard.runtime.block {
-    ///                 var config = TCPServer.Configuration()
-    ///                 config.reusePort = true
-    ///                 let server = try TCPServer.bind(port: 8080, configuration: config) { serve($0) }
+    ///         var options = ShardOptions(shards: 4)
+    ///         options.listeners = [.tcp(port: 8080)]
+    ///         Runtime.sharded(options) { shard in
+    ///             try! shard.runtime.block { () async throws(IOError) in
+    ///                 let server = try TCPServer.serve(try shard.listener()) { await serve($0) }
     ///                 await server.wait()
     ///             }
     ///         }
@@ -100,8 +170,33 @@ extension Runtime {
         let layout = Topology.layout(shards: options.shards, workersPerShard: options.workersPerShard)
         let rc = cv_supervisor_init()
         precondition(rc == 0, "vega: cannot set up the shard supervisor (errno \(rc))")
-        var supervisor = Supervisor(options: options, layout: layout, body: body)
+        let listeners = prepareListeners(options)
+        var supervisor = Supervisor(options: options, layout: layout, listeners: listeners, body: body)
         supervisor.run()
+    }
+
+    /// Bind the shared listeners, or hold the ports of per-shard ones that
+    /// ask for port 0. A failure ends the process: nothing has started yet.
+    private static func prepareListeners(_ options: ShardOptions) -> [PreparedListener] {
+        let shared = options.listenerMode.resolved == .shared
+        return options.listeners.map { spec in
+            var err: Int32 = 0
+            // Per-shard with a fixed port needs nothing here; port 0 is bound
+            // (not listening) to pick one port for every shard, and stays so.
+            guard shared || spec.port == 0 else {
+                return PreparedListener(host: spec.host, port: spec.port, backlog: spec.backlog, shared: -1)
+            }
+            let fd = cv_tcp_listen(spec.host, Int32(spec.port), shared ? Int32(spec.backlog) : -1,
+                                   shared ? 0 : 1, &err)
+            guard fd >= 0 else {
+                let msg = "vega: cannot listen on \(spec.host.isEmpty ? "*" : spec.host):\(spec.port): " +
+                    "\(IOError(code: err))\n"
+                _ = msg.withCString { write(2, $0, strlen($0)) }
+                exit(1)
+            }
+            return PreparedListener(host: spec.host, port: Int(cv_local_port(fd)), backlog: spec.backlog,
+                                    shared: shared ? fd : -1)
+        }
     }
 }
 
@@ -110,6 +205,7 @@ extension Runtime {
 private struct Supervisor {
     let options: ShardOptions
     let layout: [[Int]]
+    let listeners: [PreparedListener]
     let body: (Shard) -> Void
 
     /// Running shards by pid.
@@ -127,9 +223,10 @@ private struct Supervisor {
     var reloading: Int?
     var reloadQueue: [Int] = []
 
-    init(options: ShardOptions, layout: [[Int]], body: @escaping (Shard) -> Void) {
+    init(options: ShardOptions, layout: [[Int]], listeners: [PreparedListener], body: @escaping (Shard) -> Void) {
         self.options = options
         self.layout = layout
+        self.listeners = listeners
         self.body = body
         pids = Array(repeating: nil, count: layout.count)
         startedAt = Array(repeating: 0, count: layout.count)
@@ -175,7 +272,7 @@ private struct Supervisor {
         let workers = options.workersPerShard ?? cpus.count
         let rt = Runtime(scheduler: Scheduler(workers: max(workers, 1), name: "\(options.name)\(i)",
                                               pin: options.pinThreads, cpus: cpus))
-        body(Shard(index: i, count: layout.count, cpus: cpus, runtime: rt))
+        body(Shard(index: i, count: layout.count, cpus: cpus, runtime: rt, listeners: listeners))
         rt.shutdown()
         exit(0)
     }

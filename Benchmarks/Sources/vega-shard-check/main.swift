@@ -29,14 +29,19 @@ func serve(port: Int) -> Never {
     options.pinThreads = false
     options.shutdownGracePeriod = .seconds(5)
     options.onEvent = { log("supervisor: \($0)") }
+    options.listeners = [.tcp(host: "127.0.0.1", port: port)]
+    // VEGA_SHARD_LISTENERS=shared or perShard; else the platform's default.
+    switch getenv("VEGA_SHARD_LISTENERS").map({ String(cString: $0) }) {
+    case "shared": options.listenerMode = .shared
+    case "perShard": options.listenerMode = .perShard
+    default: break
+    }
     Runtime.sharded(options) { shard in
         do {
             try shard.runtime.block { () async throws(IOError) in
-                let listener = try TCPListener.bind(host: "127.0.0.1", port: port, reusePort: true)
-                while true {
-                    let conn = try await listener.accept()
-                    shard.runtime.spawn(with: conn) { conn in await answer(conn, shard.index) }
-                }
+                let index = shard.index
+                let server = try TCPServer.serve(try shard.listener()) { await answer($0, index) }
+                await server.wait()
             }
         } catch {
             log("shard \(shard.index): \(error)")

@@ -103,6 +103,19 @@ public final class TCPServer: Sendable {
         return server
     }
 
+    /// Serve connections from `listener`, already bound (one a shard
+    /// adopted, say: `Shard.listener(_:)`), with one accept loop.
+    /// `configuration`'s listener settings don't apply. Call from a task on
+    /// a Vega runtime.
+    public static func serve(_ listener: consuming TCPListener, configuration: Configuration = .init(),
+                             handler: @escaping @Sendable (consuming TCPStream) async -> Void) throws(IOError) -> TCPServer {
+        guard let scheduler = Worker.currentScheduler else { throw .notOnRuntime }
+        let server = TCPServer(localAddress: try listener.localAddress, configuration: configuration,
+                               handler: handler, scheduler: scheduler)
+        server.startAcceptor(listener)
+        return server
+    }
+
     private static func listener(_ host: String, _ port: Int, _ configuration: Configuration,
                                  _ reusePort: Bool) throws(IOError) -> TCPListener {
         let l = try TCPListener.bind(host: host, port: port, backlog: configuration.backlog, reusePort: reusePort)

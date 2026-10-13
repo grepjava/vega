@@ -673,7 +673,7 @@ int cv_tcp_listen(const char *host, int port, int backlog, int reuse_port, int *
 #ifdef SO_REUSEPORT
         if (reuse_port) setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
 #endif
-        if (bind(fd, a->ai_addr, a->ai_addrlen) == 0 && listen(fd, backlog) == 0) {
+        if (bind(fd, a->ai_addr, a->ai_addrlen) == 0 && (backlog < 0 || listen(fd, backlog) == 0)) {
             *err = 0;
             break;
         }
