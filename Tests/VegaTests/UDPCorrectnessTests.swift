@@ -185,11 +185,16 @@ private func receiveAll(_ socket: borrowing UDPSocket, count: Int) async throws(
                 got += await task.value
                 round += 1
             }
-            // Loopback queues a datagram before send returns: what is left
-            // is all in the socket. A cancelled receiver drains it.
-            let drain = rt.spawn { await receiver() }
-            drain.cancel()
-            got += await drain.value
+            // A cancelled receiver drains what is queued. On Linux loopback
+            // queues a datagram before send returns; on Darwin the last few
+            // can still be on their way, so drain again for a moment while
+            // any are missing (a lost one still fails the count).
+            for attempt in 0..<20 where attempt == 0 || got < total {
+                if attempt > 0 { try? await Runtime.sleep(for: .milliseconds(10)) }
+                let drain = rt.spawn { await receiver() }
+                drain.cancel()
+                got += await drain.value
+            }
             return got
         }
         #expect(received == total)

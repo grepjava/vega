@@ -34,10 +34,13 @@ done
 
 if [ $TEST = 1 ]; then
     only=()
-    IFS=, read -ra suites <<<"$ONLY"
-    for s in "${suites[@]}"; do only+=("-only-testing:VegaTests/$s"); done
+    if [ -n "$ONLY" ]; then
+        IFS=, read -ra suites <<<"$ONLY"
+        for s in "${suites[@]}"; do only+=("-only-testing:VegaTests/$s"); done
+    fi
+    # ${only[@]+...}: an empty array is "unbound" to bash 3.2's set -u.
     if xcodebuild test -scheme Vega-Package -destination "platform=iOS Simulator,name=$DEVICE" \
-        -derivedDataPath "$DD" "${only[@]}" >"$DD.log" 2>&1; then
+        -derivedDataPath "$DD" ${only[@]+"${only[@]}"} >"$DD.log" 2>&1; then
         echo "test on $DEVICE: $(grep -aE 'Test run with' "$DD.log" | tail -1)"
     else
         echo "test on $DEVICE: FAILED"
