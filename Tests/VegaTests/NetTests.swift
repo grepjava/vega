@@ -24,7 +24,9 @@ func registered() throws(IOError) -> Int {
     guard let raw = try IODriver.current().raw else {
         return Int(cv_count_load(Worker.currentScheduler!.socketCount))
     }
-    return Int(cv_driver_registered(raw))
+    // Network.framework sockets count with the uring driver's (IOBackend.network).
+    let network = Worker.currentScheduler!.usesNetwork ? Int(cv_count_load(Worker.currentScheduler!.socketCount)) : 0
+    return Int(cv_driver_registered(raw)) + network
 }
 
 func tempSocketPath() -> String {

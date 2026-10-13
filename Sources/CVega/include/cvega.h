@@ -98,6 +98,12 @@ typedef struct cv_io {
     int *count;         // uring driver: the runtime's open sockets
 } cv_io;
 
+/// Drop one owner of an io that no driver frees (Network.framework
+/// sockets): returns how many are left.
+static inline int cv_io_unref(cv_io *io) { return __atomic_sub_fetch(&io->refs, 1, __ATOMIC_ACQ_REL); }
+/// Add `n` owners to such an io.
+static inline void cv_io_ref(cv_io *io, int n) { __atomic_add_fetch(&io->refs, n, __ATOMIC_RELAXED); }
+
 #define CV_IO_READ 0
 #define CV_IO_WRITE 1
 #define CV_IO_IDLE ((uintptr_t)0)
@@ -467,6 +473,8 @@ cv_driver_stats cv_uring_get_stats(cv_uring *r);
 cv_io *cv_uring_io_new(int fd, int *count);
 /// Read such a count.
 int cv_count_load(int *count);
+/// Add `delta` to a runtime's open-socket count (Network.framework sockets).
+static inline void cv_count_add(int *count, int delta) { __atomic_add_fetch(count, delta, __ATOMIC_RELEASE); }
 /// Drop one owner; the last closes the fd and frees the cv_io.
 void cv_uring_io_release(cv_io *io);
 /// TCP_NODELAY on an accepted TCP connection, as cv_tcp_accept sets it.

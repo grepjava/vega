@@ -167,6 +167,7 @@ extension IORegistration {
         self.io = io
         self.driver = driver.raw
         self.owner = driver.owner
+        nw = nil
     }
 }
 #endif

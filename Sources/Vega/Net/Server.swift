@@ -89,6 +89,19 @@ public final class TCPServer: Sendable {
                             handler: @escaping @Sendable (consuming TCPStream) async -> Void) throws(IOError) -> TCPServer {
         guard let scheduler = Worker.currentScheduler else { throw .notOnRuntime }
         let acceptors = max(configuration.acceptors, 1)
+        #if canImport(Network)
+        if NetworkIO.active {
+            // One NWListener (Network.framework won't share a port between
+            // listeners); the accept loops share it.
+            let first = try listener(host, port, configuration, configuration.reusePort)
+            let more = (1..<acceptors).map { _ in first.reg.nwShared() }
+            let server = TCPServer(localAddress: try first.localAddress, configuration: configuration,
+                                   handler: handler, scheduler: scheduler)
+            for reg in more { server.startAcceptor(TCPListener(reg: reg)) }
+            server.startAcceptor(first)
+            return server
+        }
+        #endif
         let reusePort = configuration.reusePort || acceptors > 1
         let first = try listener(host, port, configuration, reusePort)
         let server = TCPServer(localAddress: try first.localAddress, configuration: configuration,
@@ -120,6 +133,17 @@ public final class TCPServer: Sendable {
 
     private static func listener(_ host: String, _ port: Int, _ configuration: Configuration,
                                  _ reusePort: Bool) throws(IOError) -> TCPListener {
+        #if canImport(Network)
+        if NetworkIO.active {
+            // Connection options are fixed when Network.framework makes the
+            // connection: give them to the listener.
+            let l = TCPListener(reg: try NetworkIO.listen(host: host, port: port, backlog: configuration.backlog,
+                                                          reusePort: reusePort,
+                                                          connectionOptions: configuration.connectionOptions))
+            for (option, value) in configuration.listenerOptions { try l.setOption(option, to: value) }
+            return l
+        }
+        #endif
         let l = try TCPListener.bind(host: host, port: port, backlog: configuration.backlog, reusePort: reusePort)
         for (option, value) in configuration.listenerOptions { try l.setOption(option, to: value) }
         return l
@@ -339,6 +363,20 @@ public struct TCPClient: Sendable {
     private func connect(
         _ operation: @escaping @Sendable () async throws(IOError) -> TCPStream
     ) async throws(IOError) -> TCPStream {
+        #if canImport(Network)
+        // Network.framework takes options when the connection is made.
+        let operation: @Sendable () async throws(IOError) -> TCPStream = { [options] () async throws(IOError) -> TCPStream in
+            do {
+                return try await NetworkIO.$connectOptions.withValue(options) { () async throws -> Handoff<TCPStream> in
+                    Handoff(try await operation())
+                }.take()
+            } catch let error as IOError {
+                throw error
+            } catch {
+                throw .cancelled
+            }
+        }
+        #endif
         let stream: TCPStream
         if let connectTimeout {
             do {

@@ -77,6 +77,8 @@ public protocol SocketHandle: ~Copyable {
 
 extension SocketHandle where Self: ~Copyable {
     public func setOption(_ option: SocketOption, to value: Int) throws(IOError) {
+        // No fd: a Network.framework socket (IOBackend.network).
+        guard fileDescriptor >= 0 else { throw .unsupported }
         let e = cv_sockopt_set(fileDescriptor, option.id, Int32(clamping: value))
         if e != 0 { throw IOError(code: e) }
     }
@@ -86,8 +88,51 @@ extension SocketHandle where Self: ~Copyable {
     }
 
     public func option(_ option: SocketOption) throws(IOError) -> Int {
+        guard fileDescriptor >= 0 else { throw .unsupported }
         var value: Int32 = 0
         let e = cv_sockopt_get(fileDescriptor, option.id, &value)
+        if e != 0 { throw IOError(code: e) }
+        return Int(value)
+    }
+}
+
+// TCP sockets can be Network.framework connections (IOBackend.network),
+// which have no fd: their options are read from how they were made.
+extension TCPListener {
+    public func setOption(_ option: SocketOption, to value: Int) throws(IOError) {
+        try reg.setOption(option, to: value)
+    }
+    public func setOption(_ option: SocketOption, to value: Bool) throws(IOError) {
+        try reg.setOption(option, to: value ? 1 : 0)
+    }
+    public func option(_ option: SocketOption) throws(IOError) -> Int { try reg.option(option) }
+}
+
+extension TCPStream {
+    public func setOption(_ option: SocketOption, to value: Int) throws(IOError) {
+        try reg.setOption(option, to: value)
+    }
+    public func setOption(_ option: SocketOption, to value: Bool) throws(IOError) {
+        try reg.setOption(option, to: value ? 1 : 0)
+    }
+    public func option(_ option: SocketOption) throws(IOError) -> Int { try reg.option(option) }
+}
+
+extension IORegistration {
+    func setOption(_ option: SocketOption, to value: Int) throws(IOError) {
+        #if canImport(Network)
+        if let nw { return try nwSetOption(nw, option, value) }
+        #endif
+        let e = cv_sockopt_set(fd, option.id, Int32(clamping: value))
+        if e != 0 { throw IOError(code: e) }
+    }
+
+    func option(_ option: SocketOption) throws(IOError) -> Int {
+        #if canImport(Network)
+        if let nw { return try nwOption(nw, option) }
+        #endif
+        var value: Int32 = 0
+        let e = cv_sockopt_get(fd, option.id, &value)
         if e != 0 { throw IOError(code: e) }
         return Int(value)
     }

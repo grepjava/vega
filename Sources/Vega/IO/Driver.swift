@@ -91,6 +91,10 @@ struct IORegistration: @unchecked Sendable {
     /// Under the uring driver, the scheduler (unretained) whose workers'
     /// rings a task off them hops to.
     let owner: UnsafeRawPointer?
+    /// Under `IOBackend.network`, the retained `NetworkHandle` (an
+    /// `NWConnection` or `NWListener`) doing the I/O; `io` then has no fd and
+    /// only counts the owners. nil for every fd-backed socket.
+    let nw: UnsafeRawPointer?
 
     init(fd: Int32, driver: IODriver) throws(IOError) {
         if let raw = driver.raw {
@@ -110,6 +114,7 @@ struct IORegistration: @unchecked Sendable {
         }
         self.driver = driver.raw
         self.owner = driver.owner
+        nw = nil
     }
 
     var fd: Int32 { io.pointee.fd }
@@ -119,6 +124,12 @@ struct IORegistration: @unchecked Sendable {
 
     /// Unregister and close the fd.
     func close() {
+        #if canImport(Network)
+        if let nw {
+            NetworkIO.release(io, nw)
+            return
+        }
+        #endif
         if let driver {
             cv_driver_deregister(driver, io)
         } else {

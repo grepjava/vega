@@ -34,6 +34,8 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     #endif
     /// Whether each worker has an io_uring (the uring driver).
     let usesRings: Bool
+    /// Whether TCP goes through Network.framework (`IOBackend.network`).
+    let usesNetwork: Bool
     /// A current-thread runtime: one worker and no thread of its own; the
     /// thread in `Runtime.block` runs its loop.
     let isCurrentThread: Bool
@@ -108,6 +110,11 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
         #if canImport(Darwin)
         driver = IODriver.make()
         #endif
+        #endif
+        #if canImport(Network)
+        usesNetwork = !currentThread && NetworkIO.wanted(io)
+        #else
+        usesNetwork = false
         #endif
         for (i, w) in workers.enumerated() {
             (queues + i).initialize(to: .passUnretained(w.queue))

@@ -32,6 +32,9 @@ private func drain(_ conn: borrowing TCPStream) async -> [UInt8] {
     @Test func tcpOptionsRoundTrip() throws {
         let rt = Runtime(workers: 1)
         defer { rt.shutdown() }
+        // Network.framework fixes options when it makes the connection
+        // (NetworkOptionTests covers that); this sets them afterwards.
+        guard rt.ioBackend != .network else { return }
         try rt.block { () async throws(IOError) in
             let listener = try TCPListener.bind(host: "127.0.0.1", port: 0)
             let s = try await TCPStream.connect(host: "127.0.0.1", port: listener.localPort)

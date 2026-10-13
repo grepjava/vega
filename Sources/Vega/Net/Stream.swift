@@ -17,6 +17,9 @@ extension IORegistration {
     @inline(__always)
     func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
         guard buffer.spareCapacity > 0 else { return 0 }
+        #if canImport(Network)
+        if let nw { return try await nwRead(into: &buffer, nw) }
+        #endif
         while let res = await URing.perform(.recv(fd, buffer.base + buffer.count, buffer.spareCapacity),
                                             owner: owner) {
             if res >= 0 {
@@ -58,6 +61,9 @@ extension IORegistration {
     /// Write all of `bytes`.
     @inline(__always)
     func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError) {
+        #if canImport(Network)
+        if let nw { return try await nwWrite(nw, parts: 1) { _ in bytes } }
+        #endif
         // On every driver: the socket almost always has room, and a send
         // through the ring would suspend the task for its completion (one
         // more trip through the scheduler per write). EAGAIN waits on the
@@ -83,6 +89,9 @@ extension IORegistration {
     /// sendmsg calls as the kernel allows (up to 64 buffers each).
     @inline(__always)
     func write(parts count: Int, _ part: (Int) -> UnsafeRawBufferPointer) async throws(IOError) {
+        #if canImport(Network)
+        if let nw { return try await nwWrite(nw, parts: count, part) }
+        #endif
         var index = 0, offset = 0 // the first unsent buffer, and how much of it went
         while true {
             while index < count && offset == part(index).count {
@@ -130,6 +139,9 @@ extension IORegistration {
     /// Accept connections with `accept` (a cv_*_accept), registering each.
     @inline(__always)
     func accept(_ accept: (Int32, UnsafeMutablePointer<Int32>) -> Int32) async throws(IOError) -> IORegistration {
+        #if canImport(Network)
+        if let nw { return try await nwAccept(nw) }
+        #endif
         while let res = await URing.perform(.accept(fd), owner: owner) {
             if res >= 0 {
                 // As cv_tcp_accept; on a Unix socket it fails, harmlessly.
@@ -196,11 +208,17 @@ extension IORegistration {
     }
 
     func shutdownWrite() throws(IOError) {
+        #if canImport(Network)
+        if let nw { return nwShutdownWrite(nw) }
+        #endif
         if shutdown(fd, Int32(SHUT_WR)) != 0 { throw IOError(code: errno) }
     }
 
     var localAddress: SocketAddress {
         get throws(IOError) {
+            #if canImport(Network)
+            if let nw { return try nwAddress(nw, local: true) }
+            #endif
             var raw = cv_sockaddr()
             let e = cv_local_address(fd, &raw)
             if e != 0 { throw IOError(code: e) }
@@ -210,6 +228,9 @@ extension IORegistration {
 
     var peerAddress: SocketAddress {
         get throws(IOError) {
+            #if canImport(Network)
+            if let nw { return try nwAddress(nw, local: false) }
+            #endif
             var raw = cv_sockaddr()
             let e = cv_peer_address(fd, &raw)
             if e != 0 { throw IOError(code: e) }
@@ -255,7 +276,7 @@ public struct WriteHalf: ~Copyable, Sendable {
     init(reg: IORegistration) { self.reg = reg }
 
     deinit {
-        shutdown(reg.fd, Int32(SHUT_WR))
+        try? reg.shutdownWrite()
         reg.close()
     }
 

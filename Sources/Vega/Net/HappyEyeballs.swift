@@ -20,6 +20,11 @@ extension TCPStream {
     /// Vega runtime.
     public static func connect(host: String, port: Int,
                                attemptDelay: Duration = .milliseconds(250)) async throws(IOError) -> TCPStream {
+        #if canImport(Network)
+        // Network.framework resolves and races the addresses itself, and
+        // knows the device's interfaces, VPN and proxies.
+        if NetworkIO.active { return TCPStream(reg: try await NetworkIO.connect(host: host, port: port)) }
+        #endif
         _ = try IODriver.current()
         return try await connect(to: try await SocketAddress.lookup(host: host, port: port),
                                  attemptDelay: attemptDelay)

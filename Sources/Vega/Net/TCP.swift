@@ -27,6 +27,11 @@ public struct TCPListener: ~Copyable, Sendable {
     /// `port` (0 picks a free one). Call from a task on a Vega runtime.
     public static func bind(host: String = "", port: Int, backlog: Int = 1024,
                             reusePort: Bool = false) throws(IOError) -> TCPListener {
+        #if canImport(Network)
+        if NetworkIO.active {
+            return TCPListener(reg: try NetworkIO.listen(host: host, port: port, backlog: backlog, reusePort: reusePort))
+        }
+        #endif
         let driver = try IODriver.current()
         var err: Int32 = 0
         let fd = cv_tcp_listen(host, Int32(port), Int32(backlog), reusePort ? 1 : 0, &err)
@@ -37,7 +42,12 @@ public struct TCPListener: ~Copyable, Sendable {
     deinit { reg.close() }
 
     /// The port the listener is bound to.
-    public var localPort: Int { Int(cv_local_port(reg.fd)) }
+    public var localPort: Int {
+        #if canImport(Network)
+        if let port = reg.nwPort { return port }
+        #endif
+        return Int(cv_local_port(reg.fd))
+    }
 
     public var localAddress: SocketAddress { get throws(IOError) { try reg.localAddress } }
 
@@ -59,6 +69,9 @@ public struct TCPStream: ~Copyable, Sendable {
 
     /// Connect to `address`. Call from a task on a Vega runtime.
     public static func connect(to address: SocketAddress) async throws(IOError) -> TCPStream {
+        #if canImport(Network)
+        if NetworkIO.active { return TCPStream(reg: try await NetworkIO.connect(to: address)) }
+        #endif
         let driver = try IODriver.current()
         var err: Int32 = 0
         let fd = withUnsafePointer(to: address.raw) { cv_connect_new($0, socketStream, &err) }

@@ -6,8 +6,9 @@ import Glibc
 
 /// Which I/O driver a runtime uses.
 public enum IOBackend: Sendable, Equatable {
-    /// `.ioUring` where the kernel can run it, else `.readiness`.
-    /// `VEGA_DRIVER=epoll` (or `uring`) overrides.
+    /// `.ioUring` where the kernel can run it, else `.readiness`; on iOS,
+    /// tvOS, watchOS and visionOS, `.network`. `VEGA_DRIVER=epoll`, `uring`,
+    /// `kqueue` or `network` overrides.
     case automatic
     /// One edge-triggered epoll (kqueue on Darwin) per runtime.
     case readiness
@@ -16,6 +17,12 @@ public enum IOBackend: Sendable, Equatable {
     /// blocked by seccomp or `kernel.io_uring_disabled`); `Runtime.ioBackend`
     /// says which runs.
     case ioUring
+    /// Apple's Network.framework (`NWConnection`, `NWListener`) for TCP; the
+    /// readiness driver (kqueue) stays for everything else (UDP, Unix
+    /// sockets, pipes, processes). The default on iOS-family platforms,
+    /// where BSD sockets don't bring up the cellular radio or VPN on demand;
+    /// opt-in on macOS. Elsewhere it means `.automatic`.
+    case network
 }
 
 /// One operation for a worker's ring. Pointers stay valid until the
@@ -49,7 +56,7 @@ enum URing {
     /// Whether `backend` (with `VEGA_DRIVER` for `.automatic`) asks for rings.
     static func wanted(_ backend: IOBackend) -> Bool {
         switch backend {
-        case .readiness: return false
+        case .readiness, .network: return false
         case .ioUring: return true
         case .automatic:
             guard let v = getenv("VEGA_DRIVER") else { return true }
