@@ -88,10 +88,21 @@ public final class Semaphore: @unchecked Sendable {
             waiter?.continuation.resume(returning: 2)
         }
         switch code {
-        case 0: return
+        case 0:
+            handedOver()
+            return
         case 1: throw .closed
         default: throw .cancelled
         }
+    }
+
+    /// After a wait that ended with the permits: take the lock the releaser
+    /// held while waking us. The continuation already orders memory, but
+    /// Swift's runtime doesn't tell ThreadSanitizer so when the wake comes
+    /// before the task has suspended; this makes the order one it sees,
+    /// for whatever the permits guard (`AsyncMutex`'s value).
+    private func handedOver() {
+        lock.withLock { }
     }
 
     /// As `acquire`, but a cancelled task keeps waiting. Throws only `.closed`.
@@ -110,6 +121,7 @@ public final class Semaphore: @unchecked Sendable {
             if let now { c.resume(returning: now) }
         }
         if code == 1 { throw .closed }
+        handedOver()
     }
 
     /// Under the lock: take `n` permits now (0), report closed (1) or
