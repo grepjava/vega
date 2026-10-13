@@ -13,6 +13,8 @@
 #include <stddef.h>
 #include <pthread.h>
 #include <sched.h>
+#include <poll.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +35,12 @@
 #include <mach/mach_time.h>
 #include <os/os_sync_wait_on_address.h>
 #include <sys/event.h>
+#endif
+
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define CV_TSAN 1
+#endif
 #endif
 
 __thread void *cv_current_tls;
@@ -1967,13 +1975,106 @@ void cv_tcp_accepted(int fd) {
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
 }
 
-// ---- ThreadSanitizer -----------------------------------------------------
+// ---- signals -------------------------------------------------------------
+// Tokio's self-pipe: the handler counts the signal and writes a byte to a
+// pipe, which a dispatcher thread drains (cv_signal_wait). No signal has to
+// be blocked anywhere, and no driver is involved. The dispatcher unblocks the
+// installed signals on its own thread, so one sent to the process lands
+// somewhere even if every other thread has them blocked: on Darwin, dispatch
+// threads block all signals, and threads they start inherit that mask.
 
-#if defined(__has_feature)
-#if __has_feature(thread_sanitizer)
-#define CV_TSAN 1
+#define CV_NSIG 65
+static _Atomic uint64_t sig_count[CV_NSIG];
+static _Atomic int sig_installed[CV_NSIG];
+static int sig_pipe[2] = {-1, -1};
+static pthread_mutex_t sig_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t sig_thread;
+static _Atomic int sig_thread_known;
+
+static void sig_handler(int signo) {
+    int saved = errno;
+    if (signo > 0 && signo < CV_NSIG) atomic_fetch_add(&sig_count[signo], 1);
+    char b = 0;
+    ssize_t r = write(sig_pipe[1], &b, 1); // full pipe: a wake is pending anyway
+    (void)r;
+    errno = saved;
+}
+
+static int sig_open_pipe(void) {
+    int fds[2];
+    if (pipe(fds) != 0) return errno;
+    for (int i = 0; i < 2; i++) fcntl(fds[i], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL) | O_NONBLOCK);
+    sig_pipe[0] = fds[0];
+    sig_pipe[1] = fds[1];
+    return 0;
+}
+
+int cv_signal_install(int signo) {
+    if (signo <= 0 || signo >= CV_NSIG || signo >= NSIG) return EINVAL;
+    switch (signo) {
+    case SIGILL: case SIGFPE: case SIGKILL: case SIGSEGV: case SIGSTOP:
+        return EINVAL; // as Tokio: uncatchable, or no way to go on after
+    default: break;
+    }
+    if (atomic_load(&sig_installed[signo])) return 0;
+    pthread_mutex_lock(&sig_mutex);
+    int rc = 0;
+    if (sig_pipe[0] < 0) rc = sig_open_pipe();
+    if (rc == 0 && !atomic_load(&sig_installed[signo])) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_handler = sig_handler;
+        sa.sa_flags = SA_RESTART;
+        sigemptyset(&sa.sa_mask);
+        if (sigaction(signo, &sa, NULL) != 0) rc = errno;
+        else {
+            atomic_store(&sig_installed[signo], 1);
+            char b = 0; // have the dispatcher unblock it
+            ssize_t r = write(sig_pipe[1], &b, 1);
+            (void)r;
+        }
+    }
+    pthread_mutex_unlock(&sig_mutex);
+    return rc;
+}
+
+uint64_t cv_signal_count(int signo) {
+    return signo > 0 && signo < CV_NSIG ? atomic_load(&sig_count[signo]) : 0;
+}
+
+int cv_signal_raise(int signo) {
+    while (!atomic_load(&sig_thread_known)) usleep(1000);
+    return pthread_kill(sig_thread, signo);
+}
+
+void cv_signal_wait(void) {
+    char buf[64];
+    int fd;
+    sigset_t set;
+    sigemptyset(&set);
+    if (!atomic_load(&sig_thread_known)) {
+        sig_thread = pthread_self();
+        atomic_store(&sig_thread_known, 1);
+    }
+    pthread_mutex_lock(&sig_mutex);
+    fd = sig_pipe[0];
+    for (int i = 1; i < CV_NSIG && i < NSIG; i++)
+        if (atomic_load(&sig_installed[i])) sigaddset(&set, i);
+    pthread_mutex_unlock(&sig_mutex);
+    pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+#ifdef CV_TSAN
+    // TSan's own handler only queues ours until this thread's next
+    // intercepted call, and SA_RESTART keeps a blocked read from returning:
+    // come up every 10 ms so a queued signal is handled.
+    struct pollfd p = {.fd = fd, .events = POLLIN};
+    if (poll(&p, 1, 10) <= 0) return;
 #endif
-#endif
+    ssize_t r = read(fd, buf, sizeof buf); // EINTR too: the caller looks anyway
+    (void)r;
+}
+
+// ---- ThreadSanitizer -----------------------------------------------------
 
 #ifdef CV_TSAN
 void __tsan_acquire(void *addr);

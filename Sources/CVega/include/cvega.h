@@ -434,6 +434,21 @@ extern void swift_release(void *object);
 static inline void cv_task_retain(const void *task) { swift_retain((void *)task); }
 static inline void cv_task_release(const void *task) { swift_release((void *)task); }
 
+// ---- signals -------------------------------------------------------------
+/// Install Vega's handler for `signo` (once; it stays for the process).
+/// Returns 0 or an errno value: EINVAL for SIGILL, SIGFPE, SIGKILL, SIGSEGV,
+/// SIGSTOP and numbers out of range.
+int cv_signal_install(int signo);
+/// How many times `signo` has arrived since its handler went in.
+uint64_t cv_signal_count(int signo);
+/// Block until some installed signal may have arrived. Call only after a
+/// successful cv_signal_install.
+void cv_signal_wait(void);
+/// Send `signo` to the dispatcher thread (once it runs), for tests: under
+/// TSan a handler runs only when its thread makes an intercepted call, which
+/// a thread parked elsewhere may never do. Returns 0 or an errno value.
+int cv_signal_raise(int signo);
+
 /// Tell ThreadSanitizer that whatever another thread did before releasing
 /// `addr` happens before the caller's next steps; a no-op without TSan.
 /// Swift's swift_continuation_await skips its acquire when a continuation was
