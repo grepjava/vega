@@ -28,7 +28,7 @@ public struct HTTPFields: Sendable {
         }
     }
 
-    mutating func append(name: UnsafeRawBufferPointer, value: UnsafeRawBufferPointer) {
+    package mutating func append(name: UnsafeRawBufferPointer, value: UnsafeRawBufferPointer) {
         entries.append(Entry(start: UInt32(bytes.count), nameCount: UInt32(name.count), valueCount: UInt32(value.count)))
         bytes.append(contentsOf: name)
         bytes.append(contentsOf: value)
@@ -72,16 +72,16 @@ public struct HTTPFields: Sendable {
         }
     }
 
-    func name(at i: Int) -> String {
+    package func name(at i: Int) -> String {
         withRaw(i) { n, _ in String(decoding: n, as: UTF8.self) }
     }
 
-    func value(at i: Int) -> String {
+    package func value(at i: Int) -> String {
         withRaw(i) { _, v in String(decoding: v, as: UTF8.self) }
     }
 
     /// The raw name and value of field `i`.
-    func withRaw<R>(_ i: Int, _ body: (UnsafeRawBufferPointer, UnsafeRawBufferPointer) -> R) -> R {
+    package func withRaw<R>(_ i: Int, _ body: (UnsafeRawBufferPointer, UnsafeRawBufferPointer) -> R) -> R {
         let e = entries[i]
         return bytes.withUnsafeBytes { all in
             body(UnsafeRawBufferPointer(rebasing: all[Int(e.start)..<e.valueStart]),

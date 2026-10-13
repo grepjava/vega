@@ -21,7 +21,8 @@ public struct HTTPMethod: RawRepresentable, Hashable, Sendable, CustomStringConv
     public var description: String { rawValue }
 }
 
-/// An HTTP version. This module speaks 1.0 and 1.1.
+/// An HTTP version. VegaHTTP1 speaks 1.0 and 1.1; VegaHTTP2 marks its
+/// messages 2.0.
 public struct HTTPVersion: Hashable, Sendable, CustomStringConvertible {
     public var major: Int
     public var minor: Int
@@ -33,6 +34,7 @@ public struct HTTPVersion: Hashable, Sendable, CustomStringConvertible {
 
     public static let http1_0 = HTTPVersion(major: 1, minor: 0)
     public static let http1_1 = HTTPVersion(major: 1, minor: 1)
+    public static let http2 = HTTPVersion(major: 2, minor: 0)
 
     public var description: String { "HTTP/\(major).\(minor)" }
 }
