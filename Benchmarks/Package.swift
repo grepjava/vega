@@ -17,6 +17,14 @@ let package = Package(
             dependencies: [.product(name: "Vega", package: "vega")],
             swiftSettings: [.swiftLanguageMode(.v6), .unsafeFlags(["-enforce-exclusivity=unchecked"])]
         ),
+        // the-benchmarker's HTTP contract on VegaHTTP1, against Hummingbird
+        // and Vapor (VegaNIO/Examples).
+        .executableTarget(
+            name: "vega-http",
+            dependencies: [.product(name: "Vega", package: "vega"),
+                           .product(name: "VegaHTTP1", package: "vega")],
+            swiftSettings: [.swiftLanguageMode(.v6), .unsafeFlags(["-enforce-exclusivity=unchecked"])]
+        ),
         // UDP echo server, driven by tokio-bench's udp-load.
         .executableTarget(
             name: "vega-udp",
