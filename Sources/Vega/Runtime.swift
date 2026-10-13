@@ -264,7 +264,7 @@ public final class Runtime: Sendable {
 }
 
 /// Carries a `~Copyable` value into a task: taken exactly once, by the task.
-private final class Handoff<Value: ~Copyable>: @unchecked Sendable {
+final class Handoff<Value: ~Copyable>: @unchecked Sendable {
     private var value: Value?
 
     init(_ value: consuming Value) { self.value = consume value }
