@@ -445,6 +445,66 @@ int cv_system_dns_config(char *out, int len) {
     return used;
 }
 
+// ---- console control events as signals -----------------------------------
+// Windows has no signals to catch; its console sends control events, each to
+// a fresh thread running the handler. SIGINT is Ctrl-C, SIGBREAK Ctrl-Break,
+// SIGTERM the console closing, the user logging off or the system shutting
+// down. The handler counts the event and wakes the dispatcher.
+
+#define CV_NSIG 32
+static volatile LONG64 sig_count[CV_NSIG];
+static volatile LONG sig_installed[CV_NSIG];
+static HANDLE sig_wake; // a semaphore: one release per delivery
+static INIT_ONCE sig_once = INIT_ONCE_STATIC_INIT;
+
+static int ctrl_signal(DWORD type) {
+    switch (type) {
+    case CTRL_C_EVENT: return 2;     // SIGINT
+    case CTRL_BREAK_EVENT: return 21; // SIGBREAK
+    case CTRL_CLOSE_EVENT: case CTRL_LOGOFF_EVENT: case CTRL_SHUTDOWN_EVENT: return 15; // SIGTERM
+    default: return 0;
+    }
+}
+
+static void sig_deliver(int signo) {
+    InterlockedIncrement64(&sig_count[signo]);
+    ReleaseSemaphore(sig_wake, 1, NULL);
+}
+
+static BOOL WINAPI ctrl_handler(DWORD type) {
+    int signo = ctrl_signal(type);
+    if (!signo || !InterlockedCompareExchange(&sig_installed[signo], 0, 0)) return FALSE; // default action
+    sig_deliver(signo);
+    return TRUE;
+}
+
+static BOOL CALLBACK sig_setup(PINIT_ONCE once, PVOID param, PVOID *ctx) {
+    (void)once, (void)param, (void)ctx;
+    sig_wake = CreateSemaphoreW(NULL, 0, LONG_MAX, NULL);
+    return sig_wake && SetConsoleCtrlHandler(ctrl_handler, TRUE);
+}
+
+int cv_signal_install(int signo) {
+    if (signo != 2 && signo != 21 && signo != 15) return EINVAL;
+    if (!InitOnceExecuteOnce(&sig_once, sig_setup, NULL, NULL)) return EIO;
+    InterlockedExchange(&sig_installed[signo], 1);
+    return 0;
+}
+
+uint64_t cv_signal_count(int signo) {
+    return signo > 0 && signo < CV_NSIG ? (uint64_t)InterlockedCompareExchange64(&sig_count[signo], 0, 0) : 0;
+}
+
+void cv_signal_wait(void) { WaitForSingleObject(sig_wake, INFINITE); }
+
+int cv_signal_raise(int signo) {
+    // Tests: as if the console sent it, without touching the real console
+    // (which would reach every process attached to it).
+    if (signo <= 0 || signo >= CV_NSIG || !InterlockedCompareExchange(&sig_installed[signo], 0, 0)) return EINVAL;
+    sig_deliver(signo);
+    return 0;
+}
+
 // ---- Unix domain sockets (AF_UNIX, Windows 10 1803 and later) -------------
 
 static int unix_address(const char *path, struct sockaddr_un *un, int *len) {
