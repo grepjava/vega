@@ -113,6 +113,14 @@ public struct TCPStream: ~Copyable, Sendable {
     }
 
 
+    /// Send as much of `parts` as the socket takes now, without waiting:
+    /// the bytes sent, which may be fewer than offered, or 0 if it is full.
+    /// For code that must not suspend (a NIO channel's flush, say); send the
+    /// rest with `write(vectored:)`. Always 0 on Network.framework.
+    public func tryWrite(vectored parts: UnsafeBufferPointer<UnsafeRawBufferPointer>) throws(IOError) -> Int {
+        try reg.trySend(parts: parts.count) { parts[$0] }
+    }
+
     /// Stop sending: the peer reads end-of-stream once it has the rest.
     public func shutdownWrite() throws(IOError) { try reg.shutdownWrite() }
 

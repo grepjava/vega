@@ -149,6 +149,50 @@ private func drain(_ conn: borrowing TCPStream) async -> [UInt8] {
         }
         #expect(received == "HTTP/1.1 200 OK\r\n\r\nhello")
     }
+
+    /// tryWrite sends what fits without waiting: with nobody reading, the
+    /// socket fills and it returns 0; the rest goes with write, and every
+    /// byte arrives once, in order.
+    @Test func tryWriteStopsWhenFull() throws {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let chunk = (0..<65_536).map { UInt8(truncatingIfNeeded: $0 &* 31) }
+        let (received, sentInline, sawFull) = try rt.block { () async throws(IOError) -> ([UInt8], Int, Bool) in
+            let listener = try TCPListener.bind(host: "127.0.0.1", port: 0)
+            let client = try await TCPStream.connect(host: "127.0.0.1", port: listener.localPort)
+            let server = try await listener.accept()
+            let bytes = UnsafeMutableRawBufferPointer.allocate(byteCount: chunk.count, alignment: 1)
+            defer { bytes.deallocate() }
+            bytes.copyBytes(from: chunk)
+            // Two parts, so a short send can end inside either.
+            let parts = UnsafeMutableBufferPointer<UnsafeRawBufferPointer>.allocate(capacity: 2)
+            defer { parts.deallocate() }
+            parts[0] = UnsafeRawBufferPointer(rebasing: bytes[..<1_000])
+            parts[1] = UnsafeRawBufferPointer(rebasing: bytes[1_000...])
+            var total = 0
+            for _ in 0..<1_000 {
+                let n = try client.tryWrite(vectored: UnsafeBufferPointer(parts))
+                total += n
+                guard n == chunk.count else {
+                    // Full, nobody reading: the rest of this round by the
+                    // waiting path, with a reader now.
+                    let reader = rt.spawn(with: server) { conn in await drain(conn) }
+                    try await client.write(UnsafeRawBufferPointer(rebasing: bytes[n...]))
+                    try client.shutdownWrite()
+                    return (await reader.value, total, true)
+                }
+            }
+            return ([], total, false)
+        }
+        #expect(sawFull)
+        #expect(sentInline > 0)
+        // Whole rounds, then one round split between tryWrite and write.
+        let rounds = sentInline / chunk.count + 1
+        var expected: [UInt8] = []
+        for _ in 0..<rounds { expected += chunk }
+        #expect(received.count == expected.count)
+        #expect(received == expected)
+    }
 }
 
 @Suite struct DatagramBatchTests {

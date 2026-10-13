@@ -136,6 +136,61 @@ extension IORegistration {
         await Runtime.consumeBudget()
     }
 
+    /// Send what the socket takes now of `count` buffers, without waiting:
+    /// the bytes sent, 0 if it has no room. Always 0 on Network.framework,
+    /// which has no synchronous send.
+    func trySend(parts count: Int, _ part: (Int) -> UnsafeRawBufferPointer) throws(IOError) -> Int {
+        #if canImport(Network)
+        if nw != nil { return 0 }
+        #endif
+        var index = 0, offset = 0, sent = 0
+        while true {
+            while index < count && offset == part(index).count {
+                index += 1
+                offset = 0
+            }
+            if index == count { return sent }
+            var offered = 0
+            let n = withUnsafeTemporaryAllocation(of: cv_iovec.self, capacity: 64) { iov in
+                var k = 0, i = index
+                while k < 64 && i < count {
+                    let p = part(i)
+                    let skip = i == index ? offset : 0
+                    if p.count > skip {
+                        iov[k] = cv_iovec(base: p.baseAddress! + skip, len: p.count - skip)
+                        offered += p.count - skip
+                        k += 1
+                    }
+                    i += 1
+                }
+                return cv_sendv(fd, iov.baseAddress, Int32(k))
+            }
+            if n >= 0 {
+                sent += n
+                // Short: the socket is full, and another call would say so.
+                if n < offered { return sent }
+                var left = n
+                while left > 0 {
+                    let rest = part(index).count - offset
+                    if left < rest {
+                        offset += left
+                        break
+                    }
+                    left -= rest
+                    index += 1
+                    offset = 0
+                }
+                continue
+            }
+            let err = Int32(-n)
+            switch err {
+            case EAGAIN, EWOULDBLOCK: return sent
+            case EINTR: continue
+            default: throw IOError(code: err)
+            }
+        }
+    }
+
     /// Accept connections with `accept` (a cv_*_accept), registering each.
     @inline(__always)
     func accept(_ accept: (Int32, UnsafeMutablePointer<Int32>) -> Int32) async throws(IOError) -> IORegistration {
@@ -308,6 +363,14 @@ public struct WriteHalf: ~Copyable, Sendable {
         try await reg.write(parts: parts.count) { parts[$0] }
     }
 
+
+    /// Send as much of `parts` as the socket takes now, without waiting:
+    /// the bytes sent, which may be fewer than offered, or 0 if it is full.
+    /// For code that must not suspend (a NIO channel's flush, say); send the
+    /// rest with `write(vectored:)`. Always 0 on Network.framework.
+    public func tryWrite(vectored parts: UnsafeBufferPointer<UnsafeRawBufferPointer>) throws(IOError) -> Int {
+        try reg.trySend(parts: parts.count) { parts[$0] }
+    }
 
     /// Stop sending now rather than when the half is dropped.
     public func shutdownWrite() throws(IOError) { try reg.shutdownWrite() }
