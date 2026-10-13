@@ -4,7 +4,17 @@ import PackageDescription
 let package = Package(
     name: "VegaBenchmarks",
     platforms: [.macOS("26.4")],
-    dependencies: [.package(path: "..")],
+    // Passed through to Vega: `swift build --traits BoringSSL` builds
+    // vega-https on BoringSSL instead of the system's OpenSSL.
+    traits: [
+        .trait(name: "OpenSSL"),
+        .trait(name: "BoringSSL"),
+        .default(enabledTraits: ["OpenSSL"]),
+    ],
+    dependencies: [.package(path: "..", traits: [
+        .trait(name: "OpenSSL", condition: .when(traits: ["OpenSSL"])),
+        .trait(name: "BoringSSL", condition: .when(traits: ["BoringSSL"])),
+    ])],
     targets: [
         .executableTarget(
             name: "vega-bench",

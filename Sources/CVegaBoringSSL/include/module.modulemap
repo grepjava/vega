@@ -1,0 +1,4 @@
+module CVegaBoringSSL {
+    umbrella header "CVegaBoringSSL.h"
+    export *
+}

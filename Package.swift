@@ -20,6 +20,15 @@ let package = Package(
         .library(name: "VegaExtras", targets: ["VegaExtras"]),
         .library(name: "VegaTest", targets: ["VegaTest"]),
     ],
+    // The TLS library under VegaTLS. A dependent picks BoringSSL with
+    //   .package(url: "https://github.com/grepjava/vega.git", from: ..., traits: ["BoringSSL"])
+    // and a build of this package with `swift build --traits BoringSSL`.
+    traits: [
+        .trait(name: "OpenSSL", description: "VegaTLS on the system's OpenSSL 3 (the default)."),
+        .trait(name: "BoringSSL",
+               description: "VegaTLS on the vendored BoringSSL in Sources/CVegaBoringSSL: cheaper handshakes, no system OpenSSL needed. Wins if OpenSSL is enabled too."),
+        .default(enabledTraits: ["OpenSSL"]),
+    ],
     targets: [
         .target(name: "CVega", cSettings: [.define("_GNU_SOURCE")],
                 linkerSettings: [.linkedLibrary("dl", .when(platforms: [.linux])),
@@ -34,16 +43,35 @@ let package = Package(
         .target(name: "VegaProcess", dependencies: ["Vega", "VegaIO", "CVega"], swiftSettings: swiftSettings),
         .target(name: "VegaMetrics", dependencies: ["Vega"], swiftSettings: swiftSettings),
         .target(name: "VegaTest", dependencies: ["Vega", "VegaIO", "CVega"], swiftSettings: swiftSettings),
-        // TLS on the system's OpenSSL (3.0+): libssl-dev on Linux, Homebrew's
-        // openssl@3 on macOS; on Windows, an OpenSSL whose include and lib
-        // directories are on INCLUDE and LIB. Only the C target sees its headers.
+        // TLS on the system's OpenSSL (3.0+) with the OpenSSL trait:
+        // libssl-dev on Linux, Homebrew's openssl@3 on macOS; on Windows, an
+        // OpenSSL whose include and lib directories are on INCLUDE and LIB.
+        // Only the C target sees its headers.
         .systemLibrary(name: "COpenSSL", pkgConfig: "openssl",
                        providers: [.apt(["libssl-dev"]), .brew(["openssl@3"]), .yum(["openssl-devel"])]),
-        .target(name: "CVegaTLS", dependencies: [.target(name: "COpenSSL", condition: .when(platforms: [.linux, .macOS, .windows]))],
-                linkerSettings: [.linkedLibrary("ssl", .when(platforms: [.linux, .macOS])),
-                                 .linkedLibrary("crypto", .when(platforms: [.linux, .macOS])),
-                                 .linkedLibrary("libssl", .when(platforms: [.windows])),
-                                 .linkedLibrary("libcrypto", .when(platforms: [.windows])),
+        // BoringSSL, vendored and prefixed CVegaBoringSSL, with the BoringSSL
+        // trait. Its VENDORING.md says where it came from and how to update it.
+        .target(name: "CVegaBoringSSL",
+                cSettings: [.define("_GNU_SOURCE"),
+                            .define("_POSIX_C_SOURCE", to: "200112L"),
+                            .define("_DARWIN_C_SOURCE"),
+                            // Recent Windows SDKs pull in headers whose symbols
+                            // collide with BoringSSL's.
+                            .define("_WINSOCKAPI_", .when(platforms: [.windows])),
+                            .define("NOMINMAX", .when(platforms: [.windows])),
+                            .define("NOCRYPT", .when(platforms: [.windows]))],
+                cxxSettings: [.define("_WINSOCKAPI_", .when(platforms: [.windows])),
+                              .define("NOMINMAX", .when(platforms: [.windows])),
+                              .define("NOCRYPT", .when(platforms: [.windows]))]),
+        .target(name: "CVegaTLS",
+                dependencies: [.target(name: "COpenSSL", condition: .when(platforms: [.linux, .macOS, .windows], traits: ["OpenSSL"])),
+                               .target(name: "CVegaBoringSSL", condition: .when(traits: ["BoringSSL"]))],
+                cSettings: [.define("VEGA_TLS_OPENSSL", .when(traits: ["OpenSSL"])),
+                            .define("VEGA_TLS_BORINGSSL", .when(traits: ["BoringSSL"]))],
+                linkerSettings: [.linkedLibrary("ssl", .when(platforms: [.linux, .macOS], traits: ["OpenSSL"])),
+                                 .linkedLibrary("crypto", .when(platforms: [.linux, .macOS], traits: ["OpenSSL"])),
+                                 .linkedLibrary("libssl", .when(platforms: [.windows], traits: ["OpenSSL"])),
+                                 .linkedLibrary("libcrypto", .when(platforms: [.windows], traits: ["OpenSSL"])),
                                  .linkedLibrary("crypt32", .when(platforms: [.windows]))]),
         .target(name: "VegaTLS", dependencies: ["Vega", "VegaIO", "CVegaTLS"], swiftSettings: swiftSettings),
         // gzip and deflate on the system's zlib; brotli and zstd loaded with

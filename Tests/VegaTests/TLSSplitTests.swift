@@ -1,4 +1,4 @@
-#if os(Linux) || os(macOS) || os(Windows)
+#if (os(Linux) || os(macOS) || os(Windows)) && (OpenSSL || BoringSSL)
 import Testing
 import Vega
 import VegaIO

@@ -474,7 +474,7 @@ Closed-loop p50 at 512 connections was 8.5 ms for Hummingbird on both groups, an
 `Benchmarks/Sources/vega-https` is vega-http over `TLSStream`. It is built twice:
 
 - **OpenSSL:** the normal build, linked against the box's system OpenSSL 3.5.5.
-- **BoringSSL:** built by `Benchmarks/tls-boringssl.sh`, which compiles the same VegaTLS shim against aviancore's vendored BoringSSL (817ab07, through swift-nio-ssl 2.37.4). The shim's few OpenSSL-3-only calls have adapters behind `OPENSSL_IS_BORINGSSL`, and VegaTLS's TLS tests pass on both libraries.
+- **BoringSSL:** `swift build --traits BoringSSL` in `Benchmarks/`, which builds VegaTLS on the vendored BoringSSL in `Sources/CVegaBoringSSL` (817ab07, through swift-nio-ssl 2.37.4, the same copy as aviancore's). The shim's few OpenSSL-3-only calls have adapters behind `OPENSSL_IS_BORINGSSL`, and VegaTLS's TLS tests pass on both libraries. (The runs below were made with an earlier scratch build of the same code.)
 
 **Setup.**
 - **Certificate:** both builds use the same ECDSA P-256 certificate, and both negotiate TLS 1.3 with `TLS_AES_256_GCM_SHA384`.

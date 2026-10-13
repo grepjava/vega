@@ -1,5 +1,5 @@
-// The system OpenSSL: not on iOS, tvOS, watchOS or visionOS.
-#if os(Linux) || os(macOS) || os(Windows)
+// On the OpenSSL or BoringSSL trait; not on iOS, tvOS, watchOS or visionOS.
+#if (os(Linux) || os(macOS) || os(Windows)) && (OpenSSL || BoringSSL)
 import CVegaTLS
 import Synchronization
 import Vega

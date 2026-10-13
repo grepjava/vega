@@ -1,6 +1,7 @@
-// TLS over the system's OpenSSL, through memory BIOs: OpenSSL never sees a
-// socket. Every call clears OpenSSL's per-thread error queue first, since a
-// connection's calls may come from any worker thread.
+// TLS over the system's OpenSSL, or BoringSSL with the BoringSSL trait, through
+// memory BIOs: the library never sees a socket. Every call clears the
+// library's per-thread error queue first, since a connection's calls may come
+// from any worker thread.
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -9,15 +10,15 @@
 #include "cvega_tls.h"
 
 #if defined(VEGA_TLS_BORINGSSL)
-// Only for comparing TLS libraries (Benchmarks/tls-boringssl.sh): aviancore's
-// vendored BoringSSL, whose public names carry the CAvianSSL prefix.
-#include "CAvianSSL_err.h"
-#include "CAvianSSL_evp.h"
-#include "CAvianSSL_pem.h"
-#include "CAvianSSL_ssl.h"
-#include "CAvianSSL_x509v3.h"
+// The BoringSSL trait: the vendored copy, whose public names carry the
+// CVegaBoringSSL prefix.
+#include "CVegaBoringSSL_err.h"
+#include "CVegaBoringSSL_evp.h"
+#include "CVegaBoringSSL_pem.h"
+#include "CVegaBoringSSL_ssl.h"
+#include "CVegaBoringSSL_x509v3.h"
 #define CV_HAVE_TLS 1
-#elif __has_include(<openssl/ssl.h>) // none on iOS and the like: VegaTLS is empty there
+#elif defined(VEGA_TLS_OPENSSL) && __has_include(<openssl/ssl.h>) // none on iOS and the like: VegaTLS is empty there
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
