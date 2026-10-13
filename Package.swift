@@ -85,5 +85,6 @@ let package = Package(
         .target(name: "VegaExtras", dependencies: ["Vega", "VegaIO", "VegaHTTP1", "CVegaCompress"], swiftSettings: swiftSettings),
         .testTarget(name: "VegaTests", dependencies: ["Vega", "VegaIO", "VegaFS", "VegaProcess", "VegaMetrics", "VegaTest", "VegaTLS", "VegaHTTP1", "VegaHTTP2", "VegaWebSocket", "VegaExtras", "CVega"], swiftSettings: swiftSettings),
     ],
-    cLanguageStandard: .gnu11
+    cLanguageStandard: .gnu11,
+    cxxLanguageStandard: .gnucxx17
 )
