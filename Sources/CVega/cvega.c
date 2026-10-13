@@ -472,6 +472,9 @@ int cv_driver_turn(cv_driver *d, cv_parker *p, int64_t timeout_ns) {
             if ((w = io_ready(io, CV_IO_READ))) d->wakes[woken++] = w;
         } else if (ev->filter == EVFILT_WRITE) {
             if ((w = io_ready(io, CV_IO_WRITE))) d->wakes[woken++] = w;
+        } else if (ev->filter == EVFILT_PROC) {
+            // A watched child exited (cv_driver_watch_exit): its read side.
+            if ((w = io_ready(io, CV_IO_READ))) d->wakes[woken++] = w;
         }
 #endif
     }
@@ -539,6 +542,43 @@ void cv_driver_deregister(cv_driver *d, cv_io *io) {
     } while (!atomic_compare_exchange_weak_explicit(&d->released, &head, io,
                                                     memory_order_release, memory_order_relaxed));
 }
+
+#if !defined(__linux__)
+cv_io *cv_driver_watch_exit(cv_driver *d, int pid, int *err) {
+    cv_io *io = calloc(1, sizeof *io);
+    if (!io) {
+        *err = ENOMEM;
+        return NULL;
+    }
+    io->fd = -1;
+    io->refs = 1;
+    // One-shot: the exit is the only event, and kqueue drops the filter
+    // once it is collected.
+    struct kevent ch, out;
+    EV_SET(&ch, pid, EVFILT_PROC, EV_ADD | EV_ONESHOT | EV_RECEIPT, NOTE_EXIT, 0, io);
+    int n = kevent(d->poll_fd, &ch, 1, &out, 1, NULL);
+    int e = n < 0 ? errno : n < 1 ? EIO : (out.flags & EV_ERROR) ? (int)out.data : 0;
+    if (e) {
+        *err = e; // ESRCH: it has exited already
+        free(io);
+        return NULL;
+    }
+    atomic_fetch_add_explicit(&d->registered, 1, memory_order_relaxed);
+    return io;
+}
+
+void cv_driver_unwatch_exit(cv_driver *d, cv_io *io, int pid) {
+    struct kevent del;
+    EV_SET(&del, pid, EVFILT_PROC, EV_DELETE, 0, 0, NULL);
+    kevent(d->poll_fd, &del, 1, NULL, 0, NULL); // ENOENT once it fired
+    atomic_fetch_sub_explicit(&d->registered, 1, memory_order_relaxed);
+    cv_io *head = atomic_load_explicit(&d->released, memory_order_relaxed);
+    do {
+        io->next = head;
+    } while (!atomic_compare_exchange_weak_explicit(&d->released, &head, io,
+                                                    memory_order_release, memory_order_relaxed));
+}
+#endif
 
 #else // no driver on this platform yet
 

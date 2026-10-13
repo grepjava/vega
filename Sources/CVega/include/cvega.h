@@ -463,6 +463,15 @@ extern void swift_release(void *object);
 static inline void cv_task_retain(const void *task) { swift_retain((void *)task); }
 static inline void cv_task_release(const void *task) { swift_release((void *)task); }
 
+#if !defined(__linux__)
+/// kqueue only: watch child `pid` for its exit (EVFILT_PROC, NOTE_EXIT). The
+/// exit shows as the read side of the returned io, which has no fd. NULL and
+/// *err set on failure (ESRCH: it has exited already). Release it with
+/// cv_driver_unwatch_exit.
+cv_io *cv_driver_watch_exit(cv_driver *d, int pid, int *err);
+void cv_driver_unwatch_exit(cv_driver *d, cv_io *io, int pid);
+#endif
+
 // ---- signals -------------------------------------------------------------
 /// Install Vega's handler for `signo` (once; it stays for the process).
 /// Returns 0 or an errno value: EINVAL for SIGILL, SIGFPE, SIGKILL, SIGSEGV,

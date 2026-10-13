@@ -14,8 +14,9 @@ import Darwin
 /// Waiting closes stdin first, so a child that reads its input to the end
 /// can finish.
 ///
-/// On Linux the exit is watched through a pidfd on the runtime's driver,
-/// with no thread and no SIGCHLD handler. Elsewhere `wait` polls, backing
+/// The exit is watched on the runtime's driver, with no thread and no
+/// SIGCHLD handler: through a pidfd on Linux, EVFILT_PROC on Darwin.
+/// Spawned off a runtime (or without pidfds), `wait` polls instead, backing
 /// off to 50 ms.
 ///
 /// A child dropped before it was waited for is reaped in the background
@@ -30,6 +31,9 @@ public struct Child: ~Copyable, Sendable {
     public var stderr: PipeReader?
     /// The pidfd, where there is one, and its number (-1: none).
     private var exit: ReadinessWatch?
+    #if canImport(Darwin)
+    private var procExit: ProcessExitWatch?
+    #endif
     private var pidfd: Int32 = -1
     private var status: ExitStatus?
     private let killOnDrop: Bool
@@ -47,6 +51,11 @@ public struct Child: ~Copyable, Sendable {
     }
 
     mutating func watchExit() throws(IOError) {
+        #if canImport(Darwin)
+        // Off a runtime, or the child has gone already (ESRCH): poll.
+        procExit = try? ProcessExitWatch(pid: pid)
+        return
+        #endif
         let fd = cv_pidfd_open(pid)
         guard fd >= 0 else { return } // no pidfds: poll
         exit = try ReadinessWatch(adopting: fd)
@@ -61,6 +70,15 @@ public struct Child: ~Copyable, Sendable {
         var backoff = Duration.milliseconds(1)
         while true {
             if let status = try tryWait() { return status }
+            #if canImport(Darwin)
+            switch procExit {
+            case .some(let watch):
+                try await watch.exited()
+                continue
+            case .none:
+                break
+            }
+            #endif
             switch exit {
             case .some(let watch):
                 try await watch.readable()
@@ -73,6 +91,14 @@ public struct Child: ~Copyable, Sendable {
                 backoff = min(backoff * 2, .milliseconds(50))
             }
         }
+    }
+
+    /// Whether the exit is watched on the driver, for tests.
+    package var exitWatched: Bool {
+        #if canImport(Darwin)
+        if procExit != nil { return true }
+        #endif
+        return exit != nil
     }
 
     /// The status if the child has ended, else nil, without waiting.

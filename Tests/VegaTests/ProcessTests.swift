@@ -96,6 +96,34 @@ private func sh(_ script: String) -> Command {
         #expect(elapsed < .seconds(5))
     }
 
+    /// The exit wakes the waiting task through the driver (a pidfd, or
+    /// EVFILT_PROC), not a poll.
+    @Test func exitIsWatchedOnTheDriver() throws {
+        let (watched, late) = try run { () async throws -> (Bool, Duration) in
+            var child = try Command("sleep", arguments: ["0.2"]).spawn()
+            let start = ContinuousClock.now
+            let watched = child.exitWatched
+            let status = try await child.wait()
+            #expect(status.isSuccess)
+            return (watched, ContinuousClock.now - start - .milliseconds(200))
+        }
+        #expect(watched)
+        #expect(late < .seconds(1), "late by \(late)")
+    }
+
+    /// A child that ended before anyone waited: its status is there at once.
+    @Test func exitBeforeTheWait() throws {
+        let (status, elapsed) = try run { () async throws -> (VegaProcess.ExitStatus, Duration) in
+            var child = try sh("exit 7").spawn()
+            try await Runtime.sleep(for: .milliseconds(100))
+            let start = ContinuousClock.now
+            let status = try await child.wait()
+            return (status, ContinuousClock.now - start)
+        }
+        #expect(status.code == 7)
+        #expect(elapsed < .milliseconds(500))
+    }
+
     @Test func environmentAndWorkingDirectory() throws {
         let out = try run { () async throws -> Output in
             var cmd = sh("echo \"$GREETING\"; echo \"${HOME-unset}\"; pwd")

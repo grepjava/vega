@@ -130,4 +130,42 @@ package struct ReadinessWatch: ~Copyable, Sendable {
         try await reg.wait(CV_IO_READ)
     }
 }
+
+#if canImport(Darwin)
+/// A child's exit that a task can wait for, through the runtime's kqueue
+/// (EVFILT_PROC, NOTE_EXIT): VegaProcess's stand-in for a pidfd. It does not
+/// reap the child.
+package struct ProcessExitWatch: ~Copyable, Sendable {
+    let reg: IORegistration
+    let pid: Int32
+
+    /// Off a Vega runtime: `IOError.notOnRuntime`. ESRCH: the child has
+    /// exited already (reap it with waitpid).
+    package init(pid: Int32) throws(IOError) {
+        let driver = try IODriver.current()
+        var err: Int32 = 0
+        guard let raw = driver.raw, let io = cv_driver_watch_exit(raw, pid, &err) else {
+            throw IOError(code: err == 0 ? ENOSYS : err)
+        }
+        reg = IORegistration(io: io, driver: driver)
+        self.pid = pid
+    }
+
+    deinit { cv_driver_unwatch_exit(reg.driver, reg.io, pid) }
+
+    /// Wait until the child has exited (at once if it has).
+    package func exited() async throws(IOError) {
+        try await reg.wait(CV_IO_READ)
+    }
+}
+
+extension IORegistration {
+    /// An io the driver made for something other than an fd.
+    init(io: UnsafeMutablePointer<cv_io>, driver: IODriver) {
+        self.io = io
+        self.driver = driver.raw
+        self.owner = driver.owner
+    }
+}
+#endif
 #endif
