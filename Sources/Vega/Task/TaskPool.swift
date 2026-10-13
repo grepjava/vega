@@ -1,3 +1,4 @@
+import CVega
 import Synchronization
 
 /// Runs short closures on a pool of long-lived Swift tasks, so starting one is
@@ -108,6 +109,8 @@ public final class TaskPool: @unchecked Sendable {
                 }
                 if resume.hand { c.resume(returning: resume.work) }
             }
+            // spawn can resume us before we suspend; see cv_tsan_acquire.
+            cv_tsan_acquire(cv_task_current())
             guard let next else { break }
             await next()
         }

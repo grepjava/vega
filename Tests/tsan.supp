@@ -9,3 +9,6 @@
 # Only reports whose top frame is the compiler-generated body of
 # withUnsafeContinuation itself are suppressed.
 race_top:ss22withUnsafeContinuation9isolation_
+# The same frame as macOS symbolizes it: demangled, and here also the
+# variant without `isolation:` (withUnsafeContinuation<A>(_:)).
+race_top:withUnsafeContinuation<
