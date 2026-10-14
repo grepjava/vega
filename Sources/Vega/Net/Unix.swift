@@ -75,8 +75,21 @@ public struct UnixStream: ~Copyable, Sendable {
 
     /// Read into `buffer`'s spare capacity. Returns the bytes read: 0 means
     /// the peer closed its side (or the buffer has no room left).
+    @inlinable
     public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
-        try await reg.read(into: &buffer)
+        // Inlined, a read on the ring suspends the caller directly: see
+        // `RingRead`.
+        let reg = reg
+        if let ring = reg.ringRead(&buffer) {
+            let res = await withUnsafeContinuation { reg.submit(ring, $0) }
+            var yield = false
+            let n = try reg.finish(ring, res, &buffer, &yield)
+            if n >= 0 {
+                if yield { await Runtime.yieldSpent() }
+                return n
+            }
+        }
+        return try await reg.readSlow(into: &buffer)
     }
 
     /// Wait until a read would return at once, without reading: for input

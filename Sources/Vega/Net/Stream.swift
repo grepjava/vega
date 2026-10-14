@@ -12,7 +12,81 @@ import ucrt
 // share. The readiness backends try the syscall first and wait only on EAGAIN.
 // The uring driver submits reads and accepts on the ring (a read usually has
 // to wait anyway); writes still try the syscall first.
+/// A read on the current worker's ring by a task with an `IOTaskHook`, set
+/// up by `IORegistration.ringRead`: the public reads run it inline, so the
+/// caller suspends on the ring's completion directly. An async call into
+/// the read would cost an executor hop on the way in and another on the
+/// way back, each a look-up of the task's executor preference under its
+/// status-record lock.
+@usableFromInline
+struct RingRead {
+    #if os(Linux)
+    fileprivate let ring: OpaquePointer
+    fileprivate let hook: Unmanaged<IOTaskHook>
+    fileprivate let deadline: Unmanaged<IODeadline>?
+    fileprivate let base: UnsafeMutableRawPointer
+    fileprivate let length: Int
+    #endif
+}
+
 extension IORegistration {
+    /// A read the caller can run inline (see `RingRead`), or nil: then it
+    /// calls `readSlow`, which handles every case.
+    @usableFromInline
+    func ringRead(_ buffer: inout IOBuffer) -> RingRead? {
+        #if os(Linux)
+        guard buffer.spareCapacity > 0, let ring = URing.current, let hook = IOTaskHook.active else { return nil }
+        return RingRead(ring: ring, hook: .passUnretained(hook), deadline: hook.deadline.map { .passUnretained($0) },
+                        base: buffer.base + buffer.count, length: buffer.spareCapacity)
+        #else
+        return nil
+        #endif
+    }
+
+    /// Submit `read` and arm its task's hook, from inside the continuation.
+    @usableFromInline
+    func submit(_ read: RingRead, _ c: UnsafeContinuation<Int64, Never>) {
+        #if os(Linux)
+        var gen: UInt64 = 0
+        let op: OpaquePointer = cv_uring_recv(read.ring, unsafeBitCast(c, to: UInt.self), fd, read.base, read.length, &gen)
+        // Cancelled or past the deadline already: cancel it now.
+        let cancel = IOInterrupt.uring(op, gen)
+        let armed = read.hook._withUnsafeGuaranteedRef { $0.arm(cancel) }
+            && (read.deadline?._withUnsafeGuaranteedRef { $0.arm(cancel) } ?? true)
+        if !armed { cancel.fire() }
+        #endif
+    }
+
+    /// Settle `read` with the ring's result `res`: the bytes read, now in
+    /// `buffer`, and whether the budget ran out (`yield`); or -1 when the
+    /// read must be tried again (`readSlow`).
+    @usableFromInline
+    func finish(_ read: RingRead, _ res: Int64, _ buffer: inout IOBuffer, _ yield: inout Bool) throws(IOError) -> Int {
+        #if os(Linux)
+        read.hook._withUnsafeGuaranteedRef { $0.disarm() }
+        read.deadline?._withUnsafeGuaranteedRef { $0.disarm() }
+        if res >= 0 {
+            buffer.count += Int(res)
+            yield = Runtime.spendBudget()
+            return Int(res)
+        }
+        // Given up at the deadline rather than by cancellation: say so.
+        if res == -Int64(ECANCELED), !Task.isCancelled,
+           read.deadline?._withUnsafeGuaranteedRef({ $0.hasFired }) == true {
+            throw .timedOut
+        }
+        try Self.retryable(res)
+        #endif
+        return -1
+    }
+
+    /// `read(into:)`, out of line: for the public reads when `ringRead`
+    /// says no.
+    @usableFromInline
+    func readSlow(into buffer: inout IOBuffer) async throws(IOError) -> Int {
+        try await read(into: &buffer)
+    }
+
     /// Read into `buffer`'s spare capacity: bytes read, 0 at end of stream.
     @inline(__always)
     func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
@@ -569,7 +643,7 @@ public struct SplitStream: ~Copyable, Sendable {
 
 /// The reading half of a split stream. Dropping both halves closes the socket.
 public struct ReadHalf: ~Copyable, Sendable {
-    let reg: IORegistration
+    @usableFromInline let reg: IORegistration
 
     init(reg: IORegistration) { self.reg = reg }
 
@@ -577,8 +651,21 @@ public struct ReadHalf: ~Copyable, Sendable {
 
     /// Read into `buffer`'s spare capacity. Returns the bytes read: 0 means
     /// the peer closed its side (or the buffer has no room left).
+    @inlinable
     public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
-        try await reg.read(into: &buffer)
+        // Inlined, a read on the ring suspends the caller directly: see
+        // `RingRead`.
+        let reg = reg
+        if let ring = reg.ringRead(&buffer) {
+            let res = await withUnsafeContinuation { reg.submit(ring, $0) }
+            var yield = false
+            let n = try reg.finish(ring, res, &buffer, &yield)
+            if n >= 0 {
+                if yield { await Runtime.yieldSpent() }
+                return n
+            }
+        }
+        return try await reg.readSlow(into: &buffer)
     }
 
     /// Wait until a read would return at once, without reading: for input

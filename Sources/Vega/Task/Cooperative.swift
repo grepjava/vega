@@ -40,6 +40,7 @@ extension Runtime {
     }
 
     /// The yield of a task whose budget ran out.
+    @usableFromInline
     static func yieldSpent() async {
         if let w = Worker.current {
             w._withUnsafeGuaranteedRef { $0.forcedYields.store($0.forcedYields.load(ordering: .relaxed) &+ 1,
