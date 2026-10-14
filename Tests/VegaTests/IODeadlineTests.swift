@@ -108,7 +108,14 @@ struct IODeadlineTests {
         defer { rt.shutdown() }
         let n = try rt.block { () async throws(IOError) -> Int in
             try await Runtime.withIODeadline(.milliseconds(30)) { () async throws(IOError) -> Int in
-                let pair = try await connectedPair()
+                // The setup and the write aren't what's tested: each gets a
+                // deadline of its own. A loaded Network.framework connect can
+                // outlast 30 ms, and by the write this task's deadline has
+                // passed (a write the socket takes at once doesn't wait on
+                // readiness drivers, but a Network.framework send does).
+                let pair = try await Runtime.withIODeadline(.seconds(5)) { () async throws(IOError) -> Pair in
+                    try await connectedPair()
+                }
                 let client = pair.client, server = pair.server
                 // Inherits the task-local deadline, and is not bound by it.
                 let reader = rt.spawn(with: client) { client -> Int in
@@ -116,7 +123,9 @@ struct IODeadlineTests {
                     return (try? await client.read(into: &buffer)) ?? -1
                 }
                 try? await Runtime.sleep(for: .milliseconds(90))
-                try await server.write(byte(1))
+                try await Runtime.withIODeadline(.seconds(5)) { () async throws(IOError) in
+                    try await server.write(byte(1))
+                }
                 return await reader.value
             }
         }
