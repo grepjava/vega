@@ -163,6 +163,7 @@ extension TLSStream where Transport: ~Copyable {
         _ splitTransport: (consuming Transport) -> StreamHalves<Reader, Writer>
     ) -> StreamHalves<TLSReader<Reader>, TLSWriter<Writer>> {
         let state = self.state
+        state.isSplit = true // from here on two tasks share the engine
         let split = splitTransport(transport)
         return StreamHalves(reader: TLSReader(transport: split.reader, state: state),
                             writer: TLSWriter(transport: split.writer, state: state))
@@ -229,9 +230,10 @@ extension TLSReader: Sendable where Transport: Sendable & ~Copyable {}
 extension TLSWriter: Sendable where Transport: Sendable & ~Copyable {}
 
 /// One connection's engine and the peer's ciphertext, shared by a stream's
-/// halves. Every call into the engine holds the lock; I/O never does. The
-/// reading side alone uses `inbound`; the engine's output is taken by one
-/// sender at a time.
+/// halves. I/O never holds the lock; once the stream is split, every call
+/// into the engine does. Until then one task at a time uses it all, and
+/// there is nothing to lock against. The reading side alone uses
+/// `inbound`; the engine's output is taken by one sender at a time.
 final class TLSState: @unchecked Sendable {
     /// Plaintext per record write: four full records.
     static let chunk = 64 * 1024
@@ -246,6 +248,8 @@ final class TLSState: @unchecked Sendable {
     /// before more ciphertext comes, so the next read reads the transport
     /// first.
     var drained = false
+    /// Set by `split`, before the halves go to their tasks.
+    var isSplit = false
 
     init(_ context: TLSContext, host: String?) throws(IOError) {
         var raw: OpaquePointer?
@@ -263,9 +267,11 @@ final class TLSState: @unchecked Sendable {
 
     deinit { cv_tls_free(tls) }
 
-    /// A call into the engine.
+    /// A call into the engine: under the lock once the stream is split.
+    @inline(__always)
     func engine<R>(_ body: () -> R) -> R {
-        lock.withLock { _ in body() }
+        if isSplit { return lock.withLock { _ in body() } }
+        return body()
     }
 
     /// Input the engine holds: plaintext not yet read, or ciphertext read
@@ -345,6 +351,8 @@ final class TLSState: @unchecked Sendable {
                 throw error
             }
             engine { cv_tls_return_output(tls) }
+            // Only the other half of a split stream can have added more.
+            if !isSplit { return }
         }
     }
 
