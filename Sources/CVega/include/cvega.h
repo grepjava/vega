@@ -623,6 +623,11 @@ int cv_install_enqueue_global_hook(cv_enqueue_fn fn, void *ctx);
 extern void *swift_task_getCurrent(void) __attribute__((swiftcall));
 extern void swift_task_cancel(void *task) __attribute__((swiftcall));
 static inline void *cv_task_current(void) { return swift_task_getCurrent(); }
+/// The running task's binding of the task-local whose TaskLocal object is
+/// `key`: a pointer to the bound value, or NULL. What TaskLocal.get calls,
+/// without its generic copy of the value.
+extern void *swift_task_localValueGet(const void *key) __attribute__((swiftcall));
+static inline void *cv_task_local_get(const void *key) { return swift_task_localValueGet(key); }
 static inline void cv_task_cancel(void *task) { swift_task_cancel(task); }
 
 // Retain and release a task (or any native Swift object). Unmanaged<AnyObject>

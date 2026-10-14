@@ -50,6 +50,9 @@ final class Worker: @unchecked Sendable {
     /// thread), freed by the scheduler.
     var ring: OpaquePointer? = nil
     #endif
+    /// The key of the `IOTaskHook` task-local, kept here so an I/O wait on
+    /// this worker finds it without the static's lazy-initialization check.
+    let ioHookKey = UnsafeRawPointer(Unmanaged.passUnretained(IOTaskHook.current).toOpaque())
 
     private var lifo: UnownedJob?
     private var lifoStreak = 0

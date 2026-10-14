@@ -159,7 +159,18 @@ final class IOTaskHook: IOInterruptSlot, @unchecked Sendable {
 
     /// The running task's own hook, if it has one.
     @inline(__always) static var active: IOTaskHook? {
-        guard let ref = current.get() else { return nil }
+        if let worker = Worker.current {
+            return worker._withUnsafeGuaranteedRef { active(key: $0.ioHookKey) }
+        }
+        return active(key: UnsafeRawPointer(Unmanaged.passUnretained(current).toOpaque()))
+    }
+
+    /// `active`, given the task-local's key: read straight from the runtime
+    /// (TaskLocal.get is generic, and copies the value through its type's
+    /// witnesses).
+    @inline(__always) static func active(key: UnsafeRawPointer) -> IOTaskHook? {
+        guard let bound = cv_task_local_get(key),
+              let ref = bound.assumingMemoryBound(to: Ref?.self).pointee else { return nil }
         let hook = ref.hook.takeUnretainedValue()
         return hook.owner == cv_task_current() ? hook : nil
     }
