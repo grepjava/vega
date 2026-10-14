@@ -499,6 +499,12 @@ intptr_t cv_sendv(int fd, const cv_iovec *iov, int count);
 /// Up to `count` bytes of `file` from `offset` sent on socket `fd` by the
 /// kernel: the bytes sent, or -errno (-ENOSYS where there is no sendfile).
 intptr_t cv_sendfile(int fd, int file, int64_t offset, intptr_t count);
+/// `relative` opened for reading beneath the directory `root` by the kernel,
+/// which refuses any resolution that leaves it (Linux's openat2 with
+/// RESOLVE_BENEATH): the descriptor, or -errno. -ENOSYS where the kernel
+/// cannot, and -EXDEV for a path it will not decide (an absolute symlink):
+/// the caller decides those another way.
+int cv_open_beneath(const char *root, const char *relative);
 
 #define CV_DGRAM_TRUNCATED 1u
 /// Receive up to count (at most 64) datagrams, datagram i into

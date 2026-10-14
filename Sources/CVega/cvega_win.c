@@ -318,6 +318,11 @@ intptr_t cv_sendfile(int fd, int file, int64_t offset, intptr_t count) {
     return -ENOSYS;
 }
 
+int cv_open_beneath(const char *root, const char *relative) {
+    (void)root; (void)relative;
+    return -ENOSYS;
+}
+
 intptr_t cv_peek(int fd) {
     char c;
     int n = recv(as_socket(fd), &c, 1, MSG_PEEK);

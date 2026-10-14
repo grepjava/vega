@@ -1,5 +1,6 @@
 import Vega
 import VegaIO
+import CVega
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
@@ -129,6 +130,71 @@ public struct File: ~Copyable, Sendable {
         var options = Options.creating
         options.permissions = permissions
         return try await open(path, options: options)
+    }
+
+    // MARK: - Beneath a directory
+
+    /// Open the regular file `path` names beneath the directory `root`, for
+    /// reading, refusing one that resolves outside it -- through `..`, or a
+    /// symbolic link -- with ENOENT, as if it were not there: `path` came
+    /// from a client, and must not reach the rest of the file system. A
+    /// symbolic link that stays inside is followed. A directory is EISDIR,
+    /// and anything else that is not a regular file ENOENT.
+    ///
+    /// On Linux the kernel decides containment as it resolves (openat2 with
+    /// RESOLVE_BENEATH), so nothing can be swapped between the check and the
+    /// open; elsewhere, and for an absolute symbolic link, both paths are
+    /// resolved and compared first.
+    ///
+    /// Synchronous, on the calling thread: a server answering from a
+    /// directory of assets makes the few system calls this takes against the
+    /// kernel's caches, cheaper than handing them to another thread.
+    public static func open(beneath root: String, _ path: String) throws(IOError) -> File {
+        try checkPath(root)
+        try checkPath(path)
+        var fd = Int32(cv_open_beneath(root, path))
+        if fd == -ENOSYS || fd == -EXDEV {
+            fd = try openResolving(root, path)
+        } else if fd < 0 {
+            // Outside the root is as good as absent.
+            throw IOError(code: -fd)
+        }
+        let file = File(adopting: fd)
+        let kind = try Sys.fstat(fd).kind
+        if kind != .file { throw IOError(code: kind == .directory ? EISDIR : ENOENT) }
+        return file
+    }
+
+    /// `open(beneath:)` by resolving both paths and comparing them.
+    static func openResolving(_ root: String, _ path: String) throws(IOError) -> Int32 {
+        let base = try Sys.realpath(root)
+        var relative = Substring(path)
+        while relative.first == "/" || relative.first == "\\" { relative = relative.dropFirst() }
+        let resolved = try Sys.realpath(base + "/" + relative)
+        // The resolved path is the root, or under it at a separator: a root
+        // of /var/www does not take in /var/www-old.
+        guard resolved.hasPrefix(base) else { throw IOError(code: ENOENT) }
+        let rest = resolved.utf8.dropFirst(base.utf8.count)
+        if let next = rest.first, next != UInt8(ascii: "/") && next != UInt8(ascii: "\\"),
+           base.utf8.last != UInt8(ascii: "/") && base.utf8.last != UInt8(ascii: "\\") {
+            throw IOError(code: ENOENT)
+        }
+        return try Sys.open(resolved, .reading)
+    }
+
+    /// The file's metadata, read on the calling thread: fstat of an open
+    /// file waits on no disk.
+    public func metadataNow() throws(IOError) -> FileMetadata {
+        try Sys.fstat(descriptor)
+    }
+
+    /// Reads into `buffer` from `offset` on the calling thread: for a small
+    /// file likely in the page cache, where handing the read to the ring or
+    /// another thread costs more than it does. Returns the bytes read, 0 at
+    /// the end of the file.
+    public func readNow(into buffer: UnsafeMutableRawBufferPointer, at offset: Int) throws(IOError) -> Int {
+        guard let base = buffer.baseAddress, buffer.count > 0 else { return 0 }
+        return try Sys.read(descriptor, base, buffer.count, Int64(offset))
     }
 
     // MARK: - Reading

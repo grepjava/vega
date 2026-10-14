@@ -2122,6 +2122,46 @@ intptr_t cv_sendfile(int fd, int file, int64_t offset, intptr_t count) {
 #endif
 }
 
+#if defined(__linux__) && __has_include(<linux/openat2.h>)
+#include <linux/openat2.h>
+#include <sys/syscall.h>
+#endif
+
+int cv_open_beneath(const char *root, const char *relative) {
+#if defined(__linux__) && __has_include(<linux/openat2.h>) && defined(SYS_openat2)
+    static _Atomic int unavailable = 0;
+    if (atomic_load_explicit(&unavailable, memory_order_relaxed)) return -ENOSYS;
+    while (*relative == '/') relative++;
+    if (!*relative) relative = ".";
+    // The root is opened each time rather than kept: a deployment that
+    // switches a symlink to a new release directory is served from the new
+    // one at once.
+    int dir = open(root, O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (dir < 0) return -errno;
+    struct open_how how;
+    memset(&how, 0, sizeof how);
+    how.flags = O_RDONLY | O_CLOEXEC;
+    how.resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS;
+    long fd;
+    do {
+        fd = syscall(SYS_openat2, dir, relative, &how, sizeof how);
+    } while (fd < 0 && errno == EINTR);
+    int saved = errno;
+    close(dir);
+    if (fd >= 0) return (int)fd;
+    // No openat2 (old kernel), or a seccomp filter refusing it: the caller
+    // checks the path itself from now on.
+    if (saved == ENOSYS || saved == EPERM) {
+        atomic_store_explicit(&unavailable, 1, memory_order_relaxed);
+        return -ENOSYS;
+    }
+    return -saved;
+#else
+    (void)root; (void)relative;
+    return -ENOSYS;
+#endif
+}
+
 intptr_t cv_peek(int fd) {
     char c;
     ssize_t n = recv(fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
