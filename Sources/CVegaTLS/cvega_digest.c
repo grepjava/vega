@@ -5,6 +5,7 @@
 #include "cvega_tls.h"
 
 #if defined(__APPLE__)
+#include <CommonCrypto/CommonCryptoError.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <CommonCrypto/CommonHMAC.h>
 #include <CommonCrypto/CommonKeyDerivation.h>
