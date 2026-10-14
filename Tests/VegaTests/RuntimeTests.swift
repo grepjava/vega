@@ -32,6 +32,26 @@ func spin(microseconds: UInt64) {
         #expect(Runtime.currentWorker == nil)
     }
 
+    @Test func jobStampChangesOnlyWhenTheTaskSuspends() {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let (still, afterYield, afterSleep, onWorker) = rt.block { () async -> (Bool, Bool, Bool, Bool) in
+            let first = Runtime.currentJobStamp
+            spin(microseconds: 200)
+            let still = Runtime.currentJobStamp == first
+            await Runtime.yield()
+            let afterYield = Runtime.currentJobStamp != first
+            let second = Runtime.currentJobStamp
+            try? await Runtime.sleep(for: .milliseconds(1))
+            return (still, afterYield, Runtime.currentJobStamp != second, first != .none)
+        }
+        #expect(still)
+        #expect(afterYield)
+        #expect(afterSleep)
+        #expect(onWorker)
+        #expect(Runtime.currentJobStamp == .none)
+    }
+
     @Test func blockPropagatesTypedError() {
         struct Boom: Error, Equatable {}
         let rt = Runtime(workers: 1)

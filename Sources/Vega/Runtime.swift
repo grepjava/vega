@@ -208,6 +208,46 @@ public final class Runtime: Sendable {
     /// The index of the Vega worker running the caller, or nil off-runtime.
     public static var currentWorker: Int? { Worker.current?._withUnsafeGuaranteedRef { $0.index } }
 
+    /// Which job the caller is running in: the worker, and how many jobs it
+    /// had finished when this one started. Equal stamps on either side of a
+    /// stretch of code mean it ran without suspending, so the time it took
+    /// was all spent holding the worker -- what a server needs to tell a
+    /// handler that computes from one that waits.
+    ///
+    /// ```swift
+    /// let stamp = Runtime.currentJobStamp, start = ContinuousClock.now
+    /// try await handler()
+    /// if Runtime.currentJobStamp == stamp { heldFor(ContinuousClock.now - start) }
+    /// ```
+    ///
+    /// Off a Vega worker the stamp is `JobStamp.none`, equal to every other
+    /// one taken off a worker.
+    @inlinable
+    public static var currentJobStamp: JobStamp { JobStamp.current() }
+}
+
+/// A job on a Vega worker: see `Runtime.currentJobStamp`.
+public struct JobStamp: Sendable, Hashable {
+    @usableFromInline let worker: UInt
+    @usableFromInline let jobs: UInt64
+
+    @usableFromInline init(worker: UInt, jobs: UInt64) {
+        self.worker = worker
+        self.jobs = jobs
+    }
+
+    /// The stamp off a Vega worker.
+    public static let none = JobStamp(worker: 0, jobs: 0)
+
+    @usableFromInline static func current() -> JobStamp {
+        guard let w = Worker.current else { return .none }
+        return JobStamp(worker: UInt(bitPattern: w.toOpaque()),
+                        jobs: w._withUnsafeGuaranteedRef { $0.jobsRun.load(ordering: .relaxed) })
+    }
+}
+
+extension Runtime {
+
     /// The runtime's counters now (Tokio's `RuntimeMetrics`). Cheap enough
     /// to sample every second; counters are read without stopping the
     /// workers, so they're consistent only to within a few jobs.
