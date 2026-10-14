@@ -420,6 +420,9 @@ int cv_socket_error(int fd);
 int cv_local_port(int fd);
 /// recv / send (MSG_NOSIGNAL): bytes moved, or -errno.
 intptr_t cv_recv(int fd, void *buf, intptr_t len);
+/// What a read would find, without taking it: 1 input, 0 end of stream,
+/// -errno otherwise (-EAGAIN: nothing yet).
+intptr_t cv_peek(int fd);
 intptr_t cv_send(int fd, const void *buf, intptr_t len);
 
 /// A UDP socket bound to host:port (port 0: any free one).

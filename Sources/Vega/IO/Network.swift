@@ -336,6 +336,34 @@ final class NetworkStream: NetworkHandle, @unchecked Sendable {
         }
     }
 
+    /// Wait until a read would return at once: false for data, true for the
+    /// end of the stream or a failure.
+    func waitReadable() async throws(IOError) -> Bool {
+        while true {
+            lock.lock()
+            if stashStart < stash.count {
+                lock.unlock()
+                return false
+            }
+            if ended || failure != nil {
+                lock.unlock()
+                return true
+            }
+            let r = Rendezvous<Bool>()
+            reader = r
+            let start = !receiving
+            receiving = true
+            lock.unlock()
+            if start { receive() }
+            guard await r.wait(cancelled: false) else {
+                lock.lock()
+                if reader === r { reader = nil }
+                lock.unlock()
+                throw .interrupted
+            }
+        }
+    }
+
     private func receive() {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [self] data, _, complete, error in
             lock.lock()
@@ -513,6 +541,10 @@ extension IORegistration {
 
     func nwAccept(_ nw: UnsafeRawPointer) async throws(IOError) -> IORegistration {
         try await (NetworkIO.handle(nw) as! NetworkAcceptor).accept()
+    }
+
+    func nwWaitReadable(_ nw: UnsafeRawPointer) async throws(IOError) -> Bool {
+        try await (NetworkIO.handle(nw) as! NetworkStream).waitReadable()
     }
 
     func nwHasPendingInput(_ nw: UnsafeRawPointer) -> Bool {

@@ -313,6 +313,12 @@ intptr_t cv_recv(int fd, void *buf, intptr_t len) {
     return n >= 0 ? (intptr_t)n : -(intptr_t)last_error();
 }
 
+intptr_t cv_peek(int fd) {
+    char c;
+    int n = recv(as_socket(fd), &c, 1, MSG_PEEK);
+    return n >= 0 ? (intptr_t)n : -(intptr_t)last_error();
+}
+
 intptr_t cv_send(int fd, const void *buf, intptr_t len) {
     int n = send(as_socket(fd), buf, clamp_len(len), 0);
     return n >= 0 ? (intptr_t)n : -(intptr_t)last_error();

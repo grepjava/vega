@@ -2050,6 +2050,12 @@ intptr_t cv_recv(int fd, void *buf, intptr_t len) {
     return n >= 0 ? (long)n : -(long)errno;
 }
 
+intptr_t cv_peek(int fd) {
+    char c;
+    ssize_t n = recv(fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
+    return n >= 0 ? (long)n : -(long)errno;
+}
+
 intptr_t cv_send(int fd, const void *buf, intptr_t len) {
     ssize_t n = send(fd, buf, (size_t)len, MSG_NOSIGNAL);
     return n >= 0 ? (long)n : -(long)errno;

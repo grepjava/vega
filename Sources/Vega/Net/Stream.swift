@@ -274,6 +274,30 @@ extension IORegistration {
         #endif
     }
 
+    /// Wait until a read would return at once, without reading: false when
+    /// input is waiting, true when the read would end the stream (the peer
+    /// closed its side, or reset the connection).
+    func waitReadable() async throws(IOError) -> Bool {
+        #if canImport(Network)
+        if let nw { return try await nwWaitReadable(nw) }
+        #endif
+        // This wait may take the readiness edge a drained read would wait
+        // for: the next read must ask the socket first.
+        defer { io.pointee.read_drained = 0 }
+        while true {
+            let n = cv_peek(fd)
+            if n > 0 { return false }
+            if n == 0 { return true }
+            let err = Int32(-n)
+            switch err {
+            case EAGAIN, EWOULDBLOCK: try await wait(CV_IO_READ)
+            case EINTR: continue
+            case ECONNRESET, ECONNABORTED, EPIPE, ENOTCONN: return true
+            default: throw IOError(code: err)
+            }
+        }
+    }
+
     /// Whether a read would return at once, without reading or waiting.
     var hasPendingInput: Bool {
         #if canImport(Network)
@@ -333,6 +357,23 @@ public struct ReadHalf: ~Copyable, Sendable {
     /// the peer closed its side (or the buffer has no room left).
     public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
         try await reg.read(into: &buffer)
+    }
+
+    /// Wait until a read would return at once, without reading: for input
+    /// to arrive, or for the peer to close its side.
+    public func readable() async throws(IOError) {
+        _ = try await reg.waitReadable()
+    }
+
+    /// Wait until the peer closes its side of the connection, or resets it,
+    /// and return true; or return false as soon as input arrives instead,
+    /// since a close behind that input can't be seen until it is read. For a
+    /// server that wants to stop work a client no longer waits for -- an
+    /// HTTP/1 request whose client hung up -- while it reads nothing.
+    /// Cancellation and `Runtime.withIODeadline` end the wait as they end a
+    /// read.
+    public func peerClosed() async throws(IOError) -> Bool {
+        try await reg.waitReadable()
     }
 }
 

@@ -89,6 +89,23 @@ public struct TCPStream: ~Copyable, Sendable {
         try await reg.read(into: &buffer)
     }
 
+    /// Wait until a read would return at once, without reading: for input
+    /// to arrive, or for the peer to close its side.
+    public func readable() async throws(IOError) {
+        _ = try await reg.waitReadable()
+    }
+
+    /// Wait until the peer closes its side of the connection, or resets it,
+    /// and return true; or return false as soon as input arrives instead,
+    /// since a close behind that input can't be seen until it is read. For a
+    /// server that wants to stop work a client no longer waits for -- an
+    /// HTTP/1 request whose client hung up -- while it reads nothing.
+    /// Cancellation and `Runtime.withIODeadline` end the wait as they end a
+    /// read.
+    public func peerClosed() async throws(IOError) -> Bool {
+        try await reg.waitReadable()
+    }
+
     /// Write all of `buffer`'s readable bytes.
     public func write(_ buffer: borrowing IOBuffer) async throws(IOError) {
         try await reg.write(UnsafeRawBufferPointer(start: buffer.base, count: buffer.count))
