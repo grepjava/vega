@@ -43,6 +43,15 @@ let package = Package(
                            .product(name: "VegaTLS", package: "vega")],
             swiftSettings: [.swiftLanguageMode(.v6), .unsafeFlags(["-enforce-exclusivity=unchecked"])]
         ),
+        // VegaTLS's per-record cost: request/response rounds over loopback,
+        // client and server in one process.
+        .executableTarget(
+            name: "vega-tls-bench",
+            dependencies: [.product(name: "Vega", package: "vega"),
+                           .product(name: "VegaIO", package: "vega"),
+                           .product(name: "VegaTLS", package: "vega")],
+            swiftSettings: [.swiftLanguageMode(.v6), .unsafeFlags(["-enforce-exclusivity=unchecked"])]
+        ),
         // UDP echo server, driven by tokio-bench's udp-load.
         .executableTarget(
             name: "vega-udp",
