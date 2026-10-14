@@ -123,6 +123,9 @@ struct cv_tls_ctx {
     } *cache;
     int cache_size;
     uint64_t tick;
+    // Server: the ClientHello hook.
+    cv_tls_hello_fn hello;
+    void *hello_arg;
 };
 
 struct cv_tls {
@@ -190,6 +193,8 @@ static int name_matches(const char *pattern, const char *name) {
 static int servername_select(SSL *ssl, int *alert, void *arg) {
     (void)alert;
     cv_tls_ctx *c = arg;
+    // The ClientHello hook chose already: its choice stands.
+    if (SSL_get_SSL_CTX(ssl) != c->ssl) return SSL_TLSEXT_ERR_OK;
     const char *name = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
     if (!name) return SSL_TLSEXT_ERR_OK;
     for (int i = 0; i < c->name_count; i++) {
@@ -199,6 +204,92 @@ static int servername_select(SSL *ssl, int *alert, void *arg) {
         }
     }
     return SSL_TLSEXT_ERR_OK;
+}
+
+/// The host name in a server_name extension's body, or "".
+static void parse_server_name(const uint8_t *p, size_t n, char *out, size_t outlen) {
+    out[0] = 0;
+    if (n < 5) return;
+    size_t list = (size_t)p[0] << 8 | p[1];
+    if (list + 2 > n || p[2] != 0) return; // host_name entries only
+    size_t len = (size_t)p[3] << 8 | p[4];
+    if (len + 5 > n || len == 0 || len >= outlen) return;
+    memcpy(out, p + 5, len);
+    out[len] = 0;
+    if (strlen(out) != len) out[0] = 0; // an embedded NUL: no name
+}
+
+/// Ask the hook, and switch to the context it returns.
+static void hello_select(SSL *ssl, cv_tls_ctx *c, const uint8_t *sni, size_t sni_len, const uint8_t *alpn,
+                         size_t alpn_len) {
+    char name[256];
+    name[0] = 0;
+    if (sni) parse_server_name(sni, sni_len, name, sizeof name);
+    const uint8_t *protocols = NULL;
+    int protocols_len = 0;
+    if (alpn && alpn_len >= 2) {
+        size_t list = (size_t)alpn[0] << 8 | alpn[1];
+        if (list + 2 <= alpn_len) {
+            protocols = alpn + 2;
+            protocols_len = (int)list;
+        }
+    }
+    cv_tls_ctx *chosen = c->hello(c->hello_arg, name[0] ? name : NULL, protocols, protocols_len);
+    if (chosen && chosen->ssl != SSL_get_SSL_CTX(ssl)) SSL_set_SSL_CTX(ssl, chosen->ssl);
+}
+
+#if defined(OPENSSL_IS_BORINGSSL)
+static enum ssl_select_cert_result_t client_hello(const SSL_CLIENT_HELLO *h) {
+    cv_tls_ctx *c = SSL_CTX_get_app_data(SSL_get_SSL_CTX(h->ssl));
+    if (!c || !c->hello) return ssl_select_cert_success;
+    const uint8_t *sni = NULL, *alpn = NULL;
+    size_t sni_len = 0, alpn_len = 0;
+    if (!SSL_early_callback_ctx_extension_get(h, TLSEXT_TYPE_server_name, &sni, &sni_len)) sni = NULL;
+    if (!SSL_early_callback_ctx_extension_get(h, TLSEXT_TYPE_application_layer_protocol_negotiation, &alpn,
+                                              &alpn_len))
+        alpn = NULL;
+    hello_select(h->ssl, c, sni, sni_len, alpn, alpn_len);
+    return ssl_select_cert_success;
+}
+#else
+static int client_hello(SSL *ssl, int *alert, void *arg) {
+    (void)alert;
+    cv_tls_ctx *c = arg;
+    const unsigned char *sni = NULL, *alpn = NULL;
+    size_t sni_len = 0, alpn_len = 0;
+    if (!SSL_client_hello_get0_ext(ssl, TLSEXT_TYPE_server_name, &sni, &sni_len)) sni = NULL;
+    if (!SSL_client_hello_get0_ext(ssl, TLSEXT_TYPE_application_layer_protocol_negotiation, &alpn, &alpn_len))
+        alpn = NULL;
+    hello_select(ssl, c, sni, sni_len, alpn, alpn_len);
+    return SSL_CLIENT_HELLO_SUCCESS;
+}
+#endif
+
+void cv_tls_ctx_set_hello(cv_tls_ctx *c, cv_tls_hello_fn fn, void *arg) {
+    c->hello = fn;
+    c->hello_arg = arg;
+#if defined(OPENSSL_IS_BORINGSSL)
+    SSL_CTX_set_select_certificate_cb(c->ssl, fn ? client_hello : NULL);
+#else
+    SSL_CTX_set_client_hello_cb(c->ssl, fn ? client_hello : NULL, c);
+#endif
+}
+
+int cv_tls_ctx_set_ticket_key(cv_tls_ctx *c, const uint8_t *key, int len, char *err, int errlen) {
+    if (len != 80) {
+        snprintf(err, (size_t)errlen, "a session-ticket key is 80 bytes");
+        return -1;
+    }
+#if defined(OPENSSL_IS_BORINGSSL)
+    long n = 48;
+#else
+    long n = 80;
+#endif
+    if (SSL_CTX_set_tlsext_ticket_keys(c->ssl, (void *)key, n) != 1) {
+        describe(err, errlen, "SSL_CTX_set_tlsext_ticket_keys");
+        return -1;
+    }
+    return 0;
 }
 
 static int new_session(SSL *ssl, SSL_SESSION *session) {

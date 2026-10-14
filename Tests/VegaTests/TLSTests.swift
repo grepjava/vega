@@ -1,4 +1,5 @@
 #if (os(Linux) || os(macOS) || os(Windows)) && (OpenSSL || BoringSSL)
+import Synchronization
 import Testing
 import Vega
 import VegaIO
@@ -180,6 +181,68 @@ private func exchange(server: TLSContext, client: TLSContext, name: String? = "v
             return resumed
         }
         #expect(resumed == [false, true, true])
+    }
+
+    @Test func theClientHelloHookChoosesTheContext() throws {
+        let challenge = try TLSIdentity.selfSigned(names: ["vega.test"])
+        let acme = try TLSContext(.server(identity: challenge, applicationProtocols: ["acme-tls/1"]))
+        let seen = Mutex<[ClientHello]>([])
+        let server = try serverContext { c in
+            c.selectContext = { hello in
+                seen.withLock { $0.append(hello) }
+                return hello.applicationProtocols.contains("acme-tls/1") ? acme : nil
+            }
+        }
+        // An ordinary client gets the ordinary certificate and protocols.
+        let (plain, plainServer) = try exchange(server: server, client: clientContext())
+        #expect(try plain.get() == "hello over TLS")
+        #expect(try plainServer.get() == "h2")
+        // One offering acme-tls/1 gets the challenge context: its
+        // certificate, which the ordinary trust root does not cover, and its
+        // protocol.
+        let prober = try clientContext {
+            $0.trustRoots = .certificates(challenge.certificateChain)
+            $0.applicationProtocols = ["acme-tls/1"]
+        }
+        let (probe, probeServer) = try exchange(server: server, client: prober)
+        #expect(try probe.get() == "hello over TLS")
+        #expect(try probeServer.get() == "acme-tls/1")
+        let hellos = seen.withLock { $0 }
+        #expect(hellos.count == 2)
+        #expect(hellos.first == ClientHello(serverName: "vega.test", applicationProtocols: ["http/1.1", "h2"]))
+        #expect(hellos.last?.applicationProtocols == ["acme-tls/1"])
+    }
+
+    @Test func serversSharingATicketKeyResumeEachOthersSessions() throws {
+        let key = (0..<80).map { UInt8(truncatingIfNeeded: $0 &* 37 &+ 11) }
+        let a = try serverContext { $0.ticketKey = key }
+        let b = try serverContext { $0.ticketKey = key }
+        let stranger = try serverContext()
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let client = try clientContext()
+        let resumed = try rt.block { () async throws -> [Bool] in
+            var resumed: [Bool] = []
+            for server in [a, b, stranger] {
+                let pair = duplex(capacity: 64 * 1024)
+                rt.spawn(with: pair.second) { t async in
+                    guard let tls = try? await TLSStream.accept(t, context: server) else { return }
+                    var buf = IOBuffer(capacity: 64)
+                    _ = try? await tls.read(into: &buf)
+                    try? await tls.write(buf)
+                    _ = try? await tls.close()
+                }
+                let tls = try await TLSStream.connect(pair.first, serverName: "vega.test", context: client)
+                try await tls.write(bytes("x"))
+                var buf = IOBuffer(capacity: 64)
+                while try await tls.read(into: &buf) > 0 {}
+                resumed.append(tls.isResumed)
+            }
+            return resumed
+        }
+        // b resumes a's session; a server with its own key cannot.
+        #expect(resumed == [false, true, false])
+        #expect(throws: IOError.self) { _ = try serverContext { $0.ticketKey = [1, 2, 3] } }
     }
 
     /// A peer that just stops (no close_notify) can't pass for a clean end.

@@ -47,6 +47,16 @@ int cv_tls_ctx_set_alpn(cv_tls_ctx *ctx, const uint8_t *wire, int len, char *err
 int cv_tls_ctx_add_server_name(cv_tls_ctx *ctx, const char *name, cv_tls_ctx *other, char *err, int errlen);
 /// Client: keep sessions to resume, per server name (0 turns it off).
 void cv_tls_ctx_set_session_cache(cv_tls_ctx *ctx, int entries);
+/// Server: the session-ticket key, 80 bytes of secret (BoringSSL uses the
+/// first 48). Servers sharing it resume each other's sessions.
+int cv_tls_ctx_set_ticket_key(cv_tls_ctx *ctx, const uint8_t *key, int len, char *err, int errlen);
+/// Server: called with each ClientHello's server name (NULL: none) and the
+/// ALPN protocols it offers (wire form; NULL, 0: none), before the
+/// certificate is chosen. A context returned replaces ctx for that
+/// connection, its certificate and ALPN with it; NULL keeps ctx (and its
+/// server names). The returned context must outlive the connection.
+typedef cv_tls_ctx *(*cv_tls_hello_fn)(void *arg, const char *server_name, const uint8_t *alpn, int alpn_len);
+void cv_tls_ctx_set_hello(cv_tls_ctx *ctx, cv_tls_hello_fn fn, void *arg);
 
 /// A connection. Client: host is the server name to send (SNI) and to
 /// check the certificate against (an IP address is checked as one); NULL

@@ -1,6 +1,7 @@
 // On the OpenSSL or BoringSSL trait; not on iOS, tvOS, watchOS or visionOS.
 #if (os(Linux) || os(macOS) || os(Windows)) && (OpenSSL || BoringSSL)
 import CVegaTLS
+import Synchronization
 import Vega
 #if canImport(Glibc)
 import Glibc
@@ -73,6 +74,18 @@ public struct TLSConfiguration: Sendable {
     public var serverNames: [String: TLSIdentity] = [:]
     /// Client: sessions kept to resume, one per server name (0: none).
     public var sessionCacheSize = 256
+    /// Server: the session-ticket key, 80 random bytes; nil: one the TLS
+    /// library makes, different in every process. Servers given the same
+    /// key resume each other's sessions -- what the shards of one server
+    /// want. Keep it secret, and change it now and then.
+    public var ticketKey: [UInt8]?
+    /// Server: called with each ClientHello before a certificate is chosen.
+    /// A context returned serves that connection instead -- its identity,
+    /// ALPN and verification -- and `serverNames` are not consulted; nil
+    /// carries on with this one. Runs on the handshaking task's thread: keep
+    /// it quick, and return contexts made beforehand. Every context it
+    /// returns is kept alive by this one.
+    public var selectContext: (@Sendable (ClientHello) -> TLSContext?)?
 
     public init(role: Role, identity: TLSIdentity? = nil, trustRoots: TrustRoots = .system,
                 verification: Verification? = nil, applicationProtocols: [String] = []) {
@@ -93,6 +106,20 @@ public struct TLSConfiguration: Sendable {
     /// A server presenting `identity`.
     public static func server(identity: TLSIdentity, applicationProtocols: [String] = []) -> TLSConfiguration {
         TLSConfiguration(role: .server, identity: identity, applicationProtocols: applicationProtocols)
+    }
+}
+
+/// What a client's ClientHello asks for, as `TLSConfiguration.selectContext`
+/// sees it.
+public struct ClientHello: Sendable, Hashable {
+    /// The name it asks for (SNI), if any.
+    public var serverName: String?
+    /// The ALPN protocols it offers, in its order.
+    public var applicationProtocols: [String]
+
+    public init(serverName: String?, applicationProtocols: [String]) {
+        self.serverName = serverName
+        self.applicationProtocols = applicationProtocols
     }
 }
 
@@ -134,6 +161,8 @@ public final class TLSContext: @unchecked Sendable {
     public let configuration: TLSConfiguration
     /// The contexts for `serverNames`, which `raw` refers to.
     private let named: [TLSContext]
+    /// `selectContext`, as the C hook calls it.
+    private let selector: ContextSelector?
 
     public init(_ configuration: TLSConfiguration) throws(IOError) {
         let root = try TLSContext.make(configuration, identity: configuration.identity)
@@ -142,6 +171,7 @@ public final class TLSContext: @unchecked Sendable {
             var child = configuration
             child.identity = identity
             child.serverNames = [:]
+            child.selectContext = nil
             let context: TLSContext
             do {
                 context = try TLSContext(child)
@@ -158,6 +188,16 @@ public final class TLSContext: @unchecked Sendable {
         self.configuration = configuration
         self.raw = root
         self.named = named
+        if let select = configuration.selectContext, configuration.role == .server {
+            let selector = ContextSelector(select)
+            self.selector = selector
+            cv_tls_ctx_set_hello(root, { arg, name, alpn, count in
+                let selector = Unmanaged<ContextSelector>.fromOpaque(arg!).takeUnretainedValue()
+                return selector.choose(name, alpn, Int(count))
+            }, Unmanaged.passUnretained(selector).toOpaque())
+        } else {
+            selector = nil
+        }
     }
 
     deinit { cv_tls_ctx_free(raw) }
@@ -218,6 +258,9 @@ public final class TLSContext: @unchecked Sendable {
             try check { err, len in cv_tls_ctx_set_alpn(ctx, wire, Int32(wire.count), err, len) }
         }
         if c.role == .client { cv_tls_ctx_set_session_cache(ctx, Int32(max(c.sessionCacheSize, 0))) }
+        if let key = c.ticketKey, c.role == .server {
+            try check { err, len in cv_tls_ctx_set_ticket_key(ctx, key, Int32(key.count), err, len) }
+        }
         return ctx
     }
 
@@ -228,6 +271,35 @@ public final class TLSContext: @unchecked Sendable {
         let rc = err.withUnsafeMutableBufferPointer { body($0.baseAddress!, Int32($0.count)) }
         guard rc != 0 else { return nil }
         return IOError(code: IOError.tls.code, message: string(err, err.firstIndex(of: 0) ?? err.count))
+    }
+}
+
+/// A context's `selectContext`, and the contexts it has returned, kept so
+/// the connections given them never outlive them.
+private final class ContextSelector: @unchecked Sendable {
+    let select: @Sendable (ClientHello) -> TLSContext?
+    private let chosen = Mutex<[ObjectIdentifier: TLSContext]>([:])
+
+    init(_ select: @escaping @Sendable (ClientHello) -> TLSContext?) {
+        self.select = select
+    }
+
+    func choose(_ name: UnsafePointer<CChar>?, _ alpn: UnsafePointer<UInt8>?, _ count: Int) -> OpaquePointer? {
+        var protocols: [String] = []
+        if let alpn {
+            var i = 0
+            while i < count {
+                let n = Int(alpn[i])
+                guard i + 1 + n <= count else { break }
+                protocols.append(String(decoding: UnsafeBufferPointer(start: alpn + i + 1, count: n), as: UTF8.self))
+                i += 1 + n
+            }
+        }
+        let hello = ClientHello(serverName: name.map { String(cString: $0) }, applicationProtocols: protocols)
+        guard let context = select(hello) else { return nil }
+        let id = ObjectIdentifier(context)
+        chosen.withLock { if $0[id] == nil { $0[id] = context } }
+        return context.raw
     }
 }
 
