@@ -22,8 +22,12 @@ uint64_t cv_now_ns(void);
 /// A cheaper monotonic clock, to within a few ms (the scheduler tick):
 /// for metrics. Not comparable with cv_now_ns.
 uint64_t cv_now_coarse_ns(void);
-/// Online CPUs.
+/// CPUs this process may run on: on Linux those in its affinity mask (as
+/// `taskset` or a container's cpuset leaves it), elsewhere the online ones.
 int cv_cpu_count(void);
+/// The CPUs in this process's affinity mask, up to `max` of them, in
+/// order: how many, or -1 where there is no mask to read (not Linux).
+int cv_affinity_list(int *cpus, int max);
 
 // ---- parker --------------------------------------------------------------
 // One per worker thread. unpark before park makes the next park return at

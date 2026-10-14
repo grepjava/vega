@@ -97,6 +97,12 @@ int cv_cpu_count(void) {
     DWORD n = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
     return n > 0 ? (int)n : 1;
 }
+
+int cv_affinity_list(int *cpus, int max) {
+    (void)cpus;
+    (void)max;
+    return -1;
+}
 #else
 uint64_t cv_now_ns(void) {
     struct timespec ts;
@@ -117,8 +123,28 @@ uint64_t cv_now_coarse_ns(void) {
 }
 
 int cv_cpu_count(void) {
+#if defined(__linux__)
+    cpu_set_t set;
+    if (sched_getaffinity(0, sizeof set, &set) == 0 && CPU_COUNT(&set) > 0) return CPU_COUNT(&set);
+#endif
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n > 0 ? (int)n : 1;
+}
+
+int cv_affinity_list(int *cpus, int max) {
+#if defined(__linux__)
+    cpu_set_t set;
+    if (sched_getaffinity(0, sizeof set, &set) != 0) return -1;
+    int n = 0;
+    for (int cpu = 0; cpu < CPU_SETSIZE && n < max; cpu++) {
+        if (CPU_ISSET(cpu, &set)) cpus[n++] = cpu;
+    }
+    return n;
+#else
+    (void)cpus;
+    (void)max;
+    return -1;
+#endif
 }
 #endif
 

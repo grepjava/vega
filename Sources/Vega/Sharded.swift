@@ -629,13 +629,17 @@ enum Topology {
 
     /// Online CPUs grouped by shared last-level cache: from sysfs on Linux,
     /// by performance level (each a cluster with its own L2) on Darwin; one
-    /// group of every CPU otherwise, or if neither says anything.
+    /// group of every CPU otherwise, or if neither says anything. On Linux
+    /// only the CPUs the process may run on: under `taskset` or a cpuset,
+    /// shards and their pinned workers stay inside it.
     static func cacheDomains() -> [[Int]] {
-        let fallback = [Array(0..<Int(cv_cpu_count()))]
         #if os(Linux)
-        guard let online = read("/sys/devices/system/cpu/online").map(parseList), !online.isEmpty else {
-            return fallback
+        let allowed = affinity()
+        guard let listed = read("/sys/devices/system/cpu/online").map(parseList), !listed.isEmpty else {
+            return [allowed ?? Array(0..<Int(cv_cpu_count()))]
         }
+        let online = allowed.map { mask in listed.filter(mask.contains) } ?? listed
+        guard !online.isEmpty else { return [allowed ?? listed] }
         var seen = Set<Int>()
         var domains: [[Int]] = []
         for cpu in online where !seen.contains(cpu) {
@@ -650,6 +654,7 @@ enum Topology {
         }
         return domains
         #elseif canImport(Darwin)
+        let fallback = [Array(0..<Int(cv_cpu_count()))]
         // Apple silicon: performance and efficiency cores, numbered here in
         // that order (threads can't be pinned on Darwin, so these are counts).
         let levels = sysctlInt("hw.nperflevels") ?? 0
@@ -662,9 +667,19 @@ enum Topology {
         }
         return domains.count > 1 && next == fallback[0].count ? domains : fallback
         #else
-        return fallback
+        return [Array(0..<Int(cv_cpu_count()))]
         #endif
     }
+
+    #if os(Linux)
+    /// The process's affinity mask (nil if it can't be read).
+    static func affinity() -> [Int]? {
+        var cpus = [Int32](repeating: 0, count: 1024)
+        let n = cv_affinity_list(&cpus, Int32(cpus.count))
+        guard n > 0 else { return nil }
+        return cpus[..<Int(n)].map(Int.init)
+    }
+    #endif
 
     #if canImport(Darwin)
     private static func sysctlInt(_ name: String) -> Int? {

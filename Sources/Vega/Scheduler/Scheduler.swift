@@ -65,8 +65,17 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     /// A current-thread runtime: a thread is inside `block`.
     let driving = Atomic<Bool>(false)
 
+    /// The CPUs the process may run on: its affinity mask on Linux (under
+    /// `taskset` or a cpuset, not CPU 0 on up), else 0 up to the count.
+    static func allowedCPUs() -> [Int] {
+        #if os(Linux)
+        if let mask = Topology.affinity() { return mask }
+        #endif
+        return Array(0..<Int(cv_cpu_count()))
+    }
+
     /// `cpus`: with `pin`, worker i goes on `cpus[i % cpus.count]` (default:
-    /// CPU i).
+    /// the i-th CPU the process may run on).
     init(workers count: Int, name: String, pin: Bool, cpus cpuList: [Int]? = nil, io: IOBackend = .automatic,
          currentThread: Bool = false,
          blockingThreads: Int = 512, blockingKeepAlive: Duration = .seconds(10)) {
@@ -129,7 +138,7 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
             w.owner = me
         }
 
-        let cpus = cpuList.flatMap { $0.isEmpty ? nil : $0 } ?? Array(0..<Int(cv_cpu_count()))
+        let cpus = cpuList.flatMap { $0.isEmpty ? nil : $0 } ?? Scheduler.allowedCPUs()
         for w in workers where !currentThread {
             _ = Unmanaged.passRetained(self) // released by the thread when it exits
             let arg = Unmanaged.passRetained(w).toOpaque()

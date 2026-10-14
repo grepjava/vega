@@ -41,6 +41,32 @@ import Testing
         #expect(Topology.layout(shards: nil, workersPerShard: nil) == Topology.cacheDomains())
     }
 
+    #if os(Linux)
+    /// Under `taskset`, the layout, the CPU count and default pinning keep
+    /// to the CPUs it allows. Checked in a child, on a thread pinned to the
+    /// last allowed CPU (any one but the first): the mask is per thread, and
+    /// a forked child's only thread is the one `taskset` would have set.
+    @Test func keepsToTheAffinityMask() {
+        guard let mask = Topology.affinity(), mask.count > 1 else { return }
+        let only = mask.last!
+        let pid = fork()
+        if pid == 0 {
+            let rc = cv_thread_spawn({ raw in
+                let only = Int(bitPattern: raw) - 1
+                let ok = Topology.affinity() == [only] && cv_cpu_count() == 1
+                    && Topology.cacheDomains() == [[only]] && Scheduler.allowedCPUs() == [only]
+                    && Topology.layout(shards: 2, workersPerShard: nil) == [[only], [only]]
+                _exit(ok ? 0 : 1)
+            }, UnsafeMutableRawPointer(bitPattern: only + 1), "affinity", Int32(only))
+            guard rc == 0 else { _exit(2) }
+            while true { pause() }
+        }
+        var status: Int32 = 0
+        waitpid(pid, &status, 0)
+        #expect(status == 0)
+    }
+    #endif
+
     /// What `Runtime.sharded`'s "no threads yet" check reads: known on Linux
     /// and Darwin, and more than one in a test process.
     @Test func countsThreads() {
