@@ -18,7 +18,8 @@ Vega aims for feature parity with Tokio and SwiftNIO. It can be swapped in for S
 | `Sources/VegaTest` | test support: `MockClock` (paused time), `duplex()` (in-memory byte streams) |
 | `Sources/CVega` | C shim: parking, threads, the epoll/kqueue/io_uring drivers, sockets |
 | `Sources/VegaTLS` | `TLSStream` over any stream, `TLSConfiguration`, `TLSContext` |
-| `Sources/CVegaTLS` | C shim between VegaTLS and the TLS library |
+| `Sources/VegaCrypto` | over the same library: `Hash`, `HMAC`, `PBKDF2`, `HKDF`, `AEAD`, QUIC `HeaderProtection`, `KeyExchange`, JWS/TLS `SigningKey` and `PublicKey`, `CertificateKey`, `SecureRandom` |
+| `Sources/CVegaTLS` | C shim between VegaTLS, VegaCrypto and the TLS library |
 | `Sources/CVegaBoringSSL` | vendored BoringSSL, used only with the `BoringSSL` trait (see its `VENDORING.md`) |
 | `Tests/VegaTests` | swift-testing suite |
 | `Benchmarks/` | separate package, so Vega itself keeps zero dependencies |

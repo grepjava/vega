@@ -14,6 +14,7 @@ let package = Package(
         .library(name: "VegaProcess", targets: ["VegaProcess"]),
         .library(name: "VegaMetrics", targets: ["VegaMetrics"]),
         .library(name: "VegaTLS", targets: ["VegaTLS"]),
+        .library(name: "VegaCrypto", targets: ["VegaCrypto"]),
         .library(name: "VegaHTTP1", targets: ["VegaHTTP1"]),
         .library(name: "VegaHTTP2", targets: ["VegaHTTP2"]),
         .library(name: "VegaWebSocket", targets: ["VegaWebSocket"]),
@@ -74,6 +75,9 @@ let package = Package(
                                  .linkedLibrary("libcrypto", .when(platforms: [.windows], traits: ["OpenSSL"])),
                                  .linkedLibrary("crypt32", .when(platforms: [.windows]))]),
         .target(name: "VegaTLS", dependencies: ["Vega", "VegaIO", "CVegaTLS"], swiftSettings: swiftSettings),
+        // Hashes, HMAC, HKDF, AEADs, key exchange and signatures, over the
+        // same library as VegaTLS (and empty without one).
+        .target(name: "VegaCrypto", dependencies: ["CVegaTLS"], swiftSettings: swiftSettings),
         // gzip and deflate on the system's zlib; brotli and zstd loaded with
         // dlopen when there. None yet on Windows (no zlib in its SDK).
         .target(name: "CVegaCompress",
@@ -83,7 +87,7 @@ let package = Package(
         .target(name: "VegaHTTP2", dependencies: ["Vega", "VegaIO", "VegaHTTP1"], swiftSettings: swiftSettings),
         .target(name: "VegaWebSocket", dependencies: ["Vega", "VegaIO", "VegaHTTP1", "CVegaCompress"], swiftSettings: swiftSettings),
         .target(name: "VegaExtras", dependencies: ["Vega", "VegaIO", "VegaHTTP1", "CVegaCompress"], swiftSettings: swiftSettings),
-        .testTarget(name: "VegaTests", dependencies: ["Vega", "VegaIO", "VegaFS", "VegaProcess", "VegaMetrics", "VegaTest", "VegaTLS", "VegaHTTP1", "VegaHTTP2", "VegaWebSocket", "VegaExtras", "CVega"], swiftSettings: swiftSettings),
+        .testTarget(name: "VegaTests", dependencies: ["Vega", "VegaIO", "VegaFS", "VegaProcess", "VegaMetrics", "VegaTest", "VegaTLS", "VegaCrypto", "VegaHTTP1", "VegaHTTP2", "VegaWebSocket", "VegaExtras", "CVega"], swiftSettings: swiftSettings),
     ],
     cLanguageStandard: .gnu11,
     cxxLanguageStandard: .gnucxx17
