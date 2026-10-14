@@ -89,6 +89,15 @@ int cv_tls_peer_certificate(cv_tls *t, uint8_t *out, int len);
 /// in cert_pem. Lengths in/out.
 int cv_tls_self_signed(const char *names, int days, char *cert_pem, int *cert_len, char *key_pem, int *key_len);
 
+/// Digests, from the TLS library or, on Apple's platforms, CommonCrypto:
+/// 1 if there is one to use. The others return 0, or -1 on failure or
+/// with none; out is 32 bytes, or out_len for PBKDF2.
+int cv_digest_available(void);
+int cv_sha256(const void *data, intptr_t len, uint8_t *out);
+int cv_hmac_sha256(const void *key, intptr_t key_len, const void *data, intptr_t len, uint8_t *out);
+int cv_pbkdf2_sha256(const void *password, intptr_t password_len, const void *salt, intptr_t salt_len,
+                     uint32_t iterations, uint8_t *out, intptr_t out_len);
+
 #ifdef __cplusplus
 }
 #endif
