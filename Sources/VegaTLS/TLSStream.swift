@@ -107,7 +107,7 @@ public struct TLSStream<Transport: AsyncReader & AsyncWriter & ~Copyable>: ~Copy
     }
 
     public func write(_ buffer: borrowing IOBuffer) async throws(IOError) {
-        try await write(buffer.withUnsafeBytes { $0 })
+        try await state.write(buffer.withUnsafeBytes { $0 }, to: transport)
     }
 
     /// Send close_notify, then give back the transport (to shut down or
@@ -127,7 +127,7 @@ public struct TLSStream<Transport: AsyncReader & AsyncWriter & ~Copyable>: ~Copy
             switch r {
             case 1: return
             case CV_TLS_WANT_READ:
-                if try await !fillDuringHandshake() {
+                if try await !state.fill(from: transport) {
                     throw IOError(code: IOError.tls.code, message: "handshake: the peer closed the connection")
                 }
             default:
@@ -139,11 +139,6 @@ public struct TLSStream<Transport: AsyncReader & AsyncWriter & ~Copyable>: ~Copy
     /// Send whatever ciphertext is waiting.
     private func flush() async throws(IOError) {
         try await state.flush(to: transport)
-    }
-
-    /// false at the transport's end.
-    private func fillDuringHandshake() async throws(IOError) -> Bool {
-        try await state.fillDuringHandshake(from: transport)
     }
 }
 
@@ -216,7 +211,7 @@ public struct TLSWriter<Transport: AsyncWriter & ~Copyable>: ~Copyable, AsyncWri
     }
 
     public func write(_ buffer: borrowing IOBuffer) async throws(IOError) {
-        try await write(buffer.withUnsafeBytes { $0 })
+        try await state.write(buffer.withUnsafeBytes { $0 }, to: transport)
     }
 
     /// Send close_notify: the peer's reads then return 0.
@@ -335,7 +330,18 @@ final class TLSState: @unchecked Sendable {
             var st = cv_tls_status()
             if engine({ cv_tls_write(tls, at, chunk, &st) }) < 0 { throw error() }
             done += chunk
-            try await flush(to: transport)
+            // flush(to:), written out: an async call fewer per write.
+            var count = 0
+            while let ciphertext = engine({ cv_tls_take_output(tls, &count) }) {
+                do {
+                    try await transport.write(UnsafeRawBufferPointer(start: ciphertext, count: count))
+                } catch {
+                    engine { cv_tls_return_output(tls) }
+                    throw error
+                }
+                engine { cv_tls_return_output(tls) }
+                if !isSplit { break }
+            }
         }
     }
 
@@ -356,13 +362,10 @@ final class TLSState: @unchecked Sendable {
         }
     }
 
-    /// Read ciphertext from the transport for the engine; its end, too.
-    func fill<R: AsyncReader & ~Copyable>(from transport: borrowing R) async throws(IOError) {
-        if try await !fillDuringHandshake(from: transport) { engine { cv_tls_feed_eof(tls) } }
-    }
-
-    /// false at the transport's end.
-    func fillDuringHandshake<R: AsyncReader & ~Copyable>(from transport: borrowing R) async throws(IOError) -> Bool {
+    /// Read ciphertext from the transport for the engine, or tell it the
+    /// transport's end (and return false).
+    @discardableResult
+    func fill<R: AsyncReader & ~Copyable>(from transport: borrowing R) async throws(IOError) -> Bool {
         // The engine wants more only once it has taken all it was handed,
         // so this is nearly always a clear.
         if taken == inbound.count {
@@ -373,7 +376,10 @@ final class TLSState: @unchecked Sendable {
         taken = 0
         if inbound.spareCapacity == 0 { inbound.reserveCapacity(inbound.capacity * 2) }
         let n = try await transport.read(into: &inbound)
-        guard n > 0 else { return false }
+        guard n > 0 else {
+            engine { cv_tls_feed_eof(tls) }
+            return false
+        }
         drained = false
         return true
     }

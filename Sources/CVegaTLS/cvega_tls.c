@@ -582,10 +582,13 @@ static SSL_SESSION *take_session(cv_tls_ctx *c, const char *host) {
 
 // MARK: - The BIO
 
-/// Room for `more` bytes after the ones in o.
+/// Room for `more` bytes after the ones in o. Sizes go 4.25 KiB, 8.5, 17,
+/// 34, 68: 17 KiB holds a full record (16 KiB of plaintext, and well under
+/// 256 bytes of framing), and 68 KiB the four records of a 64 KiB write
+/// where powers of two would take 128.
 static int out_reserve(struct cv_out *o, size_t more) {
     if (o->cap - o->len >= more) return 1;
-    size_t cap = o->cap ? o->cap : 4096;
+    size_t cap = o->cap ? o->cap : 4352;
     while (cap - o->len < more) cap *= 2;
     unsigned char *p = realloc(o->p, cap);
     if (!p) return 0;
@@ -623,15 +626,20 @@ static int bio_write(BIO *b, const char *buf, int len) {
     return len;
 }
 
+/// OpenSSL 3.0 asks this some nine times a record written and three times
+/// one read, nearly always whether the BIO does kernel TLS (it doesn't), so
+/// the answers that need the connection fetch it themselves.
 static long bio_ctrl(BIO *b, int cmd, long num, void *ptr) {
     (void)num;
     (void)ptr;
-    cv_tls *t = BIO_get_data(b);
     switch (cmd) {
     case BIO_CTRL_FLUSH: return 1; // the engine flushes after a flight
-    case BIO_CTRL_EOF: return t->eof && t->in_len == 0; // how OpenSSL tells a truncation
-    case BIO_CTRL_PENDING: return (long)t->in_len;
-    case BIO_CTRL_WPENDING: return (long)t->out.len;
+    case BIO_CTRL_EOF: { // how OpenSSL tells a truncation
+        cv_tls *t = BIO_get_data(b);
+        return t->eof && t->in_len == 0;
+    }
+    case BIO_CTRL_PENDING: return (long)((cv_tls *)BIO_get_data(b))->in_len;
+    case BIO_CTRL_WPENDING: return (long)((cv_tls *)BIO_get_data(b))->out.len;
     default: return 0;
     }
 }
