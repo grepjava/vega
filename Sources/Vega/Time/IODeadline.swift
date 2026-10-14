@@ -59,6 +59,8 @@ struct IODeadlineScope: Sendable {
     /// deadline while the scope lasts, `previous` before and after.
     private let hook: IOTaskHook?
     private let previous: IODeadline?
+    /// The deadline is on the task's hook: `run` needs no task-local.
+    @usableFromInline let onHook: Bool
 
     @usableFromInline init(after duration: Duration) {
         let now = Runtime.nowNanos
@@ -81,6 +83,7 @@ struct IODeadlineScope: Sendable {
         hook = IOTaskHook.active
         previous = hook?.deadline
         hook?.deadline = state
+        onHook = hook != nil
         if let worker = Worker.current, let scheduler = worker._withUnsafeGuaranteedRef({ $0.scheduler }) {
             // The wheel holds a retain, consumed by whoever unlinks the
             // entry: the firing worker or `end`. nil: already due, so fired.
@@ -111,6 +114,11 @@ struct IODeadlineScope: Sendable {
     @inlinable
     func run<T: ~Copyable, E: Error>(isolation: isolated (any Actor)?,
                                      _ body: () async throws(E) -> T) async throws(E) -> T {
+        // A task with a hook finds the deadline there; binding the
+        // task-local as well would cost a push, a pop and the hops of
+        // withValue for nothing (child tasks, which inherit task-locals,
+        // never see their parent's deadline).
+        if onHook { return try await body() }
         // TaskLocal.withValue neither takes typed throws nor ~Copyable
         // results.
         var result: Result<T, E>? = nil
