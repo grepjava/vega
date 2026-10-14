@@ -3,10 +3,11 @@
 // small messages (an HTTP/1.1 keep-alive load's shape). Reports rounds per
 // second and the process's CPU time per round, both ends' together.
 //
-//   vega-tls-bench [--connections 64] [--seconds 5] [--workers N] [--size 200] [--plain]
+//   vega-tls-bench [--connections 64] [--seconds 5] [--workers N] [--size 200] [--plain] [--deadline]
 //
 // --plain runs the same rounds over plain TCP: the difference in CPU per
-// round is what TLS costs.
+// round is what TLS costs. --deadline runs each server round inside
+// `Runtime.withIODeadline`, as a server with a request timeout does.
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
@@ -22,6 +23,7 @@ var seconds = 5
 var workers: Int?
 var size = 200
 var plain = false
+var deadline = false
 var args = CommandLine.arguments.dropFirst()
 while let a = args.popFirst() {
     switch a {
@@ -30,11 +32,12 @@ while let a = args.popFirst() {
     case "--workers": workers = Int(args.popFirst()!)!
     case "--size": size = Int(args.popFirst()!)!
     case "--plain": plain = true
+    case "--deadline": deadline = true
     default: fatalError("unknown option \(a)")
     }
 }
 
-let messageSize = size, isPlain = plain, connectionCount = connections, runSeconds = seconds
+let messageSize = size, isPlain = plain, withDeadline = deadline, connectionCount = connections, runSeconds = seconds
 let rounds = Atomic<Int>(0)
 let stopping = Atomic<Bool>(false)
 
@@ -60,6 +63,14 @@ func message() -> IOBuffer {
 func serve<S: AsyncReader & AsyncWriter & ~Copyable>(_ s: borrowing S) async throws(IOError) {
     var buf = IOBuffer(capacity: max(messageSize, 16 * 1024))
     let answer = message()
+    if withDeadline {
+        while try await Runtime.withIODeadline(.seconds(30), { () async throws(IOError) -> Bool in
+            guard try await readMessage(s, &buf, messageSize) else { return false }
+            try await s.write(answer)
+            return true
+        }) {}
+        return
+    }
     while try await readMessage(s, &buf, messageSize) {
         try await s.write(answer)
     }
@@ -76,7 +87,8 @@ func drive<S: AsyncReader & AsyncWriter & ~Copyable>(_ s: borrowing S) async thr
     }
 }
 
-func cpuSeconds() -> Double {
+/// Process CPU seconds: user and system together, and user alone.
+func cpuSeconds() -> (all: Double, user: Double) {
     var u = rusage()
     #if os(Linux)
     getrusage(__rusage_who_t(RUSAGE_SELF.rawValue), &u)
@@ -84,7 +96,7 @@ func cpuSeconds() -> Double {
     getrusage(RUSAGE_SELF, &u)
     #endif
     func secs(_ t: timeval) -> Double { Double(t.tv_sec) + Double(t.tv_usec) / 1e6 }
-    return secs(u.ru_utime) + secs(u.ru_stime)
+    return (secs(u.ru_utime) + secs(u.ru_stime), secs(u.ru_utime))
 }
 
 let identity = try! TLSIdentity.selfSigned(names: ["localhost", "127.0.0.1"])
@@ -129,10 +141,12 @@ do {
         stopping.store(true, ordering: .relaxed)
         let wall = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
         let n = Double(r1 - r0)
-        let perSecond = Int(n / wall), cpuPerRound = (c1 - c0) / n * 1e6
-        print("\(isPlain ? "plain" : "tls") connections \(connectionCount) size \(messageSize) workers \(rt.workerCount): "
-              + "\(perSecond) rounds/s, \((cpuPerRound * 100).rounded() / 100) us CPU/round, "
-              + "\(Int(((c1 - c0) / wall * 100).rounded()))% CPU")
+        let perSecond = Int(n / wall), cpuPerRound = (c1.all - c0.all) / n * 1e6
+        let userPerRound = (c1.user - c0.user) / n * 1e6
+        print("\(isPlain ? "plain" : "tls")\(withDeadline ? "+deadline" : "") connections \(connectionCount) size \(messageSize) workers \(rt.workerCount): "
+              + "\(perSecond) rounds/s, \((cpuPerRound * 100).rounded() / 100) us CPU/round "
+              + "(\((userPerRound * 100).rounded() / 100) us user), "
+              + "\(Int(((c1.all - c0.all) / wall * 100).rounded()))% CPU")
         for c in clients { await c.value }
     }
 } catch {
