@@ -31,6 +31,7 @@ public struct Shard: Sendable {
     public func listener(_ index: Int = 0) throws(IOError) -> TCPListener {
         precondition(listeners.indices.contains(index), "no ShardOptions.listeners[\(index)]")
         let l = listeners[index]
+        precondition(l.path == nil, "ShardOptions.listeners[\(index)] is a Unix listener: take it with unixListener")
         let driver = try IODriver.current()
         guard l.shared >= 0 else {
             return try TCPListener.bind(host: l.host, port: l.port, backlog: l.backlog, reusePort: true)
@@ -38,6 +39,20 @@ public struct Shard: Sendable {
         let fd = fcntl(l.shared, F_DUPFD_CLOEXEC, 0)
         guard fd >= 0 else { throw IOError(code: errno) }
         return TCPListener(reg: try IORegistration(fd: fd, driver: driver))
+    }
+
+    /// A listener for the Unix socket `ShardOptions.listeners[index]`, on
+    /// this shard's runtime: the supervisor's socket, which every shard
+    /// shares. Each call gives a new one, for several accept loops. Call
+    /// from a task on the shard's runtime.
+    public func unixListener(_ index: Int) throws(IOError) -> UnixListener {
+        precondition(listeners.indices.contains(index), "no ShardOptions.listeners[\(index)]")
+        let l = listeners[index]
+        precondition(l.path != nil && l.shared >= 0, "ShardOptions.listeners[\(index)] is not a Unix listener")
+        let driver = try IODriver.current()
+        let fd = fcntl(l.shared, F_DUPFD_CLOEXEC, 0)
+        guard fd >= 0 else { throw IOError(code: errno) }
+        return UnixListener(reg: try IORegistration(fd: fd, driver: driver))
     }
 
     /// The port of `ShardOptions.listeners[index]` (the one picked, for port 0).
@@ -54,9 +69,22 @@ public struct ShardListener: Sendable, Hashable {
     /// 0 picks a free port, the same for every shard.
     public var port: Int
     public var backlog: Int
+    /// A Unix socket's path, for a Unix listener; nil for TCP.
+    public var path: String?
 
     public static func tcp(host: String = "", port: Int, backlog: Int = 1024) -> ShardListener {
-        ShardListener(host: host, port: port, backlog: backlog)
+        ShardListener(host: host, port: port, backlog: backlog, path: nil)
+    }
+
+    /// A Unix stream socket at `path`, taken in a shard with
+    /// `Shard.unixListener(_:)`. The supervisor binds it before the first
+    /// shard starts, whatever the `ShardListenerMode` (Unix sockets have no
+    /// `SO_REUSEPORT` to spread connections with), and every shard accepts
+    /// on it. A socket left at `path` by an earlier run is removed first;
+    /// any other file there is an error. The socket is left behind when the
+    /// server exits, as `UnixListener` leaves its own.
+    public static func unix(path: String, backlog: Int = 1024) -> ShardListener {
+        ShardListener(host: "", port: 0, backlog: backlog, path: path)
     }
 }
 
@@ -128,6 +156,8 @@ struct PreparedListener: Sendable {
     let host: String
     let port: Int
     let backlog: Int
+    /// A Unix listener's path; nil for TCP.
+    var path: String? = nil
     /// The listening socket shards adopt, or -1 when each binds its own.
     let shared: Int32
 }
@@ -299,6 +329,19 @@ extension Runtime {
         let shared = options.listenerMode.resolved == .shared
         return options.listeners.map { spec in
             var err: Int32 = 0
+            if let path = spec.path {
+                // A socket a previous run left behind; anything else at the
+                // path is someone else's, and stays.
+                var st = stat()
+                if lstat(path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFSOCK { unlink(path) }
+                let fd = cv_unix_listen(path, Int32(spec.backlog), &err)
+                guard fd >= 0 else {
+                    let msg = "vega: cannot listen on \(path): \(IOError(code: err))\n"
+                    _ = msg.withCString { write(2, $0, strlen($0)) }
+                    exit(1)
+                }
+                return PreparedListener(host: "", port: 0, backlog: spec.backlog, path: path, shared: fd)
+            }
             // Per-shard with a fixed port needs nothing here; port 0 is bound
             // (not listening) to pick one port for every shard, and stays so.
             guard shared || spec.port == 0 else {
@@ -651,7 +694,7 @@ enum ExecShard {
         let listeners = zip(options.listeners, fds).map { spec, pair -> PreparedListener in
             let (fd, port) = pair!
             if fd >= 0 { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) } // not for the shard's children
-            return PreparedListener(host: spec.host, port: port, backlog: spec.backlog, shared: fd)
+            return PreparedListener(host: spec.host, port: port, backlog: spec.backlog, path: spec.path, shared: fd)
         }
         return Launched(index: index, count: count, cpus: cpus, listeners: listeners)
     }

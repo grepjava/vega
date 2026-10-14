@@ -100,6 +100,41 @@ import Testing
         #expect(replies.count == 4)
         #expect(replies.allSatisfy { $0 == "a" || $0 == "b" })
     }
+
+    @Test func servesAUnixListener() throws {
+        let path = "/tmp/vega-shard-\(getpid()).sock"
+        // A socket an earlier run left behind is replaced.
+        var err: Int32 = 0
+        let stale = cv_unix_listen(path, 1, &err)
+        if stale >= 0 { close(stale) }
+        defer { unlink(path) }
+        var options = ShardOptions(shards: 0, workersPerShard: 2)
+        options.listeners = [.tcp(host: "127.0.0.1", port: 0), .unix(path: path)]
+        var replies: [String] = []
+        Runtime.runInProcess(options) { shard in
+            replies = (try? shard.runtime.block { () async throws(IOError) -> [String] in
+                let listener = try shard.unixListener(1)
+                let accepting = shard.runtime.spawn(with: listener) { listener async -> Void in
+                    for _ in 0..<2 {
+                        guard let conn = try? await listener.accept() else { return }
+                        var out = IOBuffer(capacity: 8)
+                        out.append("unix")
+                        try? await conn.write(out)
+                    }
+                }
+                var got: [String] = []
+                for _ in 0..<2 {
+                    let conn = try await UnixStream.connect(path: path)
+                    var buf = IOBuffer(capacity: 8)
+                    while try await conn.read(into: &buf) > 0 {}
+                    got.append(buf.string)
+                }
+                await accepting.value
+                return got
+            }) ?? []
+        }
+        #expect(replies == ["unix", "unix"])
+    }
 }
 #endif
 #endif
