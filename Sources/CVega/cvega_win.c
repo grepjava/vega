@@ -313,6 +313,11 @@ intptr_t cv_recv(int fd, void *buf, intptr_t len) {
     return n >= 0 ? (intptr_t)n : -(intptr_t)last_error();
 }
 
+intptr_t cv_sendfile(int fd, int file, int64_t offset, intptr_t count) {
+    (void)fd; (void)file; (void)offset; (void)count;
+    return -ENOSYS;
+}
+
 intptr_t cv_peek(int fd) {
     char c;
     int n = recv(as_socket(fd), &c, 1, MSG_PEEK);

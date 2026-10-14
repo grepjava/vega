@@ -120,6 +120,14 @@ public struct UnixStream: ~Copyable, Sendable {
     }
 
 
+    /// Send up to `count` bytes of the open file `file` (a descriptor) from
+    /// `offset`, without copying them through this process where the system
+    /// allows (sendfile(2) on Linux and Darwin). Returns the bytes sent:
+    /// `count`, or fewer when the file ends first. The file is not closed.
+    public func sendFile(_ file: Int32, offset: Int64 = 0, count: Int) async throws(IOError) -> Int {
+        try await reg.sendFile(file, offset: offset, count: count)
+    }
+
     /// Stop sending: the peer reads end-of-stream once it has the rest.
     public func shutdownWrite() throws(IOError) { try reg.shutdownWrite() }
 

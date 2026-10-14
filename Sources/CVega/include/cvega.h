@@ -488,6 +488,9 @@ typedef struct cv_iovec {
 } cv_iovec;
 /// sendmsg of count buffers (MSG_NOSIGNAL): bytes sent, or -errno.
 intptr_t cv_sendv(int fd, const cv_iovec *iov, int count);
+/// Up to `count` bytes of `file` from `offset` sent on socket `fd` by the
+/// kernel: the bytes sent, or -errno (-ENOSYS where there is no sendfile).
+intptr_t cv_sendfile(int fd, int file, int64_t offset, intptr_t count);
 
 #define CV_DGRAM_TRUNCATED 1u
 /// Receive up to count (at most 64) datagrams, datagram i into

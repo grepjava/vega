@@ -85,6 +85,61 @@ extension IORegistration {
         await Runtime.consumeBudget()
     }
 
+    /// Send up to `count` bytes of the file `file` from `offset`, by the
+    /// kernel where it can (sendfile), else read and written here. Returns
+    /// the bytes sent: `count`, or fewer when the file ends first.
+    func sendFile(_ file: Int32, offset: Int64, count: Int) async throws(IOError) -> Int {
+        var sent = 0
+        #if canImport(Network)
+        if nw != nil { return try await copyFile(file, offset: offset, count: count) }
+        #endif
+        while sent < count {
+            let n = cv_sendfile(fd, file, offset + Int64(sent), count - sent)
+            if n > 0 {
+                sent += n
+                continue
+            }
+            if n == 0 { break } // the file ended
+            let err = Int32(-n)
+            switch err {
+            case EAGAIN, EWOULDBLOCK: try await wait(CV_IO_WRITE)
+            case EINTR: continue
+            case ENOSYS, EINVAL, EOPNOTSUPP:
+                // No sendfile here, or not for this kind of file.
+                return sent + (try await copyFile(file, offset: offset + Int64(sent), count: count - sent))
+            default: throw IOError(code: err)
+            }
+        }
+        await Runtime.consumeBudget()
+        return sent
+    }
+
+    /// `sendFile` without the kernel's help: positioned reads, then writes.
+    private func copyFile(_ file: Int32, offset: Int64, count: Int) async throws(IOError) -> Int {
+        let chunk = min(count, 256 * 1024)
+        guard chunk > 0 else { return 0 }
+        let buffer = UnsafeMutableRawPointer.allocate(byteCount: chunk, alignment: 16)
+        defer { buffer.deallocate() }
+        var sent = 0
+        while sent < count {
+            let want = min(chunk, count - sent), at = offset + Int64(sent)
+            #if os(Windows)
+            let n = cv_file_read(file, buffer, want, at)
+            #else
+            let r = pread(file, buffer, want, off_t(at))
+            let n = r >= 0 ? r : -Int(errno)
+            #endif
+            if n < 0 {
+                if Int32(-n) == EINTR { continue }
+                throw IOError(code: Int32(-n))
+            }
+            if n == 0 { break }
+            try await write(UnsafeRawBufferPointer(start: buffer, count: n))
+            sent += n
+        }
+        return sent
+    }
+
     /// Write all of `count` buffers, `part(i)` being the i-th, with as few
     /// sendmsg calls as the kernel allows (up to 64 buffers each).
     @inline(__always)

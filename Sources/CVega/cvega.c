@@ -56,6 +56,7 @@
 #include <linux/futex.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/sendfile.h>
 #include <sys/random.h>
 #include <sys/syscall.h>
 #elif defined(__APPLE__)
@@ -2048,6 +2049,23 @@ int cv_local_port(int fd) {
 intptr_t cv_recv(int fd, void *buf, intptr_t len) {
     ssize_t n = recv(fd, buf, (size_t)len, 0);
     return n >= 0 ? (long)n : -(long)errno;
+}
+
+intptr_t cv_sendfile(int fd, int file, int64_t offset, intptr_t count) {
+#if defined(__linux__)
+    off_t off = (off_t)offset;
+    ssize_t n = sendfile(fd, file, &off, (size_t)count);
+    return n >= 0 ? (intptr_t)n : -(intptr_t)errno;
+#elif defined(__APPLE__)
+    off_t len = (off_t)count;
+    int rc = sendfile(file, fd, (off_t)offset, &len, NULL, 0);
+    // EAGAIN with some sent: report what went; the next call says EAGAIN.
+    if (rc == 0 || len > 0) return (intptr_t)len;
+    return -(intptr_t)errno;
+#else
+    (void)fd; (void)file; (void)offset; (void)count;
+    return -ENOSYS;
+#endif
 }
 
 intptr_t cv_peek(int fd) {
