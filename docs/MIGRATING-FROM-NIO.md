@@ -19,7 +19,7 @@ The Vega snippets below compile and run against Vega at the commit that added th
 | `ByteToMessageDecoder`, `MessageToByteEncoder` | `Decoder`, `Encoder` | `VegaIO` |
 | `LineBasedFrameDecoder`, `LengthFieldBasedFrameDecoder` | `LinesCodec`, `LengthDelimitedCodec` | `VegaIO` |
 | `EventLoopFuture`, `EventLoopPromise` | `async` / `await`, `Task` | Swift |
-| `EventLoop.scheduleTask(in:)` | `Runtime.sleep(for:)`, `Runtime.timeout(_:_:)` | `Vega` |
+| `EventLoop.scheduleTask(in:)` | `Runtime.sleep(for:)`, `Runtime.timeout(_:_:)`, `Runtime.withIODeadline(_:_:)` | `Vega` |
 | `ServerBootstrap` | `TCPServer.bind(port:configuration:handler:)` | `Vega` |
 | `ClientBootstrap` | `TCPClient(...).connect(host:port:)` (Happy Eyeballs v2) | `Vega` |
 | `NIOAsyncChannel` | The stream itself: `read(into:)` / `write(_:)`, or `FramedRead.next()` / `FramedWrite.send(_:)` | `Vega`, `VegaIO` |
@@ -218,6 +218,7 @@ let both = try await [a, b]
 - Vega's I/O throws `IOError` with typed throws, so `do throws(IOError)` keeps the error concrete. `IOError.cancelled` reports a cancelled wait.
 - Cancellation is task cancellation. Cancelling a task wakes any socket wait, sleep or lock wait it is in. There is no promise to fail.
 - `Runtime.timeout` arms one timer on the runtime's wheel and unlinks it in O(1) when the operation finishes first.
+- `Runtime.withIODeadline` bounds only the I/O waits inside it, and runs them in the calling task instead of a child task. On the bench box it costs about 0.5 µs, against about 2.7–3.3 µs for `timeout`. A wait still pending at the deadline throws `IOError.timedOut` and the task is not cancelled. Use it for a request and its reply on a connection; use `timeout` when the step also waits on other things, such as a channel or a lock.
 
 ## ByteBuffer becomes IOBuffer
 

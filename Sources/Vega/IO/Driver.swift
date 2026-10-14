@@ -143,19 +143,21 @@ struct IORegistration: @unchecked Sendable {
     }
 
     /// Wait until the driver reports `direction` ready (after a syscall said
-    /// EAGAIN). Throws `.cancelled` if the task is cancelled first: only this
-    /// wait is abandoned, the fd stays usable.
+    /// EAGAIN). Throws `.cancelled` if the task is cancelled first, or
+    /// `.timedOut` if its I/O deadline passes: only this wait is abandoned,
+    /// the fd stays usable.
     @inline(__always)
     func wait(_ direction: Int32) async throws(IOError) {
         if let res = await URing.perform(.poll(fd, direction), owner: owner) {
             // Any mask means "try again"; errors and hang-ups show up there.
             // A poll consumes nothing, so a cancelled task gives up even if
             // readiness beat the cancel to the ring (as the epoll path does).
-            if res == -Int64(ECANCELED) || Task.isCancelled { throw .cancelled }
+            if res == -Int64(ETIMEDOUT) { throw .timedOut }
+            if res == -Int64(ECANCELED) || Task.isCancelled { throw .interrupted }
             if res < 0 { throw IOError(code: Int32(-res)) }
             return
         }
-        let ready = await withTaskCancellationHandler {
+        let ready = await withIOCancellation { deadline in
             await withUnsafeContinuation { (c: UnsafeContinuation<Bool, Never>) in
                 let waiter = IOWaiter.bits(c)
                 if cv_io_arm(io, direction, waiter) != 0 {
@@ -163,8 +165,9 @@ struct IORegistration: @unchecked Sendable {
                     return
                 }
                 // The cancel handler may have run before we armed; it sets the
-                // flag first, so one of the two sees the other.
-                if Task.isCancelled, cv_io_disarm(io, direction, waiter) != 0 {
+                // flag first, so one of the two sees the other. The same goes
+                // for the deadline.
+                if Task.isCancelled || deadline?.hasFired == true, cv_io_disarm(io, direction, waiter) != 0 {
                     c.resume(returning: false)
                     return
                 }
@@ -178,7 +181,7 @@ struct IORegistration: @unchecked Sendable {
             let waiter = cv_io_take_waiter(io, direction)
             if waiter != 0 { IOWaiter.continuation(waiter).resume(returning: false) }
         }
-        if !ready { throw .cancelled }
+        if !ready { throw .interrupted }
     }
 }
 

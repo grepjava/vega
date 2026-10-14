@@ -294,6 +294,8 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
         case .cancel(let task):
             cv_task_cancel(UnsafeMutableRawPointer(mutating: task))
             cv_task_release(task)
+        case .deadline(let d):
+            d.takeRetainedValue().fire()
         case .job(let job):
             #if VEGA_JOB_AUDIT
             JobAudit.enqueued(job, "timer")

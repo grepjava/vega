@@ -85,7 +85,8 @@ enum URing {
     }
 
     /// Run `request` on the current worker's ring: the result (>= 0) or
-    /// -errno (-ECANCELED if the task was cancelled first), or `noRing`.
+    /// -errno (-ECANCELED if the task was cancelled first, -ETIMEDOUT if its
+    /// I/O deadline passed), or `noRing`.
     @inline(__always)
     static func run(_ request: URingRequest) async -> Int64 {
         // The slot, once submitted (1: cancelled before that), and its
@@ -93,7 +94,7 @@ enum URing {
         // frame, which outlives the handler: removing it waits for a run.
         let handle = Atomic<UInt>(0)
         let ticket = Atomic<UInt64>(0)
-        return await withTaskCancellationHandler {
+        let res = await withIOCancellation { _ in
             await withUnsafeContinuation { (c: UnsafeContinuation<Int64, Never>) in
                 // Looked up here, on the thread that submits: the ring takes
                 // submissions from its own worker only.
@@ -110,9 +111,16 @@ enum URing {
                 }
             }
         } onCancel: {
+            // Both the task and its I/O deadline may cancel: the second finds
+            // 1, or an operation already being cancelled.
             let (first, op) = handle.compareExchange(expected: 0, desired: 1, ordering: .acquiring)
-            if !first { cv_uring_cancel(OpaquePointer(bitPattern: op), ticket.load(ordering: .relaxed)) }
+            if !first, op != 1 { cv_uring_cancel(OpaquePointer(bitPattern: op), ticket.load(ordering: .relaxed)) }
         }
+        // Given up at the deadline rather than by cancellation: say so.
+        if res == -Int64(ECANCELED), !Task.isCancelled, IODeadline.active?.hasFired == true {
+            return -Int64(ETIMEDOUT)
+        }
+        return res
     }
 
     /// Run `request` on a ring: this worker's, or, for a task elsewhere, one

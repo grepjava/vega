@@ -359,8 +359,28 @@ let timeoutOK = Bench(name: "timeout_ok", ops: 10_000) { ex in
     }
 }
 
+/// Keeps a result alive past the optimizer.
+@inline(never) func blackHole(_ x: Int) { if x == .min { print(x) } }
+
+/// One task runs 10,000 operations in a row, each under a timeout it beats:
+/// what `Runtime.timeout` adds to a step of a connection's work, as a child
+/// task plus a timer.
+let timeoutSeq = Bench(name: "timeout_seq", ops: 10_000) { _ in
+    var sum = 0
+    for i in 0..<10_000 { sum &+= (try? await Runtime.timeout(.seconds(10)) { i }) ?? 0 }
+    blackHole(sum)
+}
+
+/// The same under `Runtime.withIODeadline`: no child task, just the timer
+/// and the task-local that the I/O waits read.
+let ioDeadlineSeq = Bench(name: "io_deadline_seq", ops: 10_000) { _ in
+    var sum = 0
+    for i in 0..<10_000 { sum &+= await Runtime.withIODeadline(.seconds(10)) { i } }
+    blackHole(sum)
+}
+
 let benches = [spawnMany, spawnDiscard, poolSpawn, chainedSpawn, pingPong, pingPongNotify, pingPongNotifyNC, yieldMany, yieldVega,
-               mpscPingPong, mpscPingPongNC, mpscFanIn, mpscFanInNC, semaphore, semaphoreNC, sleepCancel, sleepMany, timeoutOK].filter { only?.contains($0.name) ?? true }
+               mpscPingPong, mpscPingPongNC, mpscFanIn, mpscFanInNC, semaphore, semaphoreNC, sleepCancel, sleepMany, timeoutOK, timeoutSeq, ioDeadlineSeq].filter { only?.contains($0.name) ?? true }
 
 // MARK: run
 

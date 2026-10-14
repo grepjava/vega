@@ -117,7 +117,8 @@ enum NetworkIO {
             }
         }
         connection.start(queue: stream.queue)
-        if let error = await ready.wait(cancelled: .cancelled) {
+        if var error = await ready.wait(cancelled: .cancelled) {
+            if error == .cancelled { error = .interrupted }
             connection.stateUpdateHandler = nil
             connection.cancel()
             throw error
@@ -225,9 +226,10 @@ final class Rendezvous<T: Sendable>: @unchecked Sendable {
 
     deinit { lock.destroy() }
 
-    /// Wait for `offer`; `cancelled` if the task is cancelled first.
+    /// Wait for `offer`; `cancelled` if the task is cancelled, or its I/O
+    /// deadline passes, first.
     func wait(cancelled: T) async -> T {
-        let result = await withTaskCancellationHandler {
+        let result = await withIOCancellation { _ in
             await withUnsafeContinuation { (c: UnsafeContinuation<T, Never>) in
                 lock.lock()
                 if let value {
@@ -329,7 +331,7 @@ final class NetworkStream: NetworkHandle, @unchecked Sendable {
                 lock.lock()
                 if reader === r { reader = nil }
                 lock.unlock()
-                throw .cancelled
+                throw .interrupted
             }
         }
     }
@@ -355,7 +357,7 @@ final class NetworkStream: NetworkHandle, @unchecked Sendable {
             done.offer(error.map(NetworkIO.map))
         })
         // A cancelled write gives up waiting; the bytes still go out.
-        if let error = await done.wait(cancelled: .cancelled) { throw error }
+        if let error = await done.wait(cancelled: .cancelled) { throw error == .cancelled ? .interrupted : error }
         await Runtime.consumeBudget()
     }
 
@@ -467,7 +469,7 @@ final class NetworkAcceptor: NetworkHandle, @unchecked Sendable {
                 lock.lock()
                 waiters.removeAll { $0 === r }
                 lock.unlock()
-                throw .cancelled
+                throw .interrupted
             }
         }
     }

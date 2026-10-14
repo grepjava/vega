@@ -505,6 +505,23 @@ Closed-loop p50 at 512 connections was 8.5 ms for Hummingbird on both groups, an
 - **The key exchange doesn't matter on keep-alive** (OpenSSL default against X25519 is level), because a key exchange happens once per connection.
 - **The cost of TLS:** keep-alive TLS costs about 45 µs of server CPU per request, against about 32 µs for plain vega-http in the same setup (sweep 5: 4 cores, 123k req/s).
 
+## Timeouts: `Runtime.timeout` against `Runtime.withIODeadline` (2026-10-14)
+
+A database client puts a deadline on every command. Under `Runtime.timeout` that is a task group, a child task and a timer per command. `Runtime.withIODeadline` runs the command in the calling task: it sets a task-local and arms one timer, and an I/O wait still pending at the deadline gives up the way a cancelled one does.
+
+`vega-bench` on the box, 8 workers, median of 5 runs, in ns per operation. One task runs 10,000 operations in a row, each under a 10 s deadline it beats. The first figure is with executor preference, the second with Vega as the global executor. Two rounds gave the same figures to within 2%.
+
+| Bench | io_uring | epoll | Swift default |
+|---|---|---|---|
+| timeout_seq | 2,765 / 2,738 | 3,315 / 3,336 | 20,770 |
+| io_deadline_seq | **466 / 459** | **546 / 540** | 4,195 |
+
+- **`withIODeadline` costs about a sixth as much as `timeout`.** Of its roughly 0.5 µs, the timer accounts for about 0.1–0.3 µs (adding and unlinking one), and the task-local push and pop for about 0.1 µs. The rest is allocating the deadline and retain/release.
+- **What is left of `timeout`'s cost is mostly the child task.** In WSL, a task group with one child that returns at once costs about 1.5 µs.
+- **Adding the earliest timer wakes a parked worker.** With idle workers, adding and unlinking a timer costs about 0.3 µs, against about 0.1 µs with one worker. When a new timer is the earliest, `addTimer` unparks the timer owner so it can re-arm its sleep, even when the deadline is seconds away. Waking it only when the new deadline is earlier than the owner's planned wake-up would remove most of this.
+- **`timeout_ok` doesn't show the difference.** It spawns 10,000 tasks from one parent, and the spawning loop sets the pace: on the box `timeout_ok` and its `withIODeadline` twin both measured 2.2–2.4 µs per op.
+- **In VegaRedis**, the per-command timeout now uses `withIODeadline`. Against a server reached through Docker Desktop's port forwarding, about 170 µs per PING, the change is lost in the noise. Against a local server, with a 20–30 µs round trip, `timeout` added about 10% to every command.
+
 ## Measurement notes
 
 - **Wi-Fi can't drive the HTTP benchmarks.** A load generator on the dev machine reaches the box only over Wi-Fi, with a 7–80 ms round trip. Over Wi-Fi at 512 connections, vega-http and nio-http both measured 15–21k req/s, with no consistent order between rounds, and both measured about 6.4k at 64 connections: the round trip sets the rate. A second machine needs a wired gigabit link.
