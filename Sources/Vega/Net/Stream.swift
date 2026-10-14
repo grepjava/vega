@@ -58,6 +58,173 @@ extension IORegistration {
         }
     }
 
+    /// `sendNow`'s status when it has sent everything but the task's budget
+    /// ran out, and when the stream isn't a socket it can send on here.
+    @usableFromInline static let sendYield: Int32 = -1, sendElsewhere: Int32 = -2
+
+    /// The synchronous part of a write, for the public writes to inline into
+    /// their caller: send what the socket takes of `bytes` and spend a unit
+    /// of budget. Returns the bytes sent; `status` is 0 when that was all of
+    /// them, else what `writeRest` has to deal with: EAGAIN (wait for room
+    /// and go on), `sendYield`, `sendElsewhere`, or the error to throw.
+    ///
+    /// A write nearly always completes here, and inlined it is no call at
+    /// all: an async call costs an executor hop on the way in and another on
+    /// the way back, each a look-up of the task's executor preference under
+    /// its status-record lock.
+    @usableFromInline
+    func sendNow(_ bytes: UnsafeRawBufferPointer, _ status: inout Int32) -> Int {
+        #if canImport(Network)
+        if nw != nil {
+            status = Self.sendElsewhere
+            return 0
+        }
+        #endif
+        var done = 0
+        while done < bytes.count {
+            let n = cv_send(fd, bytes.baseAddress! + done, bytes.count - done)
+            if n >= 0 {
+                done += n
+                continue
+            }
+            let err = Int32(-n)
+            if err == EINTR { continue }
+            status = err == EWOULDBLOCK ? EAGAIN : err
+            return done
+        }
+        if Runtime.spendBudget() { status = Self.sendYield }
+        return done
+    }
+
+    /// The rest of a write `sendNow` couldn't finish.
+    @usableFromInline
+    func writeRest(_ bytes: UnsafeRawBufferPointer, sent: Int, status: Int32) async throws(IOError) {
+        switch status {
+        case Self.sendYield:
+            await Runtime.yieldSpent()
+        case Self.sendElsewhere:
+            try await write(bytes)
+        case EAGAIN:
+            try await wait(CV_IO_WRITE)
+            try await write(UnsafeRawBufferPointer(rebasing: bytes[sent...]))
+        default:
+            throw IOError(code: status)
+        }
+    }
+
+    /// `sendNow` for two buffers, gathered.
+    @usableFromInline
+    func sendNow(_ a: UnsafeRawBufferPointer, _ b: UnsafeRawBufferPointer, _ status: inout Int32) -> Int {
+        sendNow(parts: 2, { $0 == 0 ? a : b }, &status)
+    }
+
+    /// `writeRest` for two buffers.
+    @usableFromInline
+    func writeRest(_ a: UnsafeRawBufferPointer, _ b: UnsafeRawBufferPointer, sent: Int,
+                   status: Int32) async throws(IOError) {
+        try await writeRest(parts: 2, { $0 == 0 ? a : b }, sent: sent, status: status)
+    }
+
+    /// `sendNow` for `parts`, gathered.
+    @usableFromInline
+    func sendNow(vectored parts: UnsafeBufferPointer<UnsafeRawBufferPointer>, _ status: inout Int32) -> Int {
+        sendNow(parts: parts.count, { parts[$0] }, &status)
+    }
+
+    /// `writeRest` for `parts`.
+    @usableFromInline
+    func writeRest(vectored parts: UnsafeBufferPointer<UnsafeRawBufferPointer>, sent: Int,
+                   status: Int32) async throws(IOError) {
+        try await writeRest(parts: parts.count, { parts[$0] }, sent: sent, status: status)
+    }
+
+    /// `sendNow` for `count` buffers: `trySend`, with a full socket, an
+    /// error or a spent budget said in `status`.
+    @inline(__always)
+    private func sendNow(parts count: Int, _ part: (Int) -> UnsafeRawBufferPointer,
+                         _ status: inout Int32) -> Int {
+        #if canImport(Network)
+        if nw != nil {
+            status = Self.sendElsewhere
+            return 0
+        }
+        #endif
+        var index = 0, offset = 0, sent = 0
+        while true {
+            while index < count && offset == part(index).count {
+                index += 1
+                offset = 0
+            }
+            if index == count { break }
+            var offered = 0
+            let n = withUnsafeTemporaryAllocation(of: cv_iovec.self, capacity: 64) { iov in
+                var k = 0, i = index
+                while k < 64 && i < count {
+                    let p = part(i)
+                    let skip = i == index ? offset : 0
+                    if p.count > skip {
+                        iov[k] = cv_iovec(base: p.baseAddress! + skip, len: p.count - skip)
+                        offered += p.count - skip
+                        k += 1
+                    }
+                    i += 1
+                }
+                return cv_sendv(fd, iov.baseAddress, Int32(k))
+            }
+            if n < 0 {
+                let err = Int32(-n)
+                if err == EINTR { continue }
+                status = err == EWOULDBLOCK ? EAGAIN : err
+                return sent
+            }
+            sent += n
+            if n < offered {
+                // Short: the socket is full, and another call would say so.
+                status = EAGAIN
+                return sent
+            }
+            (index, offset) = position(after: n, index, offset, part)
+        }
+        if Runtime.spendBudget() { status = Self.sendYield }
+        return sent
+    }
+
+    /// The rest of a write of `count` buffers that `sendNow` couldn't
+    /// finish, `sent` bytes in.
+    private func writeRest(parts count: Int, _ part: (Int) -> UnsafeRawBufferPointer, sent: Int,
+                           status: Int32) async throws(IOError) {
+        switch status {
+        case Self.sendYield:
+            await Runtime.yieldSpent()
+        case Self.sendElsewhere:
+            try await write(parts: count, part)
+        case EAGAIN:
+            try await wait(CV_IO_WRITE)
+            let (index, offset) = position(after: sent, 0, 0, part)
+            try await write(parts: count - index) { j in
+                j == 0 ? UnsafeRawBufferPointer(rebasing: part(index)[offset...]) : part(index + j)
+            }
+        default:
+            throw IOError(code: status)
+        }
+    }
+
+    /// Where a gathered write stands `n` bytes past buffer `index`, `offset`
+    /// bytes in: the buffer and the offset in it.
+    @inline(__always)
+    private func position(after n: Int, _ index: Int, _ offset: Int,
+                   _ part: (Int) -> UnsafeRawBufferPointer) -> (index: Int, offset: Int) {
+        var left = n, index = index, offset = offset
+        while left > 0 {
+            let rest = part(index).count - offset
+            if left < rest { return (index, offset + left) }
+            left -= rest
+            index += 1
+            offset = 0
+        }
+        return (index, offset)
+    }
+
     /// Write all of `bytes`.
     @inline(__always)
     func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError) {
@@ -435,7 +602,7 @@ public struct ReadHalf: ~Copyable, Sendable {
 /// The writing half of a split stream. Dropping it shuts down the sending
 /// side (the peer reads end-of-stream); dropping both closes the socket.
 public struct WriteHalf: ~Copyable, Sendable {
-    let reg: IORegistration
+    @usableFromInline let reg: IORegistration
 
     init(reg: IORegistration) { self.reg = reg }
 
@@ -444,27 +611,39 @@ public struct WriteHalf: ~Copyable, Sendable {
         reg.close()
     }
 
+    // The writes are inlinable so that one the socket takes at once (nearly
+    // all of them) costs the caller no async call: see `sendNow`.
+
     /// Write all of `buffer`'s readable bytes.
+    @inlinable
     public func write(_ buffer: borrowing IOBuffer) async throws(IOError) {
-        try await reg.write(UnsafeRawBufferPointer(start: buffer.base, count: buffer.count))
+        try await write(buffer.withUnsafeBytes { $0 })
     }
 
     /// Write all of `bytes`. They must stay valid until this returns.
+    @inlinable
     public func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError) {
-        try await reg.write(bytes)
+        var status: Int32 = 0
+        let sent = reg.sendNow(bytes, &status)
+        if status != 0 { try await reg.writeRest(bytes, sent: sent, status: status) }
     }
     /// Write all of `head`, then all of `body`, in one system call where the
     /// socket has room (a header and a payload, say).
+    @inlinable
     public func write(_ head: borrowing IOBuffer, _ body: borrowing IOBuffer) async throws(IOError) {
-        let a = UnsafeRawBufferPointer(start: head.base, count: head.count)
-        let b = UnsafeRawBufferPointer(start: body.base, count: body.count)
-        try await reg.write(parts: 2) { $0 == 0 ? a : b }
+        let a = head.withUnsafeBytes { $0 }, b = body.withUnsafeBytes { $0 }
+        var status: Int32 = 0
+        let sent = reg.sendNow(a, b, &status)
+        if status != 0 { try await reg.writeRest(a, b, sent: sent, status: status) }
     }
 
     /// Write all of `parts` in order, gathered into as few system calls as
     /// possible. They must stay valid until this returns.
+    @inlinable
     public func write(vectored parts: UnsafeBufferPointer<UnsafeRawBufferPointer>) async throws(IOError) {
-        try await reg.write(parts: parts.count) { parts[$0] }
+        var status: Int32 = 0
+        let sent = reg.sendNow(vectored: parts, &status)
+        if status != 0 { try await reg.writeRest(vectored: parts, sent: sent, status: status) }
     }
 
 

@@ -25,15 +25,26 @@ extension Runtime {
     /// it from your own tight loops.
     @inline(__always)
     public static func consumeBudget() async {
-        guard let w = Worker.current else { return }
-        let exhausted = w._withUnsafeGuaranteedRef { worker -> Bool in
+        if spendBudget() { await yieldSpent() }
+    }
+
+    /// `consumeBudget`'s synchronous part: spend a unit, and say whether
+    /// the budget ran out, so the caller must call `yieldSpent`.
+    @inline(__always)
+    static func spendBudget() -> Bool {
+        guard let w = Worker.current else { return false }
+        return w._withUnsafeGuaranteedRef { worker -> Bool in
             worker.budget -= 1
             return worker.budget <= 0
         }
-        if exhausted {
+    }
+
+    /// The yield of a task whose budget ran out.
+    static func yieldSpent() async {
+        if let w = Worker.current {
             w._withUnsafeGuaranteedRef { $0.forcedYields.store($0.forcedYields.load(ordering: .relaxed) &+ 1,
                                                                ordering: .relaxed) }
-            await yield()
         }
+        await yield()
     }
 }

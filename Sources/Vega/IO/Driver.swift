@@ -89,6 +89,7 @@ struct IODriver: @unchecked Sendable {
 
 /// A registered fd, as the driver and the task see it. Trivial to copy;
 /// the owning socket deregisters it once.
+@usableFromInline
 struct IORegistration: @unchecked Sendable {
     let io: UnsafeMutablePointer<cv_io>
     /// The epoll driver; nil under the uring driver.

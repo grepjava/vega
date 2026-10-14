@@ -32,7 +32,7 @@ public struct UnixListener: ~Copyable, Sendable {
 
 /// A Unix stream connection: the same API as `TCPStream`.
 public struct UnixStream: ~Copyable, Sendable {
-    let reg: IORegistration
+    @usableFromInline let reg: IORegistration
 
     init(reg: IORegistration) { self.reg = reg }
 
@@ -96,27 +96,39 @@ public struct UnixStream: ~Copyable, Sendable {
         try await reg.waitReadable()
     }
 
+    // The writes are inlinable so that one the socket takes at once (nearly
+    // all of them) costs the caller no async call: see `sendNow`.
+
     /// Write all of `buffer`'s readable bytes.
+    @inlinable
     public func write(_ buffer: borrowing IOBuffer) async throws(IOError) {
-        try await reg.write(UnsafeRawBufferPointer(start: buffer.base, count: buffer.count))
+        try await write(buffer.withUnsafeBytes { $0 })
     }
 
     /// Write all of `bytes`. They must stay valid until this returns.
+    @inlinable
     public func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError) {
-        try await reg.write(bytes)
+        var status: Int32 = 0
+        let sent = reg.sendNow(bytes, &status)
+        if status != 0 { try await reg.writeRest(bytes, sent: sent, status: status) }
     }
     /// Write all of `head`, then all of `body`, in one system call where the
     /// socket has room (a header and a payload, say).
+    @inlinable
     public func write(_ head: borrowing IOBuffer, _ body: borrowing IOBuffer) async throws(IOError) {
-        let a = UnsafeRawBufferPointer(start: head.base, count: head.count)
-        let b = UnsafeRawBufferPointer(start: body.base, count: body.count)
-        try await reg.write(parts: 2) { $0 == 0 ? a : b }
+        let a = head.withUnsafeBytes { $0 }, b = body.withUnsafeBytes { $0 }
+        var status: Int32 = 0
+        let sent = reg.sendNow(a, b, &status)
+        if status != 0 { try await reg.writeRest(a, b, sent: sent, status: status) }
     }
 
     /// Write all of `parts` in order, gathered into as few system calls as
     /// possible. They must stay valid until this returns.
+    @inlinable
     public func write(vectored parts: UnsafeBufferPointer<UnsafeRawBufferPointer>) async throws(IOError) {
-        try await reg.write(parts: parts.count) { parts[$0] }
+        var status: Int32 = 0
+        let sent = reg.sendNow(vectored: parts, &status)
+        if status != 0 { try await reg.writeRest(vectored: parts, sent: sent, status: status) }
     }
 
 

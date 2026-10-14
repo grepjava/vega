@@ -17,6 +17,7 @@ public protocol AsyncWriter: ~Copyable {
 
 extension AsyncWriter where Self: ~Copyable {
     /// Write all of `buffer`'s readable bytes.
+    @inlinable
     public func write(_ buffer: borrowing IOBuffer) async throws(IOError) {
         let bytes = buffer.withUnsafeBytes { $0 }
         try await write(bytes)
