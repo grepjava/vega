@@ -1,7 +1,8 @@
 // TLS for VegaTLS: a sans-I/O engine over the system's OpenSSL (3.0 or
-// later). Ciphertext goes in with cv_tls_feed and comes out with
-// cv_tls_drain; the Swift side moves it over whatever stream it has. No
-// OpenSSL type appears here, so Swift never imports OpenSSL's headers.
+// later). The calls that run the engine are handed the peer's ciphertext and
+// take what they need of it in place; what the engine writes is taken with
+// cv_tls_take_output. The Swift side moves both over whatever stream it has.
+// No OpenSSL type appears here, so Swift never imports OpenSSL's headers.
 #ifndef CVEGA_TLS_H
 #define CVEGA_TLS_H
 
@@ -13,6 +14,17 @@ extern "C" {
 
 typedef struct cv_tls_ctx cv_tls_ctx;
 typedef struct cv_tls cv_tls;
+
+/// What a call that runs the engine left: how many of the peer's ciphertext
+/// bytes it was handed it took (the rest are for the next call), the
+/// ciphertext waiting to go to the peer, and for cv_tls_read whether the
+/// engine is drained: sure to want more of the peer's ciphertext before it
+/// can return anything.
+typedef struct cv_tls_status {
+    intptr_t used;
+    intptr_t pending;
+    int drained;
+} cv_tls_status;
 
 /// Results besides a byte count.
 #define CV_TLS_WANT_READ (-1) // feed more ciphertext (after sending what's pending)
@@ -63,22 +75,25 @@ void cv_tls_ctx_set_hello(cv_tls_ctx *ctx, cv_tls_hello_fn fn, void *arg);
 /// for neither. NULL on failure, with a message in err.
 cv_tls *cv_tls_new(cv_tls_ctx *ctx, const char *host, char *err, int errlen);
 void cv_tls_free(cv_tls *t);
-/// Ciphertext from the peer: all of it is taken.
-void cv_tls_feed(cv_tls *t, const void *buf, intptr_t len);
-/// The peer's ciphertext has ended.
+/// The peer's ciphertext has ended (after what calls are still handed).
 void cv_tls_feed_eof(cv_tls *t);
-/// Ciphertext waiting to go to the peer, and taking it.
-intptr_t cv_tls_pending(cv_tls *t);
-intptr_t cv_tls_drain(cv_tls *t, void *buf, intptr_t len);
-/// One handshake step: 1 done, CV_TLS_WANT_READ, or CV_TLS_ERROR. Send
-/// what's pending after every step, an alert after an error too.
-int cv_tls_handshake(cv_tls *t);
-/// Plaintext: bytes, 0 once the peer sent close_notify, CV_TLS_WANT_READ,
+/// The ciphertext waiting to go to the peer, to send: NULL (and len 0) if
+/// there is none. The engine writes anything more into a new buffer until
+/// cv_tls_return_output; one taker at a time.
+const uint8_t *cv_tls_take_output(cv_tls *t, intptr_t *len);
+/// Sent (or given up on): the buffer is the engine's again.
+void cv_tls_return_output(cv_tls *t);
+/// One handshake step over the peer's ciphertext in (in_len bytes; NULL,
+/// 0 for none): 1 done, CV_TLS_WANT_READ, or CV_TLS_ERROR. Send what's
+/// pending after every step, an alert after an error too.
+int cv_tls_handshake(cv_tls *t, const void *in, intptr_t in_len, cv_tls_status *st);
+/// Plaintext, decrypted from the peer's ciphertext in: bytes, 0 once the
+/// peer sent close_notify, CV_TLS_WANT_READ (all of in was taken),
 /// CV_TLS_TRUNCATED or CV_TLS_ERROR. May leave ciphertext pending (a key
 /// update's answer).
-intptr_t cv_tls_read(cv_tls *t, void *buf, intptr_t len);
+intptr_t cv_tls_read(cv_tls *t, const void *in, intptr_t in_len, void *buf, intptr_t len, cv_tls_status *st);
 /// Encrypt all of buf (into pending): len, or CV_TLS_ERROR.
-intptr_t cv_tls_write(cv_tls *t, const void *buf, intptr_t len);
+intptr_t cv_tls_write(cv_tls *t, const void *buf, intptr_t len, cv_tls_status *st);
 /// Queue close_notify.
 void cv_tls_close(cv_tls *t);
 /// Why the last call failed.
@@ -89,8 +104,7 @@ int cv_tls_alpn(cv_tls *t, char *out, int len);
 int cv_tls_server_name(cv_tls *t, char *out, int len);
 int cv_tls_version(cv_tls *t);
 int cv_tls_resumed(cv_tls *t);
-/// Whether the engine holds input not yet read: decrypted plaintext, or
-/// ciphertext fed and not yet processed.
+/// Whether the engine holds decrypted plaintext not yet read.
 int cv_tls_buffered(cv_tls *t);
 /// The peer's certificate as DER: its length (call with len 0 to size), or
 /// 0 if there is none.

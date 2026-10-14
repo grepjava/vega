@@ -1,7 +1,14 @@
 // TLS over the system's OpenSSL, or BoringSSL with the BoringSSL trait, through
-// memory BIOs: the library never sees a socket. Every call clears the
-// library's per-thread error queue first, since a connection's calls may come
-// from any worker thread.
+// a BIO of our own: the library never sees a socket. A call is handed the
+// peer's ciphertext where the Swift side read it, and the engine takes from
+// it in place; what the engine writes collects in a buffer the Swift side
+// sends from. Neither direction copies through the library's memory BIOs.
+//
+// The library's per-thread error queue must be empty when SSL_get_error is
+// asked about a failure, and a connection's calls come from any worker
+// thread, after anything else that used the library there. A call that may
+// fail empties the queue first when it isn't already (see clean_queue); every
+// failure path empties it before returning.
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -62,23 +69,12 @@ static EVP_PKEY *cv_keygen_p256(void) {
     return key;
 }
 #define EVP_PKEY_Q_keygen(lib, props, type, curve) cv_keygen_p256()
-// SSL_get_error needs SSL_read's own result in BoringSSL: 0 is a close
-// (close_notify or EOF), -1 is "retry" or an error.
-static _Thread_local int cv_last_read;
-static int cv_read_ex(SSL *ssl, void *buf, size_t len, size_t *n) {
-    int r = SSL_read(ssl, buf, len > INT_MAX ? INT_MAX : (int)len);
-    cv_last_read = r;
-    if (r <= 0) return 0;
-    *n = (size_t)r;
-    return 1;
-}
 static int cv_write_ex(SSL *ssl, const void *buf, size_t len, size_t *n) {
     int r = SSL_write(ssl, buf, len > INT_MAX ? INT_MAX : (int)len);
     if (r <= 0) return 0;
     *n = (size_t)r;
     return 1;
 }
-#define SSL_read_ex cv_read_ex
 #define SSL_write_ex cv_write_ex
 #define SSL_get1_peer_certificate SSL_get_peer_certificate // a new reference in BoringSSL too
 // BoringSSL's sessions are immutable once made, so sharing one is a copy.
@@ -87,14 +83,12 @@ static SSL_SESSION *cv_session_dup(SSL_SESSION *s) {
     return s;
 }
 #define SSL_SESSION_dup cv_session_dup
-#define CV_READ_FAILED cv_last_read // OpenSSL wants 0 after SSL_read_ex
 // The vendored copy's prefix list misses X509V3_EXT_conf_nid, a wrapper.
 #define X509V3_EXT_conf_nid(conf, ctx, nid, value) X509V3_EXT_nconf_nid(NULL, ctx, nid, value)
 #else
 #if OPENSSL_VERSION_NUMBER < 0x30000000L
 #error "VegaTLS needs OpenSSL 3.0 or later"
 #endif
-#define CV_READ_FAILED 0
 #endif
 
 #if defined(_WIN32)
@@ -128,15 +122,39 @@ struct cv_tls_ctx {
     void *hello_arg;
 };
 
+/// Ciphertext for the peer.
+struct cv_out {
+    unsigned char *p;
+    size_t len, cap;
+};
+
 struct cv_tls {
     SSL *ssl;
-    BIO *rbio, *wbio;
     cv_tls_ctx *ctx;
     char *host;
+    // The peer's ciphertext for the call in progress: the caller's bytes,
+    // set on entry and cleared before returning, so the engine never holds
+    // a pointer into them between calls (nor reads them in a call made by
+    // the other half of a split stream).
+    const unsigned char *in;
+    size_t in_len;
+    int eof; // and after in, the end of the peer's ciphertext
+    // What the engine wrote, and the buffer taken to be sent meanwhile.
+    struct cv_out out, taken;
     char err[256];
 };
 
 // MARK: - Errors
+
+/// Empty the error queue before a call SSL_get_error may be asked about:
+/// errors something else left on this thread would make it report
+/// SSL_ERROR_SSL for a mere "want more input". Peeking costs a fifth of
+/// clearing (about 20 ns against 120 with OpenSSL 3.0, which clears all
+/// sixteen slots), and the queue is nearly always empty already: our own
+/// failure paths empty it before returning.
+static inline void clean_queue(void) {
+    if (ERR_peek_error() != 0) ERR_clear_error();
+}
 
 /// "what: reason" from OpenSSL's queue (or just what), then clear it.
 static void describe(char *err, int errlen, const char *what) {
@@ -562,10 +580,88 @@ static SSL_SESSION *take_session(cv_tls_ctx *c, const char *host) {
     return s;
 }
 
+// MARK: - The BIO
+
+/// Room for `more` bytes after the ones in o.
+static int out_reserve(struct cv_out *o, size_t more) {
+    if (o->cap - o->len >= more) return 1;
+    size_t cap = o->cap ? o->cap : 4096;
+    while (cap - o->len < more) cap *= 2;
+    unsigned char *p = realloc(o->p, cap);
+    if (!p) return 0;
+    o->p = p;
+    o->cap = cap;
+    return 1;
+}
+
+/// The peer's ciphertext: what the call in progress was handed, then "retry"
+/// (SSL_ERROR_WANT_READ), or 0 at the end the Swift side reported.
+static int bio_read(BIO *b, char *buf, int len) {
+    cv_tls *t = BIO_get_data(b);
+    BIO_clear_retry_flags(b);
+    if (len <= 0) return 0;
+    if (t->in_len == 0) {
+        if (t->eof) return 0;
+        BIO_set_retry_read(b);
+        return -1;
+    }
+    size_t n = (size_t)len < t->in_len ? (size_t)len : t->in_len;
+    memcpy(buf, t->in, n);
+    t->in += n;
+    t->in_len -= n;
+    return (int)n;
+}
+
+/// Ciphertext for the peer: always all of it, into t->out.
+static int bio_write(BIO *b, const char *buf, int len) {
+    cv_tls *t = BIO_get_data(b);
+    BIO_clear_retry_flags(b);
+    if (len <= 0) return 0;
+    if (!out_reserve(&t->out, (size_t)len)) return -1; // out of memory: the engine fails the call
+    memcpy(t->out.p + t->out.len, buf, (size_t)len);
+    t->out.len += (size_t)len;
+    return len;
+}
+
+static long bio_ctrl(BIO *b, int cmd, long num, void *ptr) {
+    (void)num;
+    (void)ptr;
+    cv_tls *t = BIO_get_data(b);
+    switch (cmd) {
+    case BIO_CTRL_FLUSH: return 1; // the engine flushes after a flight
+    case BIO_CTRL_EOF: return t->eof && t->in_len == 0; // how OpenSSL tells a truncation
+    case BIO_CTRL_PENDING: return (long)t->in_len;
+    case BIO_CTRL_WPENDING: return (long)t->out.len;
+    default: return 0;
+    }
+}
+
+static BIO_METHOD *bio_method;
+
+static void make_bio_method(void) {
+    int index = BIO_get_new_index();
+    BIO_METHOD *m = BIO_meth_new((index > 0 ? index : 0) | BIO_TYPE_SOURCE_SINK, "vega");
+    if (m && BIO_meth_set_read(m, bio_read) == 1 && BIO_meth_set_write(m, bio_write) == 1 &&
+        BIO_meth_set_ctrl(m, bio_ctrl) == 1) {
+        bio_method = m;
+        return;
+    }
+    if (m) BIO_meth_free(m);
+}
+
+#if defined(OPENSSL_IS_BORINGSSL)
+static pthread_once_t bio_once = PTHREAD_ONCE_INIT;
+static void bio_method_once(void) { pthread_once(&bio_once, make_bio_method); }
+#else
+static CRYPTO_ONCE bio_once = CRYPTO_ONCE_STATIC_INIT;
+static void bio_method_once(void) { CRYPTO_THREAD_run_once(&bio_once, make_bio_method); }
+#endif
+
 // MARK: - Connections
 
 cv_tls *cv_tls_new(cv_tls_ctx *c, const char *host, char *err, int errlen) {
     ERR_clear_error();
+    bio_method_once();
     cv_tls *t = calloc(1, sizeof *t);
     if (!t) {
         snprintf(err, (size_t)errlen, "out of memory");
@@ -573,18 +669,17 @@ cv_tls *cv_tls_new(cv_tls_ctx *c, const char *host, char *err, int errlen) {
     }
     t->ctx = c;
     t->ssl = SSL_new(c->ssl);
-    t->rbio = BIO_new(BIO_s_mem());
-    t->wbio = BIO_new(BIO_s_mem());
-    if (!t->ssl || !t->rbio || !t->wbio) {
+    BIO *bio = bio_method ? BIO_new(bio_method) : NULL;
+    if (!t->ssl || !bio) {
         describe(err, errlen, "SSL_new");
-        BIO_free(t->rbio);
-        BIO_free(t->wbio);
+        BIO_free(bio);
         SSL_free(t->ssl);
         free(t);
         return NULL;
     }
-    BIO_set_mem_eof_return(t->rbio, -1); // empty: "retry", until the peer's end is fed
-    SSL_set_bio(t->ssl, t->rbio, t->wbio);
+    BIO_set_data(bio, t);
+    BIO_set_init(bio, 1);
+    SSL_set_bio(t->ssl, bio, bio); // one reference, for both directions
     SSL_set_app_data(t->ssl, t);
     if (c->server) {
         SSL_set_accept_state(t->ssl);
@@ -616,32 +711,56 @@ cv_tls *cv_tls_new(cv_tls_ctx *c, const char *host, char *err, int errlen) {
 
 void cv_tls_free(cv_tls *t) {
     if (!t) return;
-    SSL_free(t->ssl); // and both BIOs
+    SSL_free(t->ssl); // and the BIO
     OPENSSL_free(t->host);
+    free(t->out.p);
+    free(t->taken.p);
     free(t);
 }
 
-void cv_tls_feed(cv_tls *t, const void *buf, intptr_t len) {
-    const char *p = buf;
-    while (len > 0) {
-        int n = len > INT_MAX ? INT_MAX : (int)len;
-        if (BIO_write(t->rbio, p, n) != n) return; // out of memory: the record layer will fail
-        p += n;
-        len -= n;
+void cv_tls_feed_eof(cv_tls *t) { t->eof = 1; }
+
+const uint8_t *cv_tls_take_output(cv_tls *t, intptr_t *len) {
+    *len = 0;
+    if (t->out.len == 0 || t->taken.p) return NULL;
+    t->taken = t->out;
+    t->out = (struct cv_out){0};
+    *len = (intptr_t)t->taken.len;
+    return t->taken.p;
+}
+
+void cv_tls_return_output(cv_tls *t) {
+    if (!t->taken.p) return;
+    if (!t->out.p) {
+        // The usual case: use it again.
+        t->out.p = t->taken.p;
+        t->out.cap = t->taken.cap;
+        t->out.len = 0;
+    } else {
+        // The engine wrote more meanwhile (for the other half of a split
+        // stream), into a buffer of its own: keep that one.
+        free(t->taken.p);
     }
+    t->taken = (struct cv_out){0};
 }
 
-void cv_tls_feed_eof(cv_tls *t) { BIO_set_mem_eof_return(t->rbio, 0); }
-
-intptr_t cv_tls_pending(cv_tls *t) { return (intptr_t)BIO_ctrl_pending(t->wbio); }
-
-intptr_t cv_tls_drain(cv_tls *t, void *buf, intptr_t len) {
-    int n = BIO_read(t->wbio, buf, len > INT_MAX ? INT_MAX : (int)len);
-    return n > 0 ? n : 0;
+/// A call's start: the peer's ciphertext it may take from, and an error
+/// queue SSL_get_error can trust.
+static inline void enter(cv_tls *t, const void *in, intptr_t in_len) {
+    t->in = in;
+    t->in_len = in && in_len > 0 ? (size_t)in_len : 0;
+    clean_queue();
 }
 
-int cv_tls_handshake(cv_tls *t) {
-    ERR_clear_error();
+/// A call's end: what it took and left, and no pointer kept into the input.
+static inline void leave(cv_tls *t, intptr_t in_len, cv_tls_status *st) {
+    st->used = (t->in ? in_len : 0) - (intptr_t)t->in_len;
+    st->pending = (intptr_t)t->out.len;
+    t->in = NULL;
+    t->in_len = 0;
+}
+
+static int handshake_step(cv_tls *t) {
     int r = SSL_do_handshake(t->ssl);
     if (r == 1) return 1;
     int e = SSL_get_error(t->ssl, r);
@@ -655,15 +774,36 @@ int cv_tls_handshake(cv_tls *t) {
     return CV_TLS_ERROR;
 }
 
-intptr_t cv_tls_read(cv_tls *t, void *buf, intptr_t len) {
-    ERR_clear_error();
+int cv_tls_handshake(cv_tls *t, const void *in, intptr_t in_len, cv_tls_status *st) {
+    enter(t, in, in_len);
+    int r = handshake_step(t);
+    st->drained = 0;
+    leave(t, in_len, st);
+    return r;
+}
+
+static intptr_t read_step(cv_tls *t, void *buf, intptr_t len, int *drained) {
+    *drained = 0;
     size_t n = 0;
-    if (SSL_read_ex(t->ssl, buf, (size_t)len, &n) == 1) return (intptr_t)n;
-    int e = SSL_get_error(t->ssl, CV_READ_FAILED);
-    switch (e) {
+#if defined(OPENSSL_IS_BORINGSSL)
+    // SSL_get_error needs SSL_read's own result here: 0 is a close
+    // (close_notify or EOF), -1 is "retry" or an error.
+    int r = SSL_read(t->ssl, buf, len > INT_MAX ? INT_MAX : (int)len);
+    if (r > 0) n = (size_t)r;
+#else
+    int r = SSL_read_ex(t->ssl, buf, (size_t)len, &n); // 1, or 0 to give SSL_get_error
+#endif
+    if (r > 0) {
+        // Nothing left of the input and nothing buffered, decrypted or not:
+        // the engine can't make progress until it's given more, so the
+        // next read can go to the transport first.
+        *drained = t->in_len == 0 && !SSL_has_pending(t->ssl);
+        return (intptr_t)n;
+    }
+    switch (SSL_get_error(t->ssl, r)) {
     case SSL_ERROR_ZERO_RETURN: return 0;
     case SSL_ERROR_WANT_READ:
-    case SSL_ERROR_WANT_WRITE: return CV_TLS_WANT_READ;
+    case SSL_ERROR_WANT_WRITE: return CV_TLS_WANT_READ; // the BIO said "retry": all input taken
     case SSL_ERROR_SYSCALL:
         ERR_clear_error();
         return CV_TLS_TRUNCATED;
@@ -677,17 +817,32 @@ intptr_t cv_tls_read(cv_tls *t, void *buf, intptr_t len) {
     }
 }
 
-intptr_t cv_tls_write(cv_tls *t, const void *buf, intptr_t len) {
-    ERR_clear_error();
+intptr_t cv_tls_read(cv_tls *t, const void *in, intptr_t in_len, void *buf, intptr_t len, cv_tls_status *st) {
+    enter(t, in, in_len);
+    intptr_t r = read_step(t, buf, len, &st->drained);
+    leave(t, in_len, st);
+    return r;
+}
+
+intptr_t cv_tls_write(cv_tls *t, const void *buf, intptr_t len, cv_tls_status *st) {
+    enter(t, NULL, 0);
     size_t n = 0;
-    if (len == 0) return 0;
-    if (SSL_write_ex(t->ssl, buf, (size_t)len, &n) == 1) return (intptr_t)n;
-    record_error(t, "write");
-    return CV_TLS_ERROR;
+    intptr_t r = 0;
+    if (len > 0) {
+        if (SSL_write_ex(t->ssl, buf, (size_t)len, &n) == 1) {
+            r = (intptr_t)n;
+        } else {
+            record_error(t, "write");
+            r = CV_TLS_ERROR;
+        }
+    }
+    st->drained = 0;
+    leave(t, 0, st);
+    return r;
 }
 
 void cv_tls_close(cv_tls *t) {
-    ERR_clear_error();
+    clean_queue();
     SSL_shutdown(t->ssl);
     ERR_clear_error();
 }
@@ -718,7 +873,7 @@ int cv_tls_version(cv_tls *t) { return SSL_version(t->ssl); }
 
 int cv_tls_resumed(cv_tls *t) { return SSL_session_reused(t->ssl); }
 
-int cv_tls_buffered(cv_tls *t) { return SSL_pending(t->ssl) > 0 || BIO_ctrl_pending(t->rbio) > 0; }
+int cv_tls_buffered(cv_tls *t) { return SSL_pending(t->ssl) > 0; }
 
 int cv_tls_peer_certificate(cv_tls *t, uint8_t *out, int len) {
     X509 *x = SSL_get1_peer_certificate(t->ssl);
