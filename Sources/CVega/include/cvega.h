@@ -395,6 +395,10 @@ int cv_shard_spawn(const char *path, char *const argv[], char *const envp[],
 int cv_shard_adopt(int parent);
 /// This process's executable path. Returns 0 or an errno value.
 int cv_self_exe(char *buf, int len);
+/// A new shared-memory object of `size` zeroed bytes with no name left in
+/// the file system (memfd on Linux, an unlinked shm object elsewhere): its
+/// fd (close-on-exec), or -1 with *err set.
+int cv_shared_memory(intptr_t size, int *err);
 /// Threads in this process, or -1 where unknown (non-Linux).
 int cv_thread_count(void);
 /// getsockname / getpeername. 0 or an errno value.

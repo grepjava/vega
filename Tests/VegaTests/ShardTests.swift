@@ -135,6 +135,33 @@ import Testing
         }
         #expect(replies == ["unix", "unix"])
     }
+
+    @Test func sharedRegionsAreZeroedAndSharedWithChildren() {
+        var options = ShardOptions(shards: 0, workersPerShard: 1)
+        options.sharedRegions = [4096, 3 * 65536]
+        var sizes: [Int] = []
+        var zeroed = false
+        var fromChild: UInt64 = 0
+        Runtime.runInProcess(options) { shard in
+            let a = shard.sharedRegion(0), b = shard.sharedRegion(1)
+            sizes = [a.count, b.count]
+            zeroed = b.allSatisfy { $0 == 0 }
+            // A process forked from here, as a shard is, writes; this one
+            // sees it.
+            let slot = b.baseAddress!.advanced(by: 65536).assumingMemoryBound(to: UInt64.self)
+            let pid = fork()
+            if pid == 0 {
+                slot.pointee = 0x5EED
+                _exit(0)
+            }
+            var status: Int32 = 0
+            waitpid(pid, &status, 0)
+            fromChild = slot.pointee
+        }
+        #expect(sizes == [4096, 3 * 65536])
+        #expect(zeroed)
+        #expect(fromChild == 0x5EED)
+    }
 }
 #endif
 #endif

@@ -46,6 +46,7 @@
 #if defined(__linux__)
 #include <sys/prctl.h>
 #endif
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -1903,6 +1904,33 @@ int cv_shard_adopt(int parent) {
     if (sup_watch_parent(parent) != 0) return -1;
 #endif
     return getppid() == parent ? 0 : -1;
+}
+
+int cv_shared_memory(intptr_t size, int *err) {
+#if defined(__linux__)
+    int fd = (int)syscall(SYS_memfd_create, "vega-shared", 1 /* MFD_CLOEXEC */);
+#else
+    char name[64];
+    static _Atomic int serial;
+    int fd = -1;
+    for (int tries = 0; tries < 16 && fd < 0; tries++) {
+        snprintf(name, sizeof name, "/vega-%d-%d", (int)getpid(), atomic_fetch_add(&serial, 1));
+        fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0) shm_unlink(name);
+        else if (errno != EEXIST) break;
+    }
+    if (fd >= 0) fcntl(fd, F_SETFD, FD_CLOEXEC);
+#endif
+    if (fd < 0) {
+        *err = errno;
+        return -1;
+    }
+    if (ftruncate(fd, (off_t)size) != 0) {
+        *err = errno;
+        close(fd);
+        return -1;
+    }
+    return fd;
 }
 
 int cv_self_exe(char *buf, int len) {

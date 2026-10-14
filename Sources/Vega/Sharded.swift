@@ -55,6 +55,16 @@ public struct Shard: Sendable {
         return UnixListener(reg: try IORegistration(fd: fd, driver: driver))
     }
 
+    /// `ShardOptions.sharedRegions[index]`, mapped into this shard: the same
+    /// memory in every shard. At a page-aligned address that differs from
+    /// shard to shard under exec launch, so it holds offsets, never pointers.
+    public func sharedRegion(_ index: Int) -> UnsafeMutableRawBufferPointer {
+        let regions = SharedRegions.mapped
+        precondition(regions.indices.contains(index), "no ShardOptions.sharedRegions[\(index)]")
+        let r = regions[index]
+        return UnsafeMutableRawBufferPointer(start: UnsafeMutableRawPointer(bitPattern: r.base), count: r.size)
+    }
+
     /// The port of `ShardOptions.listeners[index]` (the one picked, for port 0).
     public func port(_ index: Int = 0) -> Int { listeners[index].port }
 }
@@ -147,6 +157,56 @@ public enum ShardLaunch: Sendable, Hashable {
     }
 }
 
+/// `ShardOptions.sharedRegions` as this process has them mapped. Set once,
+/// before any thread starts (by the supervisor, or by an exec'd shard as it
+/// starts), and only read after: forked shards inherit it with the mappings.
+@available(iOS, unavailable)
+@available(tvOS, unavailable)
+@available(watchOS, unavailable)
+@available(visionOS, unavailable)
+enum SharedRegions {
+    struct Region: Sendable {
+        let fd: Int32
+        let size: Int
+        let base: UInt
+    }
+
+    nonisolated(unsafe) static var mapped: [Region] = []
+
+    /// Make and map them. A failure ends the process: nothing has started.
+    static func prepare(_ sizes: [Int]) {
+        mapped = sizes.map { size in
+            precondition(size > 0, "a shared region needs a size")
+            var err: Int32 = 0
+            let fd = cv_shared_memory(size, &err)
+            guard fd >= 0 else { fail("cannot make a shared region of \(size) bytes: \(IOError(code: err))") }
+            return Region(fd: fd, size: size, base: map(fd, size))
+        }
+    }
+
+    /// Map the regions an exec'd shard was handed.
+    static func adopt(_ regions: [(Int32, Int)]) {
+        mapped = regions.map { fd, size in
+            _ = fcntl(fd, F_SETFD, FD_CLOEXEC) // not for the shard's children
+            return Region(fd: fd, size: size, base: map(fd, size))
+        }
+    }
+
+    private static func map(_ fd: Int32, _ size: Int) -> UInt {
+        guard let p = mmap(nil, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0),
+              p != UnsafeMutableRawPointer(bitPattern: -1) else {
+            fail("cannot map a shared region of \(size) bytes: \(IOError(code: errno))")
+        }
+        return UInt(bitPattern: p)
+    }
+
+    private static func fail(_ message: String) -> Never {
+        let msg = "vega: \(message)\n"
+        _ = msg.withCString { write(2, $0, strlen($0)) }
+        exit(1)
+    }
+}
+
 /// A listener as the supervisor set it up.
 @available(iOS, unavailable)
 @available(tvOS, unavailable)
@@ -207,6 +267,14 @@ public struct ShardOptions: Sendable {
     public var listenerMode: ShardListenerMode = .automatic
     /// How shard processes start (see `ShardLaunch`).
     public var launch: ShardLaunch = .automatic
+    /// Shared memory every shard maps, by size in bytes: zeroed when the
+    /// server starts, the same bytes in every shard, and kept across shard
+    /// restarts (a restarted shard finds what the others wrote). For state
+    /// the shards share without a round trip: counters, a rate limiter's
+    /// buckets, a cache. A shard takes region i with `Shard.sharedRegion(_:)`.
+    /// Only atomics and the like are safe in it: shards are processes, and
+    /// a pointer from one means nothing in another.
+    public var sharedRegions: [Int] = []
     /// Thread name prefix; shard i's runtime is "\(name)\(i)".
     public var name = "vega-s"
     /// Called in the supervisor for each event (synchronously: keep it
@@ -288,6 +356,7 @@ extension Runtime {
         let threads = cv_thread_count()
         precondition(threads <= 1, "Runtime.sharded must run before any thread starts (\(threads) running)")
         let layout = Topology.layout(shards: options.shards, workersPerShard: options.workersPerShard)
+        SharedRegions.prepare(options.sharedRegions)
         let rc = cv_supervisor_init()
         precondition(rc == 0, "vega: cannot set up the shard supervisor (errno \(rc))")
         let listeners = prepareListeners(options)
@@ -317,6 +386,7 @@ extension Runtime {
         var local = options
         local.listenerMode = .shared
         let listeners = prepareListeners(local)
+        SharedRegions.prepare(options.sharedRegions)
         let rt = Runtime(scheduler: Scheduler(workers: max(workers, 1), name: "\(options.name)0", pin: false))
         body(Shard(index: 0, count: 1, cpus: cpus, runtime: rt, listeners: listeners))
         rt.shutdown()
@@ -662,7 +732,8 @@ private extension StringProtocol {
 @available(watchOS, unavailable)
 @available(visionOS, unavailable)
 enum ExecShard {
-    static let keys = ["VEGA_SHARD", "VEGA_SHARD_COUNT", "VEGA_SHARD_CPUS", "VEGA_SHARD_FDS", "VEGA_SHARD_PARENT"]
+    static let keys = ["VEGA_SHARD", "VEGA_SHARD_COUNT", "VEGA_SHARD_CPUS", "VEGA_SHARD_FDS", "VEGA_SHARD_PARENT",
+                       "VEGA_SHARD_REGIONS"]
 
     struct Launched {
         let index: Int
@@ -684,13 +755,20 @@ enum ExecShard {
             guard p.count == 2, let fd = Int32(p[0]), let port = Int(p[1]) else { return nil }
             return (fd, port)
         }
+        let regions = value("VEGA_SHARD_REGIONS").split(separator: ",").map { pair -> (Int32, Int)? in
+            let p = pair.split(separator: ":")
+            guard p.count == 2, let fd = Int32(p[0]), let size = Int(p[1]) else { return nil }
+            return (fd, size)
+        }
         for key in keys { unsetenv(key) }
         guard let index, let count, index >= 0, index < count, let parent,
-              fds.count == options.listeners.count, fds.allSatisfy({ $0 != nil }) else {
+              fds.count == options.listeners.count, fds.allSatisfy({ $0 != nil }),
+              regions.count == options.sharedRegions.count, regions.allSatisfy({ $0 != nil }) else {
             fail("a shard's VEGA_SHARD settings don't match its ShardOptions")
         }
         // Gone already, or going: nobody would supervise this shard.
         if cv_shard_adopt(parent) != 0 { exit(1) }
+        SharedRegions.adopt(regions.map { $0! })
         let listeners = zip(options.listeners, fds).map { spec, pair -> PreparedListener in
             let (fd, port) = pair!
             if fd >= 0 { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) } // not for the shard's children
@@ -706,7 +784,8 @@ enum ExecShard {
         guard cv_self_exe(&path, Int32(path.count)) == 0 else { return -1 }
         // Shared sockets go above every one of them, so no dup2 overwrites
         // a socket still to be copied.
-        let sources = listeners.map(\.shared).filter { $0 >= 0 }
+        let regions = SharedRegions.mapped
+        let sources = listeners.map(\.shared).filter { $0 >= 0 } + regions.map(\.fd)
         var next = (sources.max() ?? 2) + 1
         var fds: [Int32] = [], targets: [Int32] = [], named: [String] = []
         for l in listeners {
@@ -719,6 +798,13 @@ enum ExecShard {
                 named.append("-1:\(l.port)")
             }
         }
+        var shared: [String] = []
+        for r in regions {
+            fds.append(r.fd)
+            targets.append(next)
+            shared.append("\(next):\(r.size)")
+            next += 1
+        }
         var env: [String] = []
         if let environ = cv_environ() {
             var p = environ
@@ -730,7 +816,8 @@ enum ExecShard {
         }
         env += ["VEGA_SHARD=\(i)", "VEGA_SHARD_COUNT=\(count)",
                 "VEGA_SHARD_CPUS=\(cpus.map(String.init).joined(separator: ","))",
-                "VEGA_SHARD_FDS=\(named.joined(separator: ","))", "VEGA_SHARD_PARENT=\(getpid())"]
+                "VEGA_SHARD_FDS=\(named.joined(separator: ","))", "VEGA_SHARD_PARENT=\(getpid())",
+                "VEGA_SHARD_REGIONS=\(shared.joined(separator: ","))"]
         var pid: Int32 = -1
         let rc = withCStrings(CommandLine.arguments) { argv in
             withCStrings(env) { envp in
