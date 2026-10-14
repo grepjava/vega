@@ -400,6 +400,9 @@ int cv_thread_count(void);
 /// getsockname / getpeername. 0 or an errno value.
 int cv_local_address(int fd, cv_sockaddr *out);
 int cv_peer_address(int fd, cv_sockaddr *out);
+/// Whether a read on the socket would return at once -- bytes, end of
+/// stream or an error -- without reading or waiting: 1, else 0.
+int cv_input_waiting(int fd);
 /// A listening TCP socket (SO_REUSEADDR, and SO_REUSEPORT if reuse_port).
 /// backlog < 0 binds without listening (to hold a port for SO_REUSEPORT
 /// listeners elsewhere).

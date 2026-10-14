@@ -145,4 +145,16 @@ extension UnixListener: SocketHandle { public var fileDescriptor: Int32 { reg.fd
 extension UnixStream: SocketHandle { public var fileDescriptor: Int32 { reg.fd } }
 extension ReadHalf: SocketHandle { public var fileDescriptor: Int32 { reg.fd } }
 extension WriteHalf: SocketHandle { public var fileDescriptor: Int32 { reg.fd } }
+
+/// A stream that can say, without reading or waiting, whether a read would
+/// return at once: bytes waiting, end of stream, or an error. For a pool
+/// looking at an idle connection: anything there means the server has
+/// spoken unasked, usually to say it is going away.
+public protocol PendingInputProbing: ~Copyable {
+    var hasPendingInput: Bool { get }
+}
+
+extension TCPStream: PendingInputProbing { public var hasPendingInput: Bool { reg.hasPendingInput } }
+extension UnixStream: PendingInputProbing { public var hasPendingInput: Bool { reg.hasPendingInput } }
+extension ReadHalf: PendingInputProbing { public var hasPendingInput: Bool { reg.hasPendingInput } }
 #endif

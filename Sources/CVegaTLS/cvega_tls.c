@@ -627,6 +627,8 @@ int cv_tls_version(cv_tls *t) { return SSL_version(t->ssl); }
 
 int cv_tls_resumed(cv_tls *t) { return SSL_session_reused(t->ssl); }
 
+int cv_tls_buffered(cv_tls *t) { return SSL_pending(t->ssl) > 0 || BIO_ctrl_pending(t->rbio) > 0; }
+
 int cv_tls_peer_certificate(cv_tls *t, uint8_t *out, int len) {
     X509 *x = SSL_get1_peer_certificate(t->ssl);
     if (!x) return 0;

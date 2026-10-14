@@ -79,6 +79,9 @@ int cv_tls_alpn(cv_tls *t, char *out, int len);
 int cv_tls_server_name(cv_tls *t, char *out, int len);
 int cv_tls_version(cv_tls *t);
 int cv_tls_resumed(cv_tls *t);
+/// Whether the engine holds input not yet read: decrypted plaintext, or
+/// ciphertext fed and not yet processed.
+int cv_tls_buffered(cv_tls *t);
 /// The peer's certificate as DER: its length (call with len 0 to size), or
 /// 0 if there is none.
 int cv_tls_peer_certificate(cv_tls *t, uint8_t *out, int len);

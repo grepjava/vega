@@ -296,6 +296,11 @@ int cv_peer_address(int fd, cv_sockaddr *out) {
     return 0;
 }
 
+int cv_input_waiting(int fd) {
+    WSAPOLLFD p = {.fd = as_socket(fd), .events = POLLRDNORM};
+    return WSAPoll(&p, 1, 0) > 0 ? 1 : 0;
+}
+
 int cv_local_port(int fd) {
     cv_sockaddr a;
     return cv_local_address(fd, &a) == 0 ? cv_sockaddr_port(&a) : -1;

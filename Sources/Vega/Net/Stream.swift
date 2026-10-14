@@ -274,6 +274,14 @@ extension IORegistration {
         #endif
     }
 
+    /// Whether a read would return at once, without reading or waiting.
+    var hasPendingInput: Bool {
+        #if canImport(Network)
+        if let nw { return nwHasPendingInput(nw) }
+        #endif
+        return cv_input_waiting(fd) != 0
+    }
+
     var localAddress: SocketAddress {
         get throws(IOError) {
             #if canImport(Network)

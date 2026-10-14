@@ -361,6 +361,20 @@ final class NetworkStream: NetworkHandle, @unchecked Sendable {
         await Runtime.consumeBudget()
     }
 
+    /// Whether a read would return at once: bytes received, end of stream,
+    /// or a failure. Network.framework only says so to a receive, so one is
+    /// started if none is in flight -- an idle connection asked again later
+    /// has its answer.
+    var hasPendingInput: Bool {
+        lock.lock()
+        let known = stashStart < stash.count || ended || failure != nil
+        let start = !known && !receiving
+        if start { receiving = true }
+        lock.unlock()
+        if start { receive() }
+        return known
+    }
+
     /// Send end of stream (FIN) after what was sent before.
     func shutdownWrite() {
         connection.send(content: nil, contentContext: .defaultStream, isComplete: true, completion: .idempotent)
@@ -499,6 +513,10 @@ extension IORegistration {
 
     func nwAccept(_ nw: UnsafeRawPointer) async throws(IOError) -> IORegistration {
         try await (NetworkIO.handle(nw) as! NetworkAcceptor).accept()
+    }
+
+    func nwHasPendingInput(_ nw: UnsafeRawPointer) -> Bool {
+        (NetworkIO.handle(nw) as? NetworkStream)?.hasPendingInput ?? false
     }
 
     func nwShutdownWrite(_ nw: UnsafeRawPointer) {

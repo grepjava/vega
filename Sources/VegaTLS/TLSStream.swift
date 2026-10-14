@@ -257,6 +257,13 @@ final class TLSState: @unchecked Sendable {
         lock.withLock { _ in body() }
     }
 
+    /// Input the engine holds: plaintext not yet read, or ciphertext fed
+    /// and not yet processed. (`inbound` is no guide: it keeps the last
+    /// ciphertext read after feeding it.)
+    var hasBufferedInput: Bool {
+        locked { cv_tls_buffered(tls) != 0 }
+    }
+
     func error() -> IOError {
         IOError(code: IOError.tls.code, message: locked { String(cString: cv_tls_error(tls)) })
     }
@@ -334,4 +341,12 @@ final class TLSState: @unchecked Sendable {
 }
 
 extension TLSStream: Sendable where Transport: Sendable & ~Copyable {}
+
+extension TLSStream: PendingInputProbing where Transport: PendingInputProbing & ~Copyable {
+    /// Whether a read would return at once: input the engine or its buffer
+    /// already holds, or anything waiting on the transport.
+    public var hasPendingInput: Bool {
+        state.hasBufferedInput || transport.hasPendingInput
+    }
+}
 #endif
