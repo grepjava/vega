@@ -55,6 +55,10 @@ struct IODeadlineScope: Sendable {
     private let handle: TimerHandle?
     /// Off a Vega worker, a sleeping task stands in for the timer.
     private let sleeper: Task<Void, any Error>?
+    /// The task's I/O hook, if it has one: it carries the innermost
+    /// deadline while the scope lasts, `previous` before and after.
+    private let hook: IOTaskHook?
+    private let previous: IODeadline?
 
     @usableFromInline init(after duration: Duration) {
         let now = Runtime.nowNanos
@@ -74,6 +78,9 @@ struct IODeadlineScope: Sendable {
     init(untilNanos deadline: UInt64, now: UInt64) {
         let state = IODeadline(owner: cv_task_current())
         self.state = state
+        hook = IOTaskHook.active
+        previous = hook?.deadline
+        hook?.deadline = state
         if let worker = Worker.current, let scheduler = worker._withUnsafeGuaranteedRef({ $0.scheduler }) {
             // The wheel holds a retain, consumed by whoever unlinks the
             // entry: the firing worker or `end`. nil: already due, so fired.
@@ -93,6 +100,7 @@ struct IODeadlineScope: Sendable {
 
     /// Stop the timer, if it hasn't fired.
     @usableFromInline func end() {
+        hook?.deadline = previous
         if let scheduler, let handle, scheduler.timers.remove(handle) {
             Unmanaged.passUnretained(state).release()
         }
@@ -121,96 +129,25 @@ struct IODeadlineScope: Sendable {
 }
 
 /// The deadline of a `Runtime.withIODeadline` scope, and the I/O wait of
-/// its task's that it interrupts when it fires.
-///
-/// The task arms one wait at a time with that wait's cancel action; the
-/// timer, on another thread, runs it. `state` keeps the two apart without a
-/// lock: the action lives in the waiting frame, so `disarm` waits out a
-/// firing that already took it.
+/// its task's that it interrupts when it fires: the task arms one wait at a
+/// time with that wait's `IOInterrupt`, and the timer, on another thread,
+/// fires it (see `IOInterruptSlot`).
 @usableFromInline
-final class IODeadline: @unchecked Sendable {
+final class IODeadline: IOInterruptSlot, @unchecked Sendable {
     /// Spelled out rather than `@TaskLocal`, so inlinable code can bind it.
     @usableFromInline static let current = TaskLocal<IODeadline?>(wrappedValue: nil)
 
-    private static let idle: UInt8 = 0, armed: UInt8 = 1, firing: UInt8 = 2, fired: UInt8 = 3
-
-    /// The task that made the scope. Task-locals are inherited, but the
-    /// deadline is that task's alone.
-    private let owner: UnsafeMutableRawPointer?
-    private let state = Atomic<UInt8>(IODeadline.idle)
-    private nonisolated(unsafe) var action: (@Sendable () -> Void)?
-
-    init(owner: UnsafeMutableRawPointer?) { self.owner = owner }
-
     /// The running task's deadline, if it set one.
     @inline(__always) static var active: IODeadline? {
+        if let hook = IOTaskHook.active { return hook.deadline }
+        return bound
+    }
+
+    /// The deadline bound to the running task, looked up as a task-local:
+    /// for a task without an `IOTaskHook`.
+    @inline(__always) static var bound: IODeadline? {
         guard let d = current.get(), d.owner == cv_task_current() else { return nil }
         return d
-    }
-
-    /// Past the deadline. Sequentially consistent: a wait that armed its
-    /// slot and then sees false is one `fire` will find.
-    var hasFired: Bool { state.load(ordering: .sequentiallyConsistent) >= Self.firing }
-
-    /// Hand `action` to the timer until `disarm`. False if the deadline has
-    /// already passed: nothing is armed.
-    fileprivate func arm(_ action: @escaping @Sendable () -> Void) -> Bool {
-        self.action = action
-        if state.compareExchange(expected: Self.idle, desired: Self.armed, ordering: .sequentiallyConsistent).exchanged {
-            return true
-        }
-        self.action = nil
-        return false
-    }
-
-    fileprivate func disarm() {
-        if !state.compareExchange(expected: Self.armed, desired: Self.idle, ordering: .acquiringAndReleasing).exchanged {
-            // Fired: wait until the action has run, then drop it.
-            while state.load(ordering: .acquiring) != Self.fired {}
-        }
-        action = nil
-    }
-
-    /// The deadline: interrupt the armed wait, if any.
-    func fire() {
-        while true {
-            let s = state.load(ordering: .acquiring)
-            if s == Self.idle {
-                if state.compareExchange(expected: Self.idle, desired: Self.fired,
-                                         ordering: .sequentiallyConsistent).exchanged { return }
-            } else if s == Self.armed {
-                if state.compareExchange(expected: Self.armed, desired: Self.firing,
-                                         ordering: .sequentiallyConsistent).exchanged {
-                    action?()
-                    state.store(Self.fired, ordering: .releasing)
-                    return
-                }
-            } else {
-                return
-            }
-        }
-    }
-}
-
-/// `withTaskCancellationHandler` for one I/O wait: `onCancel` runs when
-/// the task is cancelled or its `Runtime.withIODeadline` deadline passes,
-/// whichever comes first. `operation` is given the deadline, to check after
-/// it has armed its wait as it checks `Task.isCancelled`.
-@inline(__always)
-func withIOCancellation<T>(_ operation: (IODeadline?) async -> T,
-                           onCancel: @Sendable () -> Void) async -> T {
-    guard let deadline = IODeadline.active else {
-        return await withTaskCancellationHandler { await operation(nil) } onCancel: { onCancel() }
-    }
-    return await withoutActuallyEscaping(onCancel) { (onCancel) async -> T in
-        // Past the deadline already: interrupt the wait as soon as it is
-        // armed, as a cancel handler does for a task cancelled first.
-        guard deadline.arm(onCancel) else {
-            onCancel()
-            return await withTaskCancellationHandler { await operation(deadline) } onCancel: { onCancel() }
-        }
-        defer { deadline.disarm() }
-        return await withTaskCancellationHandler { await operation(deadline) } onCancel: { onCancel() }
     }
 }
 

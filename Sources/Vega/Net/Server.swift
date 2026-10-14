@@ -233,7 +233,7 @@ public final class TCPServer: Sendable {
         let box = Handoff(listener)
         state.modify { $0.acceptorsRunning += 1 }
         let task = Task(executorPreference: scheduler) { [self] in
-            await acceptLoop(box.take())
+            await IOTaskHook.run { await acceptLoop(box.take()) }
             state.modify { $0.acceptorsRunning -= 1 }
         }
         state.modify { $0.acceptorTasks.append(task) }
@@ -299,7 +299,7 @@ public final class TCPServer: Sendable {
         let box = Handoff(stream)
         let handler = handler
         let task = Task(executorPreference: scheduler) { [self] in
-            await handler(box.take())
+            await IOTaskHook.run { await handler(box.take()) }
             open.subtract(1, ordering: .relaxed)
             permits?.release()
             state.modify { $0.connections[id] = nil }

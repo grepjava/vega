@@ -73,7 +73,7 @@ public final class Runtime: Sendable {
         priority: TaskPriority? = nil,
         _ operation: sending @escaping () async -> Success
     ) -> Task<Success, Never> {
-        Task(executorPreference: scheduler, priority: priority, operation: operation)
+        Task(executorPreference: scheduler, priority: priority) { await IOTaskHook.run(operation) }
     }
 
     @discardableResult
@@ -81,7 +81,7 @@ public final class Runtime: Sendable {
         priority: TaskPriority? = nil,
         _ operation: sending @escaping () async throws -> Success
     ) -> Task<Success, any Error> {
-        Task(executorPreference: scheduler, priority: priority, operation: operation)
+        Task(executorPreference: scheduler, priority: priority) { try await IOTaskHook.run(operation) }
     }
 
     /// Spawn a task that takes ownership of `value`, such as a `TCPStream`
@@ -98,7 +98,9 @@ public final class Runtime: Sendable {
         _ operation: sending @escaping (consuming Value) async -> Success
     ) -> Task<Success, Never> {
         let box = Handoff(value)
-        return Task(executorPreference: scheduler, priority: priority) { await operation(box.take()) }
+        return Task(executorPreference: scheduler, priority: priority) {
+            await IOTaskHook.run { await operation(box.take()) }
+        }
     }
 
     /// Run `operation` on the runtime and block the calling thread until it
@@ -110,13 +112,15 @@ public final class Runtime: Sendable {
         if scheduler.isCurrentThread { return try blockDriving(operation) }
         let waiter = BlockWaiter<T, E>()
         Task(executorPreference: scheduler) {
-            let result: Result<T, E>
-            do throws(E) {
-                result = .success(try await operation())
-            } catch {
-                result = .failure(error)
+            await IOTaskHook.run {
+                let result: Result<T, E>
+                do throws(E) {
+                    result = .success(try await operation())
+                } catch {
+                    result = .failure(error)
+                }
+                waiter.finish(result)
             }
-            waiter.finish(result)
         }
         return try waiter.wait().get()
     }
@@ -132,11 +136,12 @@ public final class Runtime: Sendable {
         defer { scheduler.driving.store(false, ordering: .releasing) }
         let result = DriveResult<T, E>()
         Task(executorPreference: scheduler) {
-            let r: Result<T, E>
-            do throws(E) {
-                r = .success(try await operation())
-            } catch {
-                r = .failure(error)
+            let r: Result<T, E> = await IOTaskHook.run {
+                do throws(E) {
+                    return .success(try await operation())
+                } catch {
+                    return .failure(error)
+                }
             }
             result.value.withLock { $0 = r }
             worker.driveDone.store(true, ordering: .releasing)

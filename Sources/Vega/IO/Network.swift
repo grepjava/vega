@@ -218,18 +218,21 @@ class NetworkHandle: @unchecked Sendable {
 
 /// A one-shot handoff between a Network.framework callback (or a cancel)
 /// and the task waiting for it: whichever comes first wins.
-final class Rendezvous<T: Sendable>: @unchecked Sendable {
+final class Rendezvous<T: Sendable>: IOInterruptTarget, @unchecked Sendable {
     private let lock = RawLock()
     private var continuation: UnsafeContinuation<T, Never>?
     private var value: T?
     private var done = false
+    /// What `interrupt` offers: set by `wait` before it arms.
+    private var cancelled: T?
 
     deinit { lock.destroy() }
 
     /// Wait for `offer`; `cancelled` if the task is cancelled, or its I/O
     /// deadline passes, first.
     func wait(cancelled: T) async -> T {
-        let result = await withIOCancellation { _ in
+        self.cancelled = cancelled
+        let result = await withIOInterrupt { arm in
             await withUnsafeContinuation { (c: UnsafeContinuation<T, Never>) in
                 lock.lock()
                 if let value {
@@ -239,9 +242,9 @@ final class Rendezvous<T: Sendable>: @unchecked Sendable {
                 }
                 continuation = c
                 lock.unlock()
+                let cancel = IOInterrupt.object(.passUnretained(self))
+                if !arm(cancel) { cancel.fire() }
             }
-        } onCancel: {
-            offer(cancelled)
         }
         cv_tsan_acquire(cv_task_current())
         return result
@@ -263,6 +266,11 @@ final class Rendezvous<T: Sendable>: @unchecked Sendable {
             value = v
             lock.unlock()
         }
+    }
+
+    /// Cancellation or the deadline: settle the wait with `cancelled`.
+    override func interrupt() {
+        if let cancelled { offer(cancelled) }
     }
 }
 

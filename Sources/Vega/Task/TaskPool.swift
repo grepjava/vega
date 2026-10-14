@@ -75,7 +75,7 @@ public final class TaskPool: @unchecked Sendable {
         if let idle {
             idle.resume(returning: work)
         } else if grow {
-            Task(executorPreference: runtime.scheduler) { await self.loop() }
+            Task(executorPreference: runtime.scheduler) { await IOTaskHook.run { await self.loop() } }
         }
     }
 

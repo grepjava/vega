@@ -157,18 +157,18 @@ struct IORegistration: @unchecked Sendable {
             if res < 0 { throw IOError(code: Int32(-res)) }
             return
         }
-        let ready = await withIOCancellation { deadline in
+        let ready = await withIOInterrupt { arm in
             await withUnsafeContinuation { (c: UnsafeContinuation<Bool, Never>) in
                 let waiter = IOWaiter.bits(c)
                 if cv_io_arm(io, direction, waiter) != 0 {
                     c.resume(returning: true) // an event beat us here: retry now
                     return
                 }
-                // The cancel handler may have run before we armed; it sets the
-                // flag first, so one of the two sees the other. The same goes
-                // for the deadline.
-                if Task.isCancelled || deadline?.hasFired == true, cv_io_disarm(io, direction, waiter) != 0 {
-                    c.resume(returning: false)
+                // Cancelled or past the deadline already: take the waiter
+                // back out (unless an event took it) and give up.
+                let cancel = IOInterrupt.readiness(io, direction)
+                if !arm(cancel) {
+                    cancel.fire()
                     return
                 }
                 #if os(Windows)
@@ -177,9 +177,6 @@ struct IORegistration: @unchecked Sendable {
                 cv_driver_want(io, direction)
                 #endif
             }
-        } onCancel: {
-            let waiter = cv_io_take_waiter(io, direction)
-            if waiter != 0 { IOWaiter.continuation(waiter).resume(returning: false) }
         }
         if !ready { throw .interrupted }
     }
