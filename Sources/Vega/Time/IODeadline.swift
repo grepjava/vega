@@ -45,6 +45,57 @@ extension Runtime {
         defer { scope.end() }
         return try await scope.run(isolation: isolation, body)
     }
+
+    /// Run `body` with a deadline on its I/O after `duration`, which
+    /// `trigger` can also bring forward to now from another task: a reader
+    /// waiting on a socket that someone else has decided to stop waiting
+    /// for. A trigger fired while no scope holds it fires the next one as
+    /// it starts. See `withIODeadline(_:_:)`.
+    @inlinable
+    public static func withIODeadline<T: ~Copyable, E: Error>(
+        _ duration: Duration, trigger: IODeadlineTrigger, isolation: isolated (any Actor)? = #isolation,
+        _ body: () async throws(E) -> T
+    ) async throws(E) -> T {
+        let scope = IODeadlineScope(after: duration)
+        trigger.attach(scope.state)
+        defer {
+            trigger.detach()
+            scope.end()
+        }
+        return try await scope.run(isolation: isolation, body)
+    }
+}
+
+/// Ends the I/O wait of a `withIODeadline(_:trigger:_:)` scope early, from
+/// any task: the wait throws `IOError.timedOut`, as if its deadline had
+/// passed. One scope at a time holds a trigger.
+public final class IODeadlineTrigger: @unchecked Sendable {
+    private let lock = Mutex<(scope: IODeadline?, pending: Bool)>((nil, false))
+
+    public init() {}
+
+    /// Fires the scope holding the trigger, or the next to take it.
+    public func fire() {
+        let scope = lock.withLock { s -> IODeadline? in
+            if let scope = s.scope { return scope }
+            s.pending = true
+            return nil
+        }
+        scope?.fire()
+    }
+
+    @usableFromInline func attach(_ scope: IODeadline) {
+        let now = lock.withLock { s -> Bool in
+            s.scope = scope
+            defer { s.pending = false }
+            return s.pending
+        }
+        if now { scope.fire() }
+    }
+
+    @usableFromInline func detach() {
+        lock.withLock { $0.scope = nil }
+    }
 }
 
 /// One `withIODeadline` scope: its deadline, and the timer that fires it.
