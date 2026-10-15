@@ -13,6 +13,16 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <wincrypt.h> // before OpenSSL, whose headers undo its X509_NAME macros
+#if defined(VEGA_TLS_BORINGSSL)
+// BoringSSL's headers leave that to their includer.
+#undef X509_NAME
+#undef X509_EXTENSIONS
+#undef X509_CERT_PAIR
+#undef PKCS7_ISSUER_AND_SERIAL
+#undef PKCS7_SIGNER_INFO
+#undef OCSP_REQUEST
+#undef OCSP_RESPONSE
+#endif
 #endif
 #include "cvega_tls.h"
 
@@ -41,8 +51,27 @@
 #include <string.h>
 
 #if defined(OPENSSL_IS_BORINGSSL)
-#include <pthread.h>
 // OpenSSL 3 calls BoringSSL doesn't have.
+#if defined(_WIN32)
+#define CRYPTO_RWLOCK SRWLOCK
+static SRWLOCK *cv_lock_new(void) {
+    SRWLOCK *m = malloc(sizeof *m);
+    if (m) InitializeSRWLock(m);
+    return m;
+}
+static void cv_lock_free(SRWLOCK *m) { free(m); }
+static int cv_lock(SRWLOCK *m) {
+    AcquireSRWLockExclusive(m);
+    return 1;
+}
+static int cv_unlock(SRWLOCK *m) {
+    ReleaseSRWLockExclusive(m);
+    return 1;
+}
+#define CRYPTO_THREAD_write_lock cv_lock
+#define CRYPTO_THREAD_unlock cv_unlock
+#else
+#include <pthread.h>
 #define CRYPTO_RWLOCK pthread_mutex_t
 static pthread_mutex_t *cv_lock_new(void) {
     pthread_mutex_t *m = malloc(sizeof *m);
@@ -53,10 +82,11 @@ static void cv_lock_free(pthread_mutex_t *m) {
     pthread_mutex_destroy(m);
     free(m);
 }
-#define CRYPTO_THREAD_lock_new cv_lock_new
-#define CRYPTO_THREAD_lock_free cv_lock_free
 #define CRYPTO_THREAD_write_lock pthread_mutex_lock
 #define CRYPTO_THREAD_unlock pthread_mutex_unlock
+#endif
+#define CRYPTO_THREAD_lock_new cv_lock_new
+#define CRYPTO_THREAD_lock_free cv_lock_free
 #define SSL_R_UNEXPECTED_EOF_WHILE_READING (-1) // BoringSSL reports SSL_ERROR_SYSCALL
 static EVP_PKEY *cv_keygen_p256(void) {
     EC_KEY *ec = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
@@ -657,7 +687,17 @@ static void make_bio_method(void) {
     if (m) BIO_meth_free(m);
 }
 
-#if defined(OPENSSL_IS_BORINGSSL)
+#if defined(OPENSSL_IS_BORINGSSL) && defined(_WIN32)
+static INIT_ONCE bio_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK bio_method_init(PINIT_ONCE once, PVOID param, PVOID *context) {
+    (void)once;
+    (void)param;
+    (void)context;
+    make_bio_method();
+    return TRUE;
+}
+static void bio_method_once(void) { InitOnceExecuteOnce(&bio_once, bio_method_init, NULL, NULL); }
+#elif defined(OPENSSL_IS_BORINGSSL)
 static pthread_once_t bio_once = PTHREAD_ONCE_INIT;
 static void bio_method_once(void) { pthread_once(&bio_once, make_bio_method); }
 #else
