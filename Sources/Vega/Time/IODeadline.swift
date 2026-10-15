@@ -15,8 +15,9 @@ extension Runtime {
     /// ```
     ///
     /// Cheaper than `timeout`, which runs its operation as a child task:
-    /// `body` runs in the calling task, and the deadline interrupts its I/O
-    /// the way cancellation would, without cancelling the task. So only
+    /// `body` runs in the calling task, on the caller's executor, and the
+    /// deadline interrupts its I/O the way cancellation would, without
+    /// cancelling the task. So only
     /// Vega's own I/O waits are bounded, and only the calling task's -- not
     /// a `Runtime.sleep`, a channel, or what a child task waits for. A wait
     /// given up this way is one operation abandoned, as with `.cancelled`:
@@ -24,26 +25,26 @@ extension Runtime {
     /// written is usually best closed.
     @inlinable
     public static func withIODeadline<T: ~Copyable, E: Error>(
-        _ duration: Duration, isolation: isolated (any Actor)? = #isolation,
+        _ duration: Duration,
         _ body: () async throws(E) -> T
     ) async throws(E) -> T {
         // Inlined, so the body's generic work is specialized at the call;
         // setting the deadline up and down is not generic.
         let scope = IODeadlineScope(after: duration)
         defer { scope.end() }
-        return try await scope.run(isolation: isolation, body)
+        return try await scope.run(body)
     }
 
     /// Run `body` with a deadline on its I/O at `deadline`. See
     /// `withIODeadline(_:_:)`.
     @inlinable
     public static func withIODeadline<T: ~Copyable, E: Error>(
-        until deadline: ContinuousClock.Instant, isolation: isolated (any Actor)? = #isolation,
+        until deadline: ContinuousClock.Instant,
         _ body: () async throws(E) -> T
     ) async throws(E) -> T {
         let scope = IODeadlineScope(until: deadline)
         defer { scope.end() }
-        return try await scope.run(isolation: isolation, body)
+        return try await scope.run(body)
     }
 
     /// Run `body` with a deadline on its I/O after `duration`, which
@@ -53,7 +54,7 @@ extension Runtime {
     /// it starts. See `withIODeadline(_:_:)`.
     @inlinable
     public static func withIODeadline<T: ~Copyable, E: Error>(
-        _ duration: Duration, trigger: IODeadlineTrigger, isolation: isolated (any Actor)? = #isolation,
+        _ duration: Duration, trigger: IODeadlineTrigger,
         _ body: () async throws(E) -> T
     ) async throws(E) -> T {
         let scope = IODeadlineScope(after: duration)
@@ -62,7 +63,7 @@ extension Runtime {
             trigger.detach()
             scope.end()
         }
-        return try await scope.run(isolation: isolation, body)
+        return try await scope.run(body)
     }
 }
 
@@ -163,8 +164,7 @@ struct IODeadlineScope: Sendable {
 
     /// `body`, with the deadline set for its task.
     @inlinable
-    func run<T: ~Copyable, E: Error>(isolation: isolated (any Actor)?,
-                                     _ body: () async throws(E) -> T) async throws(E) -> T {
+    func run<T: ~Copyable, E: Error>(_ body: () async throws(E) -> T) async throws(E) -> T {
         // A task with a hook finds the deadline there; binding the
         // task-local as well would cost a push, a pop and the hops of
         // withValue for nothing (child tasks, which inherit task-locals,
@@ -179,7 +179,7 @@ struct IODeadlineScope: Sendable {
             } catch {
                 result = .failure(error)
             }
-        }, isolation: isolation)
+        })
         switch result.take()! {
         case .success(let value): return value
         case .failure(let error): throw error

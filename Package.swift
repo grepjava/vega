@@ -1,7 +1,14 @@
 // swift-tools-version: 6.2
 import PackageDescription
 
-let swiftSettings: [SwiftSetting] = [.swiftLanguageMode(.v6)]
+// Nonsending by default: an async function runs on its caller's executor,
+// so returning from one is no hop. Each hop asks the runtime for the task's
+// preferred executor under the task's status lock, and Vega's tasks all
+// prefer one.
+let swiftSettings: [SwiftSetting] = [
+    .swiftLanguageMode(.v6),
+    .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+]
 
 let package = Package(
     name: "Vega",
