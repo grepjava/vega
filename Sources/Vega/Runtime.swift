@@ -210,6 +210,19 @@ public final class Runtime: Sendable {
         }
     }
 
+    /// Spawn a task on the runtime running the caller, as `tokio::spawn`
+    /// does: for code that runs on a runtime it was not handed, such as a
+    /// library's background reader. Off a Vega worker the task has no
+    /// executor preference, and runs where `Task {}` would.
+    @discardableResult
+    public static func spawn<Success: Sendable>(
+        priority: TaskPriority? = nil,
+        _ operation: sending @escaping () async -> Success
+    ) -> Task<Success, Never> {
+        let scheduler: (any TaskExecutor)? = Worker.currentScheduler
+        return Task(executorPreference: scheduler, priority: priority) { await IOTaskHook.run(operation) }
+    }
+
     /// The index of the Vega worker running the caller, or nil off-runtime.
     public static var currentWorker: Int? { Worker.current?._withUnsafeGuaranteedRef { $0.index } }
 

@@ -52,6 +52,18 @@ func spin(microseconds: UInt64) {
         #expect(Runtime.currentJobStamp == .none)
     }
 
+    @Test func aStaticSpawnRunsOnTheCallersRuntime() {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let worker = rt.block { () async -> Int? in
+            await Runtime.spawn { () async -> Int? in
+                await Runtime.yield()
+                return Runtime.currentWorker
+            }.value
+        }
+        #expect(worker != nil)
+    }
+
     @Test func blockPropagatesTypedError() {
         struct Boom: Error, Equatable {}
         let rt = Runtime(workers: 1)
