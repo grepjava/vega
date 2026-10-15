@@ -157,6 +157,19 @@ private func exchange(server: TLSContext, client: TLSContext, name: String? = "v
         #expect(try client.get() == "hello over TLS")
     }
 
+    @Test func aCipherListLimitsTLS12() throws {
+        let server = try serverContext {
+            $0.maximumVersion = .v1_2
+            $0.cipherList = "ECDHE+AESGCM"
+        }
+        let (client, _) = try exchange(server: server, client: clientContext())
+        #expect(try client.get() == "hello over TLS")
+        // A client offering only suites outside the list finds nothing in common.
+        let (refused, _) = try exchange(server: server, client: clientContext { $0.cipherList = "ECDHE+CHACHA20" })
+        #expect(throws: IOError.tls) { try refused.get() }
+        #expect(throws: IOError.tls) { _ = try serverContext { $0.cipherList = "NO-SUCH-CIPHER" } }
+    }
+
     @Test func sessionsAreResumed() throws {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }

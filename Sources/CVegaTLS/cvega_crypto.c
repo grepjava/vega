@@ -1339,4 +1339,35 @@ int cv_certkey_matches(const cv_certkey *ck, const char *host, size_t host_len) 
     return cv_host_matches(common, name);
 }
 
+int cv_certkey_name(const cv_certkey *ck, int index, char *out, size_t cap) {
+    if (!ck || ck->count == 0 || index < 0 || !out || cap == 0) return -1;
+    X509 *cert = ck->chain[0];
+    int dns_names = 0, found = -1;
+    GENERAL_NAMES *sans = X509_get_ext_d2i(cert, NID_subject_alt_name, NULL, NULL);
+    if (sans) {
+        size_t n = sk_GENERAL_NAME_num(sans);
+        for (size_t i = 0; i < n; i++) {
+            const GENERAL_NAME *entry = sk_GENERAL_NAME_value(sans, i);
+            if (!entry || entry->type != GEN_DNS) continue;
+            if (dns_names++ != index) continue;
+            const unsigned char *bytes = ASN1_STRING_get0_data(entry->d.dNSName);
+            int length = ASN1_STRING_length(entry->d.dNSName);
+            if (length >= 0 && (size_t)length < cap) {
+                memcpy(out, bytes, (size_t)length);
+                out[length] = 0;
+                found = length;
+            }
+            break;
+        }
+        GENERAL_NAMES_free(sans);
+    }
+    ERR_clear_error();
+    // As matching reads it: the common name only when there are no DNS
+    // subject alternative names.
+    if (dns_names > 0 || index > 0) return found;
+    int length = X509_NAME_get_text_by_NID(X509_get_subject_name(cert), NID_commonName, out, (int)cap);
+    ERR_clear_error();
+    return length > 0 ? length : -1;
+}
+
 #endif // CV_HAVE_CRYPTO

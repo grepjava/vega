@@ -534,6 +534,15 @@ int cv_tls_ctx_set_versions(cv_tls_ctx *c, int min, int max, char *err, int errl
     return 0;
 }
 
+int cv_tls_ctx_set_ciphers(cv_tls_ctx *c, const char *list, char *err, int errlen) {
+    ERR_clear_error();
+    if (SSL_CTX_set_cipher_list(c->ssl, list) != 1) {
+        describe(err, errlen, "TLS cipher list");
+        return -1;
+    }
+    return 0;
+}
+
 int cv_tls_ctx_set_alpn(cv_tls_ctx *c, const uint8_t *wire, int len, char *err, int errlen) {
     ERR_clear_error();
     if (len <= 0) return 0;

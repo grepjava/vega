@@ -524,6 +524,7 @@ struct CryptoTests {
         }
         #expect(throws: CryptoError.self) { try ck.signature(for: content, scheme: .ed25519) }
 
+        #expect(ck.serverNames == ["vega.test", "*.wild.test"])
         #expect(ck.matches(host: "vega.test"))
         #expect(ck.matches(host: "VEGA.Test"))
         #expect(ck.matches(host: "a.wild.test"))

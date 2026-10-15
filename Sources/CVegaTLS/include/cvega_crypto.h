@@ -207,6 +207,11 @@ cv_key *cv_certkey_key(const cv_certkey *ck);
 /// alternative names, or its common name when it has none.
 int cv_certkey_matches(const cv_certkey *ck, const char *host, size_t host_len);
 
+/// The leaf's name number `index`, NUL-terminated in out: its DNS subject
+/// alternative names in order, or its common name when it has none. The
+/// name's length, or -1 past the last (or for one longer than cap - 1).
+int cv_certkey_name(const cv_certkey *ck, int index, char *out, size_t cap);
+
 /// RFC 6125 matching, case-insensitive; "*.example.com" covers exactly one
 /// label in front. Both NUL-terminated.
 int cv_host_matches(const char *pattern, const char *host);

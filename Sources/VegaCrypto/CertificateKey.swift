@@ -96,6 +96,18 @@ public final class CertificateKey: Sendable {
         }
     }
 
+    /// The names `matches(host:)` reads: the leaf's DNS subject alternative
+    /// names, in order, or its common name when it has none.
+    public var serverNames: [String] {
+        var names: [String] = []
+        var buffer = [CChar](repeating: 0, count: 256)
+        while true {
+            let length = cv_certkey_name(raw.ptr, Int32(names.count), &buffer, buffer.count)
+            guard length >= 0 else { return names }
+            names.append(String(decoding: buffer[0..<Int(length)].map { UInt8(bitPattern: $0) }, as: UTF8.self))
+        }
+    }
+
     /// RFC 6125 matching of one name pattern against a host,
     /// case-insensitive; a wildcard covers exactly one label.
     public static func hostMatches(pattern: String, host: String) -> Bool {

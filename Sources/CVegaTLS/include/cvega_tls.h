@@ -50,6 +50,10 @@ int cv_tls_ctx_use_system_trust(cv_tls_ctx *ctx, char *err, int errlen);
 void cv_tls_ctx_set_verify(cv_tls_ctx *ctx, int mode);
 /// TLS versions as 0x0303 (1.2) and 0x0304 (1.3); max 0 for the newest.
 int cv_tls_ctx_set_versions(cv_tls_ctx *ctx, int min, int max, char *err, int errlen);
+/// The TLS 1.2 cipher suites, as an OpenSSL cipher list
+/// ("ECDHE+AESGCM:ECDHE+CHACHA20"). TLS 1.3's suites are not affected. A
+/// list that names no suite the library has is an error.
+int cv_tls_ctx_set_ciphers(cv_tls_ctx *ctx, const char *list, char *err, int errlen);
 /// ALPN protocols in wire form (length-prefixed), in preference order.
 /// A server picks its first that the client offers, and refuses a client
 /// that offers protocols but none of these.

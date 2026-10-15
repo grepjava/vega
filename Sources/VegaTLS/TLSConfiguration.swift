@@ -68,6 +68,9 @@ public struct TLSConfiguration: Sendable {
     public var minimumVersion: Version = .v1_2
     /// nil: the newest the TLS library has.
     public var maximumVersion: Version?
+    /// The TLS 1.2 cipher suites, as an OpenSSL cipher list; nil: the
+    /// library's defaults. TLS 1.3's suites are fixed, and need no choosing.
+    public var cipherList: String?
     /// Server: other identities, by the name a client asks for (SNI).
     /// `"*.example.com"` matches one label. Unmatched names, and clients
     /// that ask for none, get `identity`.
@@ -244,6 +247,9 @@ public final class TLSContext: @unchecked Sendable {
         }
         let newest = Int32(c.maximumVersion?.rawValue ?? 0)
         try check { err, len in cv_tls_ctx_set_versions(ctx, Int32(c.minimumVersion.rawValue), newest, err, len) }
+        if let list = c.cipherList {
+            try check { err, len in cv_tls_ctx_set_ciphers(ctx, list, err, len) }
+        }
         if !c.applicationProtocols.isEmpty {
             var wire: [UInt8] = []
             for p in c.applicationProtocols {
