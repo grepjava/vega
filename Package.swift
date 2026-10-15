@@ -67,10 +67,15 @@ let package = Package(
                             // collide with BoringSSL's.
                             .define("_WINSOCKAPI_", .when(platforms: [.windows])),
                             .define("NOMINMAX", .when(platforms: [.windows])),
-                            .define("NOCRYPT", .when(platforms: [.windows]))],
+                            .define("NOCRYPT", .when(platforms: [.windows])),
+                            // Its assembly is ELF and Mach-O only (Windows'
+                            // is NASM, which SwiftPM cannot build): the C
+                            // implementations instead.
+                            .define("OPENSSL_NO_ASM", .when(platforms: [.windows]))],
                 cxxSettings: [.define("_WINSOCKAPI_", .when(platforms: [.windows])),
                               .define("NOMINMAX", .when(platforms: [.windows])),
-                              .define("NOCRYPT", .when(platforms: [.windows]))]),
+                              .define("NOCRYPT", .when(platforms: [.windows])),
+                              .define("OPENSSL_NO_ASM", .when(platforms: [.windows]))]),
         .target(name: "CVegaTLS",
                 dependencies: [.target(name: "COpenSSL", condition: .when(platforms: [.linux, .macOS, .windows], traits: ["OpenSSL"])),
                                .target(name: "CVegaBoringSSL", condition: .when(traits: ["BoringSSL"]))],
