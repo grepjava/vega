@@ -1925,6 +1925,27 @@ int cv_shard_spawn(const char *path, char *const argv[], char *const envp[],
 #endif
 }
 
+void cv_supervisor_restarted(void) {
+    // The supervisor's signals were blocked by the image before; the mask
+    // shards start with is the one from before that.
+    sigdelset(&sup_old_mask, SIGCHLD);
+    sigdelset(&sup_old_mask, SIGTERM);
+    sigdelset(&sup_old_mask, SIGINT);
+    sigdelset(&sup_old_mask, SIGQUIT);
+    sigdelset(&sup_old_mask, SIGHUP);
+}
+
+int cv_supervisor_exec(const char *path, char *const argv[]) {
+#ifdef CV_NO_SPAWN
+    return ENOTSUP;
+#else
+    // The signals stay blocked (Linux) or ignored (Darwin) across the exec:
+    // one that arrives in between waits for the new image.
+    execv(path, argv);
+    return errno;
+#endif
+}
+
 int cv_shard_adopt(int parent) {
 #if defined(__linux__)
     // PR_SET_PDEATHSIG doesn't carry over from the supervisor: set it here.

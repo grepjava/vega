@@ -398,6 +398,14 @@ int cv_shard_spawn(const char *path, char *const argv[], char *const envp[],
 /// In an exec'd shard: end with the supervisor `parent` (SIGTERM, as a
 /// forked shard). -1 if it is gone already.
 int cv_shard_adopt(int parent);
+/// exec(2) `path` in place of the supervisor, its signals still taken rather
+/// than delivered, so none is lost before the new image takes them; fds
+/// without FD_CLOEXEC carry over. Returns only on failure: an errno value.
+int cv_supervisor_exec(const char *path, char *const argv[]);
+/// In a supervisor exec'd by cv_supervisor_exec, after cv_supervisor_init:
+/// the mask shards start with leaves out the signals the previous image
+/// blocked.
+void cv_supervisor_restarted(void);
 /// This process's executable path. Returns 0 or an errno value.
 int cv_self_exe(char *buf, int len);
 /// A new shared-memory object of `size` zeroed bytes with no name left in

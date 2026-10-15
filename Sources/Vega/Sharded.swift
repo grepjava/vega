@@ -241,8 +241,38 @@ public enum ShardEvent: Sendable, Equatable {
     case restarting(shard: Int, after: Duration)
     /// SIGTERM, SIGINT or SIGQUIT: the shards are told to stop.
     case stopping(signal: Int32)
-    /// SIGHUP: shards restart one at a time.
+    /// SIGHUP, or `ShardWatchAction.reload`: shards restart one at a time.
     case reloading
+    /// `ShardWatchAction.restartSupervisor`: the executable ran as far as
+    /// `Runtime.sharded`, and the supervisor is about to become it. In the
+    /// new image each shard the old one left is reported `started` again,
+    /// then all of them are replaced, as on `reloading`.
+    case restartingSupervisor
+    /// The supervisor did not restart, and carries on as it was: the
+    /// executable did not run, or could not be exec'd.
+    case supervisorRestartFailed(reason: String)
+}
+
+/// What `ShardOptions.watch` asks of the supervisor.
+@available(iOS, unavailable)
+@available(tvOS, unavailable)
+@available(watchOS, unavailable)
+@available(visionOS, unavailable)
+public enum ShardWatchAction: Sendable, Hashable {
+    /// Nothing to do.
+    case none
+    /// Restart the shards one at a time, as SIGHUP does: for something they
+    /// read as they start, such as a certificate, that has changed.
+    case reload
+    /// Restart the supervisor on its executable, rebuilt since it started:
+    /// it execs the file it was started from, keeping its pid, its listeners,
+    /// its shared regions and its shards, and the new image replaces the
+    /// shards one at a time with ones that run the new code. The executable
+    /// is first run as far as `Runtime.sharded` with the same arguments; if
+    /// it does not get there, and exit 0, within five seconds, nothing
+    /// changes (`ShardEvent.supervisorRestartFailed`). Listeners are not
+    /// dropped, so no connection is refused.
+    case restartSupervisor
 }
 
 /// How `Runtime.sharded` lays out and supervises its shards.
@@ -295,6 +325,12 @@ public struct ShardOptions: Sendable {
     /// Called in the supervisor for each event (synchronously: keep it
     /// short, and don't start tasks or threads there).
     public var onEvent: (@Sendable (ShardEvent) -> Void)?
+    /// Called in the supervisor every `watchInterval` while it is not
+    /// stopping (synchronously, as `onEvent` is): for a development server
+    /// to notice a rebuilt executable or a changed file, and say what is to
+    /// be done about it.
+    public var watch: (@Sendable () -> ShardWatchAction)?
+    public var watchInterval: Duration = .milliseconds(100)
 
     public init(shards: Int? = nil, workersPerShard: Int? = nil) {
         self.shards = shards
@@ -359,6 +395,9 @@ extension Runtime {
     /// When `body` returns, the process exits 0.
     public static func sharded(_ options: ShardOptions = ShardOptions(),
                                _ body: @escaping (Shard) -> Void) -> Never {
+        // A supervisor trying a rebuilt executable: it runs this far. No
+        // exit handler runs: they are the real server's.
+        if getenv(SupervisorRestart.probeKey) != nil { _exit(0) }
         if let launched = ExecShard.fromEnvironment(options) {
             Supervisor.runShard(options, launched.index, count: launched.count, cpus: launched.cpus,
                                 listeners: launched.listeners, body: body)
@@ -372,12 +411,29 @@ extension Runtime {
         let threads = cv_thread_count()
         precondition(threads <= 1, "Runtime.sharded must run before any thread starts (\(threads) running)")
         let layout = Topology.layout(shards: options.shards, workersPerShard: options.workersPerShard)
-        SharedRegions.prepare(options.sharedRegions)
+        // Exec'd by a supervisor before it, on a rebuilt executable: its
+        // listeners, regions and shards are this one's.
+        let restarted = SupervisorRestart.fromEnvironment(options, shards: layout.count)
+        if let restarted {
+            SharedRegions.adopt(restarted.regions)
+        } else {
+            SharedRegions.prepare(options.sharedRegions)
+        }
         let rc = cv_supervisor_init()
         precondition(rc == 0, "vega: cannot set up the shard supervisor (errno \(rc))")
-        let listeners = prepareListeners(options)
+        if restarted != nil { cv_supervisor_restarted() }
+        let listeners = restarted?.listeners ?? prepareListeners(options)
         var supervisor = Supervisor(options: options, layout: layout, listeners: listeners, body: body)
-        supervisor.run()
+        supervisor.run(adopting: restarted?.shards)
+    }
+
+    /// The path of this process's executable, or nil where it cannot be
+    /// found. Read it before the file can change: once it is replaced, the
+    /// path may name the old file as deleted (Linux).
+    public static var executablePath: String? {
+        var path = [CChar](repeating: 0, count: 4096)
+        guard cv_self_exe(&path, Int32(path.count)) == 0 else { return nil }
+        return String(cString: path)
     }
 
     /// `VEGA_SHARDS`: a shard count, or nil when unset. Anything but a
@@ -476,6 +532,13 @@ private struct Supervisor {
     /// Rolling restart (SIGHUP): the shard being replaced, and what's left.
     var reloading: Int?
     var reloadQueue: [Int] = []
+    /// Another rolling restart was asked for during this one.
+    var reloadAgain = false
+    /// When `options.watch` is next called (cv_now_ns), or .max.
+    var nextWatch: UInt64 = .max
+    /// What `ShardWatchAction.restartSupervisor` execs: the executable as it
+    /// was found at start, before a rebuild could replace it.
+    let executable: String?
 
     init(options: ShardOptions, layout: [[Int]], listeners: [PreparedListener], body: @escaping (Shard) -> Void) {
         self.options = options
@@ -485,10 +548,31 @@ private struct Supervisor {
         pids = Array(repeating: nil, count: layout.count)
         startedAt = Array(repeating: 0, count: layout.count)
         quickCrashes = Array(repeating: 0, count: layout.count)
+        executable = options.watch == nil ? nil : Runtime.executablePath
     }
 
-    mutating func run() -> Never {
-        for i in layout.indices { start(i) }
+    /// `adopting`: the shards a previous image of the supervisor started, by
+    /// index (0 for none), to replace rather than start.
+    mutating func run(adopting adopted: [Int32]? = nil) -> Never {
+        if let adopted {
+            for i in layout.indices {
+                let pid = adopted[i]
+                guard pid > 0 else {
+                    start(i)
+                    continue
+                }
+                running[pid] = i
+                pids[i] = pid
+                startedAt[i] = cv_now_ns()
+                options.onEvent?(.started(shard: i, pid: pid))
+            }
+            // They run the old code.
+            beginReload()
+        } else {
+            for i in layout.indices { start(i) }
+        }
+        let interval = UInt64(max(Scheduler.nanoseconds(options.watchInterval), 1_000_000))
+        if options.watch != nil { nextWatch = cv_now_ns() &+ interval }
         while true {
             if running.isEmpty && pending.isEmpty {
                 exit(stopping || !crashed ? 0 : 1)
@@ -496,6 +580,7 @@ private struct Supervisor {
             let now = cv_now_ns()
             var deadline = pending.values.min() ?? .max
             if let killAt { deadline = min(deadline, killAt) }
+            if !stopping { deadline = min(deadline, nextWatch) }
             let timeout: Int64 = deadline == .max ? -1 : Int64(clamping: deadline > now ? deadline - now : 0)
             var pid: Int32 = 0, status: Int32 = 0
             switch cv_supervisor_next(timeout, &pid, &status) {
@@ -503,6 +588,14 @@ private struct Supervisor {
             case 2: signalled(status)
             case 0: timers()
             default: break
+            }
+            if !stopping, let watch = options.watch, cv_now_ns() >= nextWatch {
+                switch watch() {
+                case .none: break
+                case .reload: beginReload()
+                case .restartSupervisor: restartSupervisor()
+                }
+                nextWatch = cv_now_ns() &+ interval
             }
         }
     }
@@ -576,10 +669,7 @@ private struct Supervisor {
     mutating func signalled(_ sig: Int32) {
         switch sig {
         case SIGHUP:
-            guard !stopping, reloading == nil else { return }
-            options.onEvent?(.reloading)
-            reloadQueue = Array(layout.indices)
-            nextReload()
+            beginReload()
         default:
             // SIGTERM is passed on as it is; SIGINT and SIGQUIT as SIGINT,
             // which a shard takes as "now".
@@ -604,6 +694,20 @@ private struct Supervisor {
         }
     }
 
+    /// Restarts the shards one at a time, or, during such a restart, once
+    /// it is done: a shard it has passed may have started before whatever
+    /// asked for this one.
+    mutating func beginReload() {
+        guard !stopping else { return }
+        guard reloading == nil else {
+            reloadAgain = true
+            return
+        }
+        options.onEvent?(.reloading)
+        reloadQueue = Array(layout.indices)
+        nextReload()
+    }
+
     mutating func nextReload() {
         reloading = nil
         while !reloadQueue.isEmpty {
@@ -614,6 +718,36 @@ private struct Supervisor {
                 return
             }
         }
+        if reloadAgain {
+            reloadAgain = false
+            beginReload()
+        }
+    }
+
+    /// `ShardWatchAction.restartSupervisor`: becomes the executable, after
+    /// trying it, handing it the listeners, the shared regions and the
+    /// shards in the environment. Returns only if it did not.
+    mutating func restartSupervisor() {
+        guard let path = executable else {
+            options.onEvent?(.supervisorRestartFailed(reason: "the executable's path is not known"))
+            return
+        }
+        // A file that is not a whole executable, or a build that fails at
+        // start, is caught here: an exec that fails returns, but one of an
+        // image that then dies takes the supervisor with it.
+        if let why = SupervisorRestart.probe(path) {
+            options.onEvent?(.supervisorRestartFailed(reason: why))
+            return
+        }
+        options.onEvent?(.restartingSupervisor)
+        let carried = listeners.map(\.shared).filter { $0 >= 0 } + SharedRegions.mapped.map(\.fd)
+        for fd in carried { _ = fcntl(fd, F_SETFD, 0) }
+        SupervisorRestart.record(listeners: listeners, pids: pids)
+        let error = SupervisorRestart.exec(path)
+        // Still here: the exec failed, and everything is as it was.
+        for key in SupervisorRestart.keys { unsetenv(key) }
+        for fd in carried { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
+        options.onEvent?(.supervisorRestartFailed(reason: "cannot exec \(path): \(IOError(code: error))"))
     }
 
     mutating func timers() {
@@ -763,6 +897,126 @@ private extension StringProtocol {
         return String(s)
     }
 }
+/// `ShardWatchAction.restartSupervisor`: what a supervisor passes the image
+/// it execs in its environment, and that image reads back.
+///
+/// - `VEGA_SUPERVISOR_FDS`: per listener, "fd:port", as `VEGA_SHARD_FDS`.
+/// - `VEGA_SUPERVISOR_REGIONS`: per shared region, "fd:size".
+/// - `VEGA_SUPERVISOR_SHARDS`: per shard, its pid, or 0.
+///
+/// `VEGA_SUPERVISOR_PROBE`, set for a trial run of the executable, has
+/// `Runtime.sharded` exit at once.
+@available(iOS, unavailable)
+@available(tvOS, unavailable)
+@available(watchOS, unavailable)
+@available(visionOS, unavailable)
+enum SupervisorRestart {
+    static let keys = ["VEGA_SUPERVISOR_FDS", "VEGA_SUPERVISOR_REGIONS", "VEGA_SUPERVISOR_SHARDS"]
+    static let probeKey = "VEGA_SUPERVISOR_PROBE"
+
+    struct Restarted {
+        let listeners: [PreparedListener]
+        let regions: [(Int32, Int)]
+        let shards: [Int32]
+    }
+
+    /// In the supervisor: the record for the image about to be exec'd.
+    static func record(listeners: [PreparedListener], pids: [Int32?]) {
+        setenv(keys[0], listeners.map { "\($0.shared):\($0.port)" }.joined(separator: ","), 1)
+        setenv(keys[1], SharedRegions.mapped.map { "\($0.fd):\($0.size)" }.joined(separator: ","), 1)
+        setenv(keys[2], pids.map { "\($0 ?? 0)" }.joined(separator: ","), 1)
+    }
+
+    /// In a supervisor exec'd by another: what it was handed, with the
+    /// variables removed so no shard sees them. Nil in one that was not.
+    /// A record this image cannot take -- the shards or listeners differ
+    /// in number -- is let go of: its shards are stopped and waited for and
+    /// its sockets closed, and the supervisor starts as a new one.
+    static func fromEnvironment(_ options: ShardOptions, shards count: Int) -> Restarted? {
+        guard let raw = getenv(keys[2]) else { return nil }
+        func value(_ key: String) -> String { getenv(key).map { String(cString: $0) } ?? "" }
+        let pids = String(cString: raw).split(separator: ",").map { Int32($0) }
+        let fds = value(keys[0]).split(separator: ",").map { pair -> (Int32, Int)? in
+            let p = pair.split(separator: ":")
+            guard p.count == 2, let fd = Int32(p[0]), let port = Int(p[1]) else { return nil }
+            return (fd, port)
+        }
+        let regions = value(keys[1]).split(separator: ",").map { pair -> (Int32, Int)? in
+            let p = pair.split(separator: ":")
+            guard p.count == 2, let fd = Int32(p[0]), let size = Int(p[1]) else { return nil }
+            return (fd, size)
+        }
+        for key in keys { unsetenv(key) }
+        guard pids.count == count, pids.allSatisfy({ $0 != nil }),
+              fds.count == options.listeners.count, fds.allSatisfy({ $0 != nil }),
+              regions.count == options.sharedRegions.count, regions.allSatisfy({ $0 != nil }) else {
+            let stale = pids.compactMap { $0 }.filter { $0 > 0 }
+            for pid in stale { kill(pid, SIGINT) }
+            var status: Int32 = 0
+            for pid in stale { waitpid(pid, &status, 0) }
+            for case let (fd, _)? in fds where fd >= 0 { close(fd) }
+            for case let (fd, _)? in regions { close(fd) }
+            return nil
+        }
+        let listeners = zip(options.listeners, fds).map { spec, pair -> PreparedListener in
+            let (fd, port) = pair!
+            if fd >= 0 { _ = fcntl(fd, F_SETFD, FD_CLOEXEC) }
+            return PreparedListener(host: spec.host, port: port, backlog: spec.backlog, path: spec.path, shared: fd)
+        }
+        return Restarted(listeners: listeners, regions: regions.map { $0! }, shards: pids.map { $0! })
+    }
+
+    /// Runs `path`, with this process's arguments, as far as
+    /// `Runtime.sharded`. Nil when it got there and exited 0 within five
+    /// seconds; otherwise why not.
+    static func probe(_ path: String) -> String? {
+        var env: [String] = []
+        if let environ = cv_environ() {
+            var p = environ
+            while let entry = p.pointee {
+                env.append(String(cString: entry))
+                p += 1
+            }
+        }
+        env.append("\(probeKey)=1")
+        var pid: Int32 = -1
+        let rc = withCStrings(CommandLine.arguments) { argv in
+            withCStrings(env) { envp in cv_shard_spawn(path, argv, envp, nil, nil, 0, &pid) }
+        }
+        guard rc == 0 else { return "cannot run \(path): \(IOError(code: rc))" }
+        let deadline = cv_now_ns() &+ 5_000_000_000
+        var status: Int32 = 0
+        while true {
+            let reaped = waitpid(pid, &status, WNOHANG)
+            if reaped == pid { break }
+            if reaped < 0 && errno != EINTR { return "cannot wait for \(path): \(IOError(code: errno))" }
+            if cv_now_ns() >= deadline {
+                kill(pid, SIGKILL)
+                waitpid(pid, &status, 0)
+                return "\(path) did not start within five seconds"
+            }
+            usleep(10_000)
+        }
+        if status & 0x7f != 0 { return "\(path) was killed by signal \(status & 0x7f) as it started" }
+        let code = (status >> 8) & 0xff
+        return code == 0 ? nil : "\(path) exited \(code) as it started"
+    }
+
+    /// Becomes `path`, with this process's arguments. Returns only on
+    /// failure: why.
+    static func exec(_ path: String) -> Int32 {
+        withCStrings(CommandLine.arguments) { argv in cv_supervisor_exec(path, argv) }
+    }
+
+    private static func withCStrings<R>(_ strings: [String],
+                                        _ body: (UnsafePointer<UnsafeMutablePointer<CChar>?>) -> R) -> R {
+        var pointers = strings.map { strdup($0) }
+        pointers.append(nil)
+        defer { for p in pointers { free(p) } }
+        return pointers.withUnsafeBufferPointer { body($0.baseAddress!) }
+    }
+}
+
 /// Exec mode (`ShardLaunch.exec`): what the supervisor passes a shard in
 /// its environment, and the shard reads back.
 ///

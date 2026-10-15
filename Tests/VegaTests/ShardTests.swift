@@ -87,6 +87,34 @@ import Testing
 }
 
 #if os(Linux) || os(macOS)
+/// `ShardWatchAction.restartSupervisor`'s trial run and record; the restart
+/// itself is checked end to end by Garuda's reload tests.
+@Suite(.serialized) struct SupervisorRestartTests {
+    @Test func aTrialRunMustExitZero() {
+        #expect(SupervisorRestart.probe("/bin/true") == nil)
+        #expect(SupervisorRestart.probe("/bin/false")?.contains("exited 1") == true)
+        #expect(SupervisorRestart.probe("/nonexistent/vega")?.contains("cannot run") == true)
+    }
+
+    @Test func aRecordThatDoesNotFitIsLetGo() {
+        var options = ShardOptions(shards: 2)
+        options.listeners = [.tcp(port: 0)]
+        setenv("VEGA_SUPERVISOR_FDS", "-1:8080", 1)
+        setenv("VEGA_SUPERVISOR_REGIONS", "", 1)
+        setenv("VEGA_SUPERVISOR_SHARDS", "0,0,0", 1)
+        #expect(SupervisorRestart.fromEnvironment(options, shards: 2) == nil)
+        #expect(getenv("VEGA_SUPERVISOR_SHARDS") == nil && getenv("VEGA_SUPERVISOR_FDS") == nil)
+
+        setenv("VEGA_SUPERVISOR_FDS", "-1:8080", 1)
+        setenv("VEGA_SUPERVISOR_REGIONS", "", 1)
+        setenv("VEGA_SUPERVISOR_SHARDS", "0,0", 1)
+        let fits = SupervisorRestart.fromEnvironment(options, shards: 2)
+        #expect(fits?.shards == [0, 0])
+        #expect(fits?.listeners.map(\.port) == [8080])
+        #expect(SupervisorRestart.fromEnvironment(options, shards: 2) == nil)
+    }
+}
+
 /// `shards` 0: the sharded body runs here, with threads already running,
 /// and its listeners work as in a shard. One at a time: each maps its shared
 /// regions into the process-wide table a shard reads them from.
