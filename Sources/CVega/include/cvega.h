@@ -507,26 +507,47 @@ intptr_t cv_sendfile(int fd, int file, int64_t offset, intptr_t count);
 int cv_open_beneath(const char *root, const char *relative);
 
 #define CV_DGRAM_TRUNCATED 1u
+/// The path a datagram took on this host: the local address it arrived on
+/// (len 0 when unknown) and the ECN bits of its IP header (0 Not-ECT,
+/// 1 ECT(1), 2 ECT(0), 3 CE). On a send, the source address to use (len 0:
+/// the kernel's choice) and the ECN bits to set.
+typedef struct cv_dgram_path {
+    cv_sockaddr local;
+    uint32_t ecn;
+} cv_dgram_path;
 /// Receive up to count (at most 64) datagrams, datagram i into
 /// base + i * stride, with recvmmsg where there is one. Fills from[i],
-/// lens[i] and flags[i] (CV_DGRAM_TRUNCATED). Datagrams received, or -errno.
+/// lens[i] and flags[i] (CV_DGRAM_TRUNCATED), and paths[i] if paths is not
+/// NULL (local addresses and ECN arrive once cv_udp_path_info is on).
+/// Datagrams received, or -errno.
 intptr_t cv_recv_batch(int fd, void *base, intptr_t stride, int count, cv_sockaddr *from,
-                   uint32_t *lens, uint32_t *flags);
+                   uint32_t *lens, uint32_t *flags, cv_dgram_path *paths);
 /// Send up to count (at most 64) datagrams laid out as for cv_recv_batch,
-/// each to to[i] (NULL, or len 0: the connected peer). Datagrams sent, or
-/// -errno.
+/// each to to[i] (NULL, or len 0: the connected peer), and from paths[i] if
+/// paths is not NULL. Datagrams sent, or -errno.
 intptr_t cv_send_batch(int fd, const void *base, intptr_t stride, const uint32_t *lens,
-                   const cv_sockaddr *to, int count);
+                   const cv_sockaddr *to, int count, const cv_dgram_path *paths);
+/// Report each datagram's local address and ECN bits to cv_recv_batch
+/// (IP_PKTINFO, IPV6_RECVPKTINFO, IP_RECVTOS, IPV6_RECVTCLASS: whichever
+/// apply to this socket). 0 or an errno value.
+int cv_udp_path_info(int fd, int on);
+/// Set the IP don't-fragment bit on every datagram (IP_PMTUDISC_DO and its
+/// IPv6 twin, or IP_DONTFRAG): one too large for the path fails or is
+/// dropped instead of being split. 0 or an errno value.
+int cv_udp_dont_fragment(int fd, int on);
 /// Send len bytes as datagrams of segment bytes each (the last may be
 /// shorter): one sendmsg that the kernel cuts up (UDP GSO) where it can, else
 /// cv_send_segments_split (Darwin, Linux before 4.18, a route that can't
 /// offload: EIO). to may be NULL for the connected peer. Bytes sent: a split
 /// send that fills the socket returns the whole segments sent so far.
 /// Or -errno.
-intptr_t cv_send_segments(int fd, const void *buf, intptr_t len, int segment, const cv_sockaddr *to);
+/// path, if not NULL, gives every segment's source address and ECN bits.
+intptr_t cv_send_segments(int fd, const void *buf, intptr_t len, int segment, const cv_sockaddr *to,
+                          const cv_dgram_path *path);
 /// cv_send_segments without GSO: the segments as one datagram each, through
 /// cv_send_batch over the same memory.
-intptr_t cv_send_segments_split(int fd, const void *buf, intptr_t len, int segment, const cv_sockaddr *to);
+intptr_t cv_send_segments_split(int fd, const void *buf, intptr_t len, int segment, const cv_sockaddr *to,
+                                const cv_dgram_path *path);
 /// Whether the kernel takes cv_send_segments with a segment size.
 int cv_udp_gso_supported(int fd);
 /// recvmsg that also reports UDP GRO: with CV_OPT_UDP_GRO on, several

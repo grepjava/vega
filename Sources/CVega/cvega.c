@@ -2493,12 +2493,210 @@ intptr_t cv_sendv(int fd, const cv_iovec *iov, int count) {
 
 enum { CV_BATCH_CHUNK = 64 };
 
+// Room for a datagram's path cmsgs (an in6_pktinfo and a traffic class)
+// plus a UDP_SEGMENT.
+enum { CV_PATH_CMSG_ROOM = 128 };
+typedef union {
+    char buf[CV_PATH_CMSG_ROOM];
+    struct cmsghdr align;
+} cv_path_control;
+
+// The local address and ECN bits from a received datagram's cmsgs.
+static void cv_read_path(struct msghdr *mh, cv_dgram_path *path) {
+    path->local.len = 0;
+    path->ecn = 0;
+    if (mh->msg_controllen == 0) return;
+    for (struct cmsghdr *cm = CMSG_FIRSTHDR(mh); cm; cm = CMSG_NXTHDR(mh, cm)) {
+#ifdef IP_PKTINFO
+        if (cm->cmsg_level == IPPROTO_IP && cm->cmsg_type == IP_PKTINFO) {
+            struct in_pktinfo pi;
+            memcpy(&pi, CMSG_DATA(cm), sizeof pi);
+            struct sockaddr_in a;
+            memset(&a, 0, sizeof a);
+            a.sin_family = AF_INET;
+            a.sin_addr = pi.ipi_addr;
+            memcpy(path->local.storage, &a, sizeof a);
+            path->local.len = sizeof a;
+            continue;
+        }
+#elif defined(IP_RECVDSTADDR)
+        if (cm->cmsg_level == IPPROTO_IP && cm->cmsg_type == IP_RECVDSTADDR) {
+            struct sockaddr_in a;
+            memset(&a, 0, sizeof a);
+            a.sin_family = AF_INET;
+            memcpy(&a.sin_addr, CMSG_DATA(cm), sizeof a.sin_addr);
+            memcpy(path->local.storage, &a, sizeof a);
+            path->local.len = sizeof a;
+            continue;
+        }
+#endif
+#ifdef IPV6_PKTINFO
+        if (cm->cmsg_level == IPPROTO_IPV6 && cm->cmsg_type == IPV6_PKTINFO) {
+            struct in6_pktinfo pi;
+            memcpy(&pi, CMSG_DATA(cm), sizeof pi);
+            struct sockaddr_in6 a;
+            memset(&a, 0, sizeof a);
+            a.sin6_family = AF_INET6;
+            a.sin6_addr = pi.ipi6_addr;
+            a.sin6_scope_id = pi.ipi6_ifindex;
+            memcpy(path->local.storage, &a, sizeof a);
+            path->local.len = sizeof a;
+            continue;
+        }
+#endif
+#ifdef IP_TOS
+        if (cm->cmsg_level == IPPROTO_IP && (cm->cmsg_type == IP_TOS
+#ifdef IP_RECVTOS
+                                             || cm->cmsg_type == IP_RECVTOS
+#endif
+                                             )) {
+            // One byte on Linux and Darwin alike.
+            unsigned char tos = 0;
+            memcpy(&tos, CMSG_DATA(cm), 1);
+            path->ecn = tos & 3u;
+            continue;
+        }
+#endif
+#ifdef IPV6_TCLASS
+        if (cm->cmsg_level == IPPROTO_IPV6 && cm->cmsg_type == IPV6_TCLASS) {
+            int tclass = 0;
+            memcpy(&tclass, CMSG_DATA(cm), sizeof tclass);
+            path->ecn = (uint32_t)tclass & 3u;
+            continue;
+        }
+#endif
+    }
+}
+
+// Write path's cmsgs (source address, ECN) into control from offset used;
+// family is the destination's address family. Returns the new offset.
+static size_t cv_put_path(char *control, size_t used, const cv_dgram_path *path, int family) {
+    if (!path) return used;
+    if (path->local.len) {
+        const struct sockaddr *sa = (const struct sockaddr *)path->local.storage;
+#ifdef IP_PKTINFO
+        if (sa->sa_family == AF_INET) {
+            struct cmsghdr *cm = (struct cmsghdr *)(control + used);
+            cm->cmsg_level = IPPROTO_IP;
+            cm->cmsg_type = IP_PKTINFO;
+            cm->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo));
+            struct in_pktinfo pi;
+            memset(&pi, 0, sizeof pi);
+            pi.ipi_spec_dst = ((const struct sockaddr_in *)sa)->sin_addr;
+            memcpy(CMSG_DATA(cm), &pi, sizeof pi);
+            used += CMSG_SPACE(sizeof(struct in_pktinfo));
+        }
+#elif defined(IP_SENDSRCADDR)
+        if (sa->sa_family == AF_INET) {
+            struct cmsghdr *cm = (struct cmsghdr *)(control + used);
+            cm->cmsg_level = IPPROTO_IP;
+            cm->cmsg_type = IP_SENDSRCADDR;
+            cm->cmsg_len = CMSG_LEN(sizeof(struct in_addr));
+            memcpy(CMSG_DATA(cm), &((const struct sockaddr_in *)sa)->sin_addr, sizeof(struct in_addr));
+            used += CMSG_SPACE(sizeof(struct in_addr));
+        }
+#endif
+#ifdef IPV6_PKTINFO
+        if (sa->sa_family == AF_INET6) {
+            struct cmsghdr *cm = (struct cmsghdr *)(control + used);
+            cm->cmsg_level = IPPROTO_IPV6;
+            cm->cmsg_type = IPV6_PKTINFO;
+            cm->cmsg_len = CMSG_LEN(sizeof(struct in6_pktinfo));
+            struct in6_pktinfo pi;
+            memset(&pi, 0, sizeof pi);
+            pi.ipi6_addr = ((const struct sockaddr_in6 *)sa)->sin6_addr;
+            pi.ipi6_ifindex = ((const struct sockaddr_in6 *)sa)->sin6_scope_id;
+            memcpy(CMSG_DATA(cm), &pi, sizeof pi);
+            used += CMSG_SPACE(sizeof(struct in6_pktinfo));
+        }
+#endif
+    }
+    if (path->ecn) {
+        int bits = (int)(path->ecn & 3u);
+        struct cmsghdr *cm = (struct cmsghdr *)(control + used);
+        if (family == AF_INET6) {
+#ifdef IPV6_TCLASS
+            cm->cmsg_level = IPPROTO_IPV6;
+            cm->cmsg_type = IPV6_TCLASS;
+            cm->cmsg_len = CMSG_LEN(sizeof bits);
+            memcpy(CMSG_DATA(cm), &bits, sizeof bits);
+            used += CMSG_SPACE(sizeof bits);
+#endif
+        } else {
+#ifdef IP_TOS
+            cm->cmsg_level = IPPROTO_IP;
+            cm->cmsg_type = IP_TOS;
+            cm->cmsg_len = CMSG_LEN(sizeof bits);
+            memcpy(CMSG_DATA(cm), &bits, sizeof bits);
+            used += CMSG_SPACE(sizeof bits);
+#endif
+        }
+    }
+    return used;
+}
+
+// The destination's family, which picks the ECN cmsg: to's, else the
+// socket's, looked up (one getsockname) only when ECN is set and kept in
+// *cached for the rest of a batch.
+static int cv_path_family(int fd, const cv_sockaddr *to, const cv_dgram_path *path, int *cached) {
+    if (!path->ecn) return AF_INET;
+    if (to && to->len) return ((const struct sockaddr *)to->storage)->sa_family;
+    if (*cached < 0) {
+        struct sockaddr_storage ss;
+        socklen_t len = sizeof ss;
+        *cached = getsockname(fd, (struct sockaddr *)&ss, &len) == 0 ? ss.ss_family : AF_INET;
+    }
+    return *cached;
+}
+
+int cv_udp_path_info(int fd, int on) {
+    // The options of both families: on a dual-stack IPv6 socket, IPv4
+    // datagrams report through the IPv4 ones. Those that don't apply to
+    // this socket fail and are skipped.
+    int v = on ? 1 : 0, ok = 0, err = EINVAL;
+#ifdef IPV6_RECVPKTINFO
+    if (setsockopt(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &v, sizeof v) == 0) ok = 1; else err = errno;
+#endif
+#ifdef IPV6_RECVTCLASS
+    (void)setsockopt(fd, IPPROTO_IPV6, IPV6_RECVTCLASS, &v, sizeof v);
+#endif
+#ifdef IP_PKTINFO
+    if (setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &v, sizeof v) == 0) ok = 1; else err = errno;
+#elif defined(IP_RECVDSTADDR)
+    if (setsockopt(fd, IPPROTO_IP, IP_RECVDSTADDR, &v, sizeof v) == 0) ok = 1; else err = errno;
+#endif
+#ifdef IP_RECVTOS
+    (void)setsockopt(fd, IPPROTO_IP, IP_RECVTOS, &v, sizeof v);
+#endif
+    return ok ? 0 : err;
+}
+
+int cv_udp_dont_fragment(int fd, int on) {
+    int ok = 0, err = EINVAL;
+#if defined(IP_MTU_DISCOVER) && defined(IP_PMTUDISC_DO)
+    int mode = on ? IP_PMTUDISC_DO : IP_PMTUDISC_WANT;
+    if (setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &mode, sizeof mode) == 0) ok = 1; else err = errno;
+#elif defined(IP_DONTFRAG)
+    int v4 = on ? 1 : 0;
+    if (setsockopt(fd, IPPROTO_IP, IP_DONTFRAG, &v4, sizeof v4) == 0) ok = 1; else err = errno;
+#endif
+#if defined(IPV6_MTU_DISCOVER) && defined(IPV6_PMTUDISC_DO)
+    int mode6 = on ? IPV6_PMTUDISC_DO : IPV6_PMTUDISC_WANT;
+    if (setsockopt(fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER, &mode6, sizeof mode6) == 0) ok = 1; else err = errno;
+#elif defined(IPV6_DONTFRAG)
+    int v6 = on ? 1 : 0;
+    if (setsockopt(fd, IPPROTO_IPV6, IPV6_DONTFRAG, &v6, sizeof v6) == 0) ok = 1; else err = errno;
+#endif
+    return ok ? 0 : err;
+}
+
 intptr_t cv_recv_batch(int fd, void *base, intptr_t stride, int count, cv_sockaddr *from,
-                   uint32_t *lens, uint32_t *flags) {
+                   uint32_t *lens, uint32_t *flags, cv_dgram_path *paths) {
 #if defined(__linux__)
     if (count > CV_BATCH_CHUNK) count = CV_BATCH_CHUNK;
     struct mmsghdr hdrs[CV_BATCH_CHUNK];
     struct iovec iov[CV_BATCH_CHUNK];
+    cv_path_control control[paths ? CV_BATCH_CHUNK : 1];
     memset(hdrs, 0, sizeof hdrs[0] * (size_t)count);
     for (int i = 0; i < count; i++) {
         iov[i].iov_base = (char *)base + (size_t)i * (size_t)stride;
@@ -2507,6 +2705,10 @@ intptr_t cv_recv_batch(int fd, void *base, intptr_t stride, int count, cv_sockad
         hdrs[i].msg_hdr.msg_namelen = sizeof from[i].storage;
         hdrs[i].msg_hdr.msg_iov = &iov[i];
         hdrs[i].msg_hdr.msg_iovlen = 1;
+        if (paths) {
+            hdrs[i].msg_hdr.msg_control = control[i].buf;
+            hdrs[i].msg_hdr.msg_controllen = sizeof control[i].buf;
+        }
     }
     int n = recvmmsg(fd, hdrs, (unsigned)count, 0, NULL);
     if (n < 0) return -(long)errno;
@@ -2514,6 +2716,7 @@ intptr_t cv_recv_batch(int fd, void *base, intptr_t stride, int count, cv_sockad
         from[i].len = hdrs[i].msg_hdr.msg_namelen;
         lens[i] = hdrs[i].msg_len;
         flags[i] = (hdrs[i].msg_hdr.msg_flags & MSG_TRUNC) ? CV_DGRAM_TRUNCATED : 0;
+        if (paths) cv_read_path(&hdrs[i].msg_hdr, &paths[i]);
     }
     return n;
 #else
@@ -2521,10 +2724,15 @@ intptr_t cv_recv_batch(int fd, void *base, intptr_t stride, int count, cv_sockad
     for (; got < count; got++) {
         struct iovec v = {(char *)base + (size_t)got * (size_t)stride, (size_t)stride};
         struct msghdr mh = {0};
+        cv_path_control control;
         mh.msg_name = from[got].storage;
         mh.msg_namelen = sizeof from[got].storage;
         mh.msg_iov = &v;
         mh.msg_iovlen = 1;
+        if (paths) {
+            mh.msg_control = control.buf;
+            mh.msg_controllen = sizeof control.buf;
+        }
         ssize_t n = recvmsg(fd, &mh, 0);
         if (n < 0) {
             if (got > 0) break;
@@ -2533,17 +2741,20 @@ intptr_t cv_recv_batch(int fd, void *base, intptr_t stride, int count, cv_sockad
         from[got].len = mh.msg_namelen;
         lens[got] = (uint32_t)n;
         flags[got] = (mh.msg_flags & MSG_TRUNC) ? CV_DGRAM_TRUNCATED : 0;
+        if (paths) cv_read_path(&mh, &paths[got]);
     }
     return got;
 #endif
 }
 
 intptr_t cv_send_batch(int fd, const void *base, intptr_t stride, const uint32_t *lens,
-                   const cv_sockaddr *to, int count) {
+                   const cv_sockaddr *to, int count, const cv_dgram_path *paths) {
+    int family = -1; // the socket's, looked up once if a datagram needs it
 #if defined(__linux__)
     if (count > CV_BATCH_CHUNK) count = CV_BATCH_CHUNK;
     struct mmsghdr hdrs[CV_BATCH_CHUNK];
     struct iovec iov[CV_BATCH_CHUNK];
+    cv_path_control control[paths ? CV_BATCH_CHUNK : 1];
     memset(hdrs, 0, sizeof hdrs[0] * (size_t)count);
     for (int i = 0; i < count; i++) {
         iov[i].iov_base = (char *)base + (size_t)i * (size_t)stride;
@@ -2554,6 +2765,14 @@ intptr_t cv_send_batch(int fd, const void *base, intptr_t stride, const uint32_t
         }
         hdrs[i].msg_hdr.msg_iov = &iov[i];
         hdrs[i].msg_hdr.msg_iovlen = 1;
+        if (paths) {
+            int fam = cv_path_family(fd, to ? &to[i] : NULL, &paths[i], &family);
+            size_t used = cv_put_path(control[i].buf, 0, &paths[i], fam);
+            if (used) {
+                hdrs[i].msg_hdr.msg_control = control[i].buf;
+                hdrs[i].msg_hdr.msg_controllen = used;
+            }
+        }
     }
     int n = sendmmsg(fd, hdrs, (unsigned)count, MSG_NOSIGNAL);
     return n >= 0 ? (long)n : -(long)errno;
@@ -2561,10 +2780,24 @@ intptr_t cv_send_batch(int fd, const void *base, intptr_t stride, const uint32_t
     int sent = 0;
     for (; sent < count; sent++) {
         const char *p = (const char *)base + (size_t)sent * (size_t)stride;
-        ssize_t n = to && to[sent].len
-            ? sendto(fd, p, lens[sent], MSG_NOSIGNAL, (const struct sockaddr *)to[sent].storage,
-                     (socklen_t)to[sent].len)
-            : send(fd, p, lens[sent], MSG_NOSIGNAL);
+        struct iovec v = {(void *)p, lens[sent]};
+        struct msghdr mh = {0};
+        cv_path_control control;
+        if (to && to[sent].len) {
+            mh.msg_name = (void *)to[sent].storage;
+            mh.msg_namelen = (socklen_t)to[sent].len;
+        }
+        mh.msg_iov = &v;
+        mh.msg_iovlen = 1;
+        if (paths) {
+            int fam = cv_path_family(fd, to ? &to[sent] : NULL, &paths[sent], &family);
+            size_t used = cv_put_path(control.buf, 0, &paths[sent], fam);
+            if (used) {
+                mh.msg_control = control.buf;
+                mh.msg_controllen = (socklen_t)used;
+            }
+        }
+        ssize_t n = sendmsg(fd, &mh, MSG_NOSIGNAL);
         if (n < 0) {
             if (sent > 0) break;
             return -(long)errno;
@@ -2574,13 +2807,15 @@ intptr_t cv_send_batch(int fd, const void *base, intptr_t stride, const uint32_t
 #endif
 }
 
-intptr_t cv_send_segments_split(int fd, const void *buf, intptr_t len, int segment, const cv_sockaddr *to) {
+intptr_t cv_send_segments_split(int fd, const void *buf, intptr_t len, int segment, const cv_sockaddr *to,
+                                const cv_dgram_path *path) {
     // The segments already lie back to back, segment bytes apart: send them
     // as a batch over the same memory, one datagram each.
     if (segment <= 0 || len <= segment) segment = len > 0 ? (int)len : 1;
     int have_to = to && to->len;
     uint32_t lens[CV_BATCH_CHUNK];
     cv_sockaddr tos[CV_BATCH_CHUNK];
+    cv_dgram_path paths[path ? CV_BATCH_CHUNK : 1];
     long done = 0;
     do {
         int k = 0;
@@ -2589,8 +2824,10 @@ intptr_t cv_send_segments_split(int fd, const void *buf, intptr_t len, int segme
             lens[k] = (uint32_t)l;
             off += l;
             if (have_to) tos[k] = *to;
+            if (path) paths[k] = *path;
         }
-        long n = cv_send_batch(fd, (const char *)buf + done, segment, lens, have_to ? tos : NULL, k);
+        long n = cv_send_batch(fd, (const char *)buf + done, segment, lens, have_to ? tos : NULL, k,
+                               path ? paths : NULL);
         if (n < 0) return done > 0 ? done : n; // the next call reports the error
         for (long i = 0; i < n; i++) done += lens[i];
         if (n < k) break; // the socket filled up: whole segments sent so far
@@ -2598,10 +2835,11 @@ intptr_t cv_send_segments_split(int fd, const void *buf, intptr_t len, int segme
     return done;
 }
 
-intptr_t cv_send_segments(int fd, const void *buf, intptr_t len, int segment, const cv_sockaddr *to) {
+intptr_t cv_send_segments(int fd, const void *buf, intptr_t len, int segment, const cv_sockaddr *to,
+                          const cv_dgram_path *path) {
 #if defined(__linux__)
     if (segment <= 0 || len <= segment)
-        return cv_send_segments_split(fd, buf, len, segment, to);
+        return cv_send_segments_split(fd, buf, len, segment, to, path);
     // Whether the kernel knows UDP_SEGMENT (4.18+): the same for every
     // socket, so asked once. An older kernel ignores the cmsg and would
     // send one large datagram instead.
@@ -2611,7 +2849,7 @@ intptr_t cv_send_segments(int fd, const void *buf, intptr_t len, int segment, co
         known = cv_udp_gso_supported(fd) ? 1 : -1;
         atomic_store_explicit(&gso, known, memory_order_relaxed);
     }
-    if (known < 0) return cv_send_segments_split(fd, buf, len, segment, to);
+    if (known < 0) return cv_send_segments_split(fd, buf, len, segment, to, path);
 
     struct iovec v = {(void *)buf, (size_t)len};
     struct msghdr mh = {0};
@@ -2622,26 +2860,29 @@ intptr_t cv_send_segments(int fd, const void *buf, intptr_t len, int segment, co
     mh.msg_iov = &v;
     mh.msg_iovlen = 1;
     union {
-        char buf[CMSG_SPACE(sizeof(uint16_t))];
+        char buf[CV_PATH_CMSG_ROOM + CMSG_SPACE(sizeof(uint16_t))];
         struct cmsghdr align;
     } control;
     memset(&control, 0, sizeof control);
-    mh.msg_control = control.buf;
-    mh.msg_controllen = sizeof control.buf;
-    struct cmsghdr *cm = CMSG_FIRSTHDR(&mh);
+    int family = -1;
+    size_t used = path ? cv_put_path(control.buf, 0, path, cv_path_family(fd, to, path, &family)) : 0;
+    struct cmsghdr *cm = (struct cmsghdr *)(control.buf + used);
     cm->cmsg_level = SOL_UDP;
     cm->cmsg_type = UDP_SEGMENT;
     cm->cmsg_len = CMSG_LEN(sizeof(uint16_t));
     uint16_t seg = (uint16_t)segment;
     memcpy(CMSG_DATA(cm), &seg, sizeof seg);
+    used += CMSG_SPACE(sizeof(uint16_t));
+    mh.msg_control = control.buf;
+    mh.msg_controllen = used;
     ssize_t n = sendmsg(fd, &mh, MSG_NOSIGNAL);
     if (n >= 0) return (long)n;
     // EIO: this route can't offload the checksum (IPsec, for one).
     if (errno == EIO || errno == EOPNOTSUPP || errno == ENOPROTOOPT)
-        return cv_send_segments_split(fd, buf, len, segment, to);
+        return cv_send_segments_split(fd, buf, len, segment, to, path);
     return -(long)errno;
 #else
-    return cv_send_segments_split(fd, buf, len, segment, to);
+    return cv_send_segments_split(fd, buf, len, segment, to, path);
 #endif
 }
 

@@ -1243,8 +1243,24 @@ intptr_t cv_sendv(int fd, const cv_iovec *iov, int count) {
     return (intptr_t)sent;
 }
 
+// No per-datagram path on Windows yet (that needs WSARecvMsg): local
+// addresses read as unknown and a send's path is ignored.
+int cv_udp_path_info(int fd, int on) {
+    (void)fd;
+    (void)on;
+    return EOPNOTSUPP;
+}
+
+int cv_udp_dont_fragment(int fd, int on) {
+    DWORD v = on ? 1 : 0;
+    int ok = 0;
+    if (setsockopt(as_socket(fd), IPPROTO_IP, IP_DONTFRAGMENT, (const char *)&v, sizeof v) == 0) ok = 1;
+    if (setsockopt(as_socket(fd), IPPROTO_IPV6, IPV6_DONTFRAG, (const char *)&v, sizeof v) == 0) ok = 1;
+    return ok ? 0 : map_error(WSAGetLastError());
+}
+
 intptr_t cv_recv_batch(int fd, void *base, intptr_t stride, int count, cv_sockaddr *from,
-                   uint32_t *lens, uint32_t *flags) {
+                   uint32_t *lens, uint32_t *flags, cv_dgram_path *paths) {
     int got = 0;
     for (; got < count; got++) {
         char *p = (char *)base + (size_t)got * (size_t)stride;
@@ -1263,12 +1279,17 @@ intptr_t cv_recv_batch(int fd, void *base, intptr_t stride, int count, cv_sockad
         }
         from[got].len = (uint32_t)alen;
         lens[got] = (uint32_t)n;
+        if (paths) {
+            paths[got].local.len = 0;
+            paths[got].ecn = 0;
+        }
     }
     return got;
 }
 
 intptr_t cv_send_batch(int fd, const void *base, intptr_t stride, const uint32_t *lens,
-                   const cv_sockaddr *to, int count) {
+                   const cv_sockaddr *to, int count, const cv_dgram_path *paths) {
+    (void)paths;
     int sent = 0;
     for (; sent < count; sent++) {
         const char *p = (const char *)base + (size_t)sent * (size_t)stride;
@@ -1284,7 +1305,9 @@ intptr_t cv_send_batch(int fd, const void *base, intptr_t stride, const uint32_t
     return sent;
 }
 
-intptr_t cv_send_segments_split(int fd, const void *buf, intptr_t len, int segment, const cv_sockaddr *to) {
+intptr_t cv_send_segments_split(int fd, const void *buf, intptr_t len, int segment, const cv_sockaddr *to,
+                                const cv_dgram_path *path) {
+    (void)path;
     if (segment <= 0 || len <= segment) segment = len > 0 ? (int)len : 1;
     int have_to = to && to->len;
     enum { CHUNK = 64 };
@@ -1299,7 +1322,7 @@ intptr_t cv_send_segments_split(int fd, const void *buf, intptr_t len, int segme
             off += l;
             if (have_to) tos[k] = *to;
         }
-        intptr_t n = cv_send_batch(fd, (const char *)buf + done, segment, lens, have_to ? tos : NULL, k);
+        intptr_t n = cv_send_batch(fd, (const char *)buf + done, segment, lens, have_to ? tos : NULL, k, NULL);
         if (n < 0) return done > 0 ? done : n;
         for (intptr_t i = 0; i < n; i++) done += lens[i];
         if (n < k) break;
@@ -1307,8 +1330,9 @@ intptr_t cv_send_segments_split(int fd, const void *buf, intptr_t len, int segme
     return done;
 }
 
-intptr_t cv_send_segments(int fd, const void *buf, intptr_t len, int segment, const cv_sockaddr *to) {
-    return cv_send_segments_split(fd, buf, len, segment, to);
+intptr_t cv_send_segments(int fd, const void *buf, intptr_t len, int segment, const cv_sockaddr *to,
+                          const cv_dgram_path *path) {
+    return cv_send_segments_split(fd, buf, len, segment, to, path);
 }
 
 int cv_udp_gso_supported(int fd) {

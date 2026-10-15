@@ -68,7 +68,7 @@ private func receiveAll(_ socket: borrowing UDPSocket, count: Int) async throws(
             let sender = try UDPSocket.bind(host: "127.0.0.1", port: 0)
             var to = try server.localAddress.raw
             let sent = payload.withUnsafeBytes { p in
-                cv_send_segments_split(sender.reg.fd, p.baseAddress, p.count, 10, &to)
+                cv_send_segments_split(sender.reg.fd, p.baseAddress, p.count, 10, &to, nil)
             }
             #expect(sent == payload.count)
             return try await receiveAll(server, count: 131)

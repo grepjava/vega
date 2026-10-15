@@ -305,6 +305,54 @@ private func drain(_ conn: borrowing TCPStream) async -> [UInt8] {
         }
     }
 
+    #if !os(Windows) // no path info there yet
+    /// A server bound to the wildcard address learns which local address
+    /// each datagram reached, answers from it with ECN bits set, and the
+    /// client sees them, in batches and in segmented sends alike.
+    @Test func pathInfoRoundTrip() throws {
+        let rt = Runtime(workers: 1)
+        defer { rt.shutdown() }
+        let (local, replies) = try rt.block { () async throws(IOError) -> (String?, [(String, Int, UInt8)]) in
+            let server = try UDPSocket.bind(host: "0.0.0.0", port: 0)
+            try server.enablePathInfo()
+            try server.setDontFragment()
+            let port = try server.localAddress.port!
+            let client = try UDPSocket.bind(host: "127.0.0.1", port: 0)
+            try client.enablePathInfo()
+            try await client.send(ioBuffer([1, 2, 3]), to: try SocketAddress(host: "127.0.0.1", port: port))
+
+            var batch = DatagramBatch(capacity: 4, slotSize: 64)
+            _ = try await server.receive(&batch)
+            let arrivedOn = batch.localAddress(at: 0)
+            let peer = batch.address(at: 0)!
+            #expect(batch.ecn(at: 0) == 0)
+
+            var out = DatagramBatch(capacity: 4, slotSize: 64)
+            out.append(batch[0], to: peer, from: arrivedOn, ecn: 2)
+            try await server.send(out)
+            let three = ioBuffer([UInt8](repeating: 9, count: 30))
+            try await server.send(segments: UnsafeRawBufferPointer(start: three.base, count: three.count),
+                                  segmentSize: 10, to: peer, from: arrivedOn, ecn: 1)
+
+            var replies: [(String, Int, UInt8)] = []
+            var back = DatagramBatch(capacity: 8, slotSize: 64)
+            while replies.count < 4 {
+                let n = try await client.receive(&back)
+                for i in 0..<n {
+                    replies.append((back.address(at: i)!.host, back.address(at: i)!.port!, back.ecn(at: i)))
+                }
+            }
+            #expect(replies.allSatisfy { $0.1 == port })
+            return (arrivedOn?.host, replies)
+        }
+        #expect(local == "127.0.0.1")
+        #expect(replies.map(\.0) == ["127.0.0.1", "127.0.0.1", "127.0.0.1", "127.0.0.1"])
+        #if os(Linux)
+        #expect(replies.map(\.2) == [2, 1, 1, 1])
+        #endif
+    }
+    #endif
+
     /// Multicast to ourselves over loopback (skipped where the host has no
     /// multicast route).
     @Test func multicastLoopback() throws {
