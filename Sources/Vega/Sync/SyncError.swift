@@ -30,4 +30,7 @@ public enum AcquireError: Error, Sendable, Hashable {
     /// The waiting task was cancelled. Permits it had been handed while
     /// queued went back to the semaphore.
     case cancelled
+    /// `acquire(_:timeout:)` waited its whole timeout. Permits it had been
+    /// handed while queued went back to the semaphore.
+    case timedOut
 }

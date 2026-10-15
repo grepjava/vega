@@ -113,6 +113,78 @@ struct Tracked: ~Copyable, Sendable {
         #expect(sem.availablePermits == 0)
     }
 
+    /// A timed acquire gives up at its timeout, and what it had been handed
+    /// while queued goes back.
+    @Test func timedAcquireTimesOutAndHandsBackWhatItWasGiven() {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let sem = Semaphore(permits: 1)
+        let (outcome, waited) = rt.block { () async -> (AcquireError?, Duration) in
+            let start = ContinuousClock.now
+            do throws(AcquireError) {
+                try await sem.acquire(3, timeout: .milliseconds(50))
+                return (nil, .zero)
+            } catch {
+                return (error, ContinuousClock.now - start)
+            }
+        }
+        #expect(outcome == .timedOut)
+        #expect(waited >= .milliseconds(40))
+        #expect(sem.availablePermits == 1)
+        #expect(sem.tryAcquire())
+    }
+
+    /// Permits released before the timeout end the wait with them.
+    @Test func timedAcquireTakesPermitsReleasedInTime() {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let sem = Semaphore(permits: 0)
+        let outcome = rt.block { () async -> AcquireError? in
+            let waiter = rt.spawn { () async -> AcquireError? in
+                do throws(AcquireError) { try await sem.acquire(timeout: .seconds(5)); return nil }
+                catch { return error }
+            }
+            try? await Runtime.sleep(for: .milliseconds(10))
+            sem.release()
+            return await waiter.value
+        }
+        #expect(outcome == nil)
+        #expect(sem.availablePermits == 0)
+    }
+
+    /// Cancelled while it waits, a timed acquire reports the cancellation,
+    /// not a timeout.
+    @Test func timedAcquireReportsCancellation() {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let sem = Semaphore(permits: 0)
+        let outcome = rt.block { () async -> AcquireError? in
+            let waiter = rt.spawn { () async -> AcquireError? in
+                do throws(AcquireError) { try await sem.acquire(timeout: .seconds(5)); return nil }
+                catch { return error }
+            }
+            try? await Runtime.sleep(for: .milliseconds(10))
+            waiter.cancel()
+            return await waiter.value
+        }
+        #expect(outcome == .cancelled)
+        sem.release()
+        #expect(sem.tryAcquire())
+    }
+
+    /// Off Vega's own tasks the timeout still holds.
+    @Test func timedAcquireTimesOutInATaskVegaDidNotStart() async {
+        let sem = Semaphore(permits: 0)
+        do throws(AcquireError) {
+            try await sem.acquire(timeout: .milliseconds(20))
+            Issue.record("acquired")
+        } catch {
+            #expect(error == .timedOut)
+        }
+        sem.release()
+        #expect(sem.tryAcquire())
+    }
+
     @Test func closeFailsWaiters() {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }

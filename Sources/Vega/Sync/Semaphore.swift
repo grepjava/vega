@@ -79,13 +79,7 @@ public final class Semaphore: @unchecked Sendable {
                 if let now { c.resume(returning: now) }
             }
         } onCancel: {
-            let waiter = lock.withLock { () -> Waiter? in
-                guard let w = waiters.pointer.pointee.remove(where: { $0.id == id }) else { return nil }
-                // Hand on what it was given, or just clear the waiting bit.
-                releaseLocked(w.requested - w.remaining)
-                return w
-            }
-            waiter?.continuation.resume(returning: 2)
+            withdraw(id)
         }
         switch code {
         case 0:
@@ -94,6 +88,71 @@ public final class Semaphore: @unchecked Sendable {
         case 1: throw .closed
         default: throw .cancelled
         }
+    }
+
+    /// As `acquire`, giving up after `timeout` with `.timedOut`.
+    ///
+    /// The wait counts as I/O: no child task races a timer, as
+    /// `Runtime.timeout` would run, but the deadline and the task's
+    /// cancellation interrupt the queued waiter directly. Permits it had
+    /// been handed while queued go back to the semaphore.
+    public func acquire(_ n: Int = 1, timeout: Duration) async throws(AcquireError) {
+        if tryAcquire(n) {
+            await Runtime.consumeBudget()
+            return
+        }
+        if isClosed { throw .closed }
+        let target = Withdrawal(self, currentTaskID())
+        let code = await Runtime.withIODeadline(timeout) { () async -> UInt8 in
+            let code = await withIOInterrupt { arm in
+                await withUnsafeContinuation { (c: UnsafeContinuation<UInt8, Never>) in
+                    let now = lock.withLock { () -> UInt8? in enqueue(target.id, n, c, cancellable: true) }
+                    if let now {
+                        c.resume(returning: now)
+                    } else if !arm(.object(Unmanaged.passUnretained(target))) {
+                        // Cancelled or past the deadline already.
+                        target.interrupt()
+                    }
+                }
+            }
+            // Withdrawn: by the deadline (3) or by cancellation (2). Asked
+            // here, while the scope is still the task's.
+            return code == 2 && IOError.interrupted == .timedOut ? 3 : code
+        }
+        withExtendedLifetime(target) {}
+        switch code {
+        case 0:
+            handedOver()
+            return
+        case 1: throw .closed
+        case 3: throw .timedOut
+        default: throw .cancelled
+        }
+    }
+
+    /// What a deadline or cancellation does to a queued `acquire(_:timeout:)`.
+    private final class Withdrawal: IOInterruptTarget, @unchecked Sendable {
+        unowned let semaphore: Semaphore
+        let id: UInt
+
+        init(_ semaphore: Semaphore, _ id: UInt) {
+            self.semaphore = semaphore
+            self.id = id
+        }
+
+        override func interrupt() { semaphore.withdraw(id) }
+    }
+
+    /// Take waiter `id` out of the queue, if it is still there, and resume
+    /// it as cancelled (2), handing on what it was given.
+    private func withdraw(_ id: UInt) {
+        let waiter = lock.withLock { () -> Waiter? in
+            guard let w = waiters.pointer.pointee.remove(where: { $0.id == id }) else { return nil }
+            // Hand on what it was given, or just clear the waiting bit.
+            releaseLocked(w.requested - w.remaining)
+            return w
+        }
+        waiter?.continuation.resume(returning: 2)
     }
 
     /// After a wait that ended with the permits: take the lock the releaser
