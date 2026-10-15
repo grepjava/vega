@@ -88,8 +88,9 @@ import Testing
 
 #if os(Linux) || os(macOS)
 /// `shards` 0: the sharded body runs here, with threads already running,
-/// and its listeners work as in a shard.
-@Suite struct InProcessShardTests {
+/// and its listeners work as in a shard. One at a time: each maps its shared
+/// regions into the process-wide table a shard reads them from.
+@Suite(.serialized) struct InProcessShardTests {
     @Test func runsTheBodyOnceInThisProcess() throws {
         var options = ShardOptions(shards: 0, workersPerShard: 2)
         options.listeners = [.tcp(host: "127.0.0.1", port: 0)]
@@ -160,6 +161,38 @@ import Testing
             }) ?? []
         }
         #expect(replies == ["unix", "unix"])
+    }
+
+    @Test func aUnixListenerServesAsATCPListener() throws {
+        let path = "/tmp/vega-shard-tcp-\(getpid()).sock"
+        defer { unlink(path) }
+        var options = ShardOptions(shards: 0, workersPerShard: 2)
+        options.listeners = [.unix(path: path)]
+        var reply = ""
+        Runtime.runInProcess(options) { shard in
+            reply = (try? shard.runtime.block { () async throws(IOError) -> String in
+                // TCPServer, as a server written for TCP serves it.
+                let server = try TCPServer.serve(try shard.listener(0)) { stream in
+                    var out = IOBuffer(capacity: 8)
+                    out.append("tcp")
+                    try? await stream.write(out)
+                }
+                let conn = try await UnixStream.connect(path: path)
+                var buf = IOBuffer(capacity: 8)
+                while try await conn.read(into: &buf) > 0 {}
+                await server.shutdown(gracePeriod: .seconds(1))
+                return buf.string
+            }) ?? ""
+        }
+        #expect(reply == "tcp")
+    }
+
+    @Test func shardsHaveTheBlockingPoolTheyAreGiven() {
+        var options = ShardOptions(shards: 0, workersPerShard: 1)
+        options.blockingThreads = 3
+        var threads = 0
+        Runtime.runInProcess(options) { shard in threads = shard.runtime.scheduler.blocking.maxThreads }
+        #expect(threads == 3)
     }
 
     @Test func sharedRegionsAreZeroedAndSharedWithChildren() {

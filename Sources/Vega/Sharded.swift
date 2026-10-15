@@ -28,10 +28,15 @@ public struct Shard: Sendable {
     /// runtime: the supervisor's shared socket, or one bound here with
     /// `reusePort` (see `ShardListenerMode`). Each call gives a new one, for
     /// several accept loops. Call from a task on the shard's runtime.
+    ///
+    /// A Unix listener is given as a `TCPListener` too, so a server written
+    /// for TCP -- `TCPServer`, and everything it hands connections to --
+    /// serves it unchanged: its connections read, write and close as TCP
+    /// ones do, have no TCP options to set, and name no peer address but the
+    /// socket's. `unixListener(_:)` gives it as itself.
     public func listener(_ index: Int = 0) throws(IOError) -> TCPListener {
         precondition(listeners.indices.contains(index), "no ShardOptions.listeners[\(index)]")
         let l = listeners[index]
-        precondition(l.path == nil, "ShardOptions.listeners[\(index)] is a Unix listener: take it with unixListener")
         let driver = try IODriver.current()
         guard l.shared >= 0 else {
             return try TCPListener.bind(host: l.host, port: l.port, backlog: l.backlog, reusePort: true)
@@ -255,6 +260,8 @@ public struct ShardOptions: Sendable {
     public var workersPerShard: Int?
     /// Pin each shard's workers to its CPUs, so shards don't share cores.
     public var pinThreads = true
+    /// Most threads each shard's `Runtime.blocking` runs at once.
+    public var blockingThreads = 512
     /// Start a shard again when it crashes (dies by a signal, or exits
     /// non-zero). A shard that exits 0 has finished and isn't restarted.
     public var restartCrashed = true
@@ -396,7 +403,8 @@ extension Runtime {
         local.listenerMode = .shared
         let listeners = prepareListeners(local)
         SharedRegions.prepare(options.sharedRegions)
-        let rt = Runtime(scheduler: Scheduler(workers: max(workers, 1), name: "\(options.name)0", pin: false))
+        let rt = Runtime(scheduler: Scheduler(workers: max(workers, 1), name: "\(options.name)0", pin: false,
+                                              blockingThreads: max(options.blockingThreads, 1)))
         body(Shard(index: 0, count: 1, cpus: cpus, runtime: rt, listeners: listeners))
         rt.shutdown()
         for l in listeners where l.shared >= 0 { close(l.shared) }
@@ -526,7 +534,8 @@ private struct Supervisor {
                          listeners: [PreparedListener], body: (Shard) -> Void) -> Never {
         let workers = options.workersPerShard ?? cpus.count
         let rt = Runtime(scheduler: Scheduler(workers: max(workers, 1), name: "\(options.name)\(i)",
-                                              pin: options.pinThreads, cpus: cpus))
+                                              pin: options.pinThreads, cpus: cpus,
+                                              blockingThreads: max(options.blockingThreads, 1)))
         body(Shard(index: i, count: count, cpus: cpus, runtime: rt, listeners: listeners))
         rt.shutdown()
         exit(0)
