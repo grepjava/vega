@@ -234,7 +234,7 @@ public enum ShardEvent: Sendable, Equatable {
     /// A crashed shard starts again after `after` (backing off while it
     /// keeps crashing at start).
     case restarting(shard: Int, after: Duration)
-    /// SIGTERM or SIGINT: the shards are told to stop.
+    /// SIGTERM, SIGINT or SIGQUIT: the shards are told to stop.
     case stopping(signal: Int32)
     /// SIGHUP: shards restart one at a time.
     case reloading
@@ -258,8 +258,16 @@ public struct ShardOptions: Sendable {
     /// Start a shard again when it crashes (dies by a signal, or exits
     /// non-zero). A shard that exits 0 has finished and isn't restarted.
     public var restartCrashed = true
-    /// After SIGTERM or SIGINT, how long shards get to finish before
-    /// SIGKILL. A second SIGTERM or SIGINT doesn't wait.
+    /// After SIGTERM, SIGINT or SIGQUIT, how long shards get to finish
+    /// before SIGKILL.
+    ///
+    /// The supervisor passes SIGTERM on as SIGTERM, and SIGINT or SIGQUIT
+    /// on as SIGINT, so a shard can tell an orderly stop, which it may
+    /// put off for a while (to fail a load balancer's health check
+    /// first, say), from one that's wanted now. SIGINT or SIGQUIT after
+    /// SIGTERM is passed on too; the same signal twice doesn't wait, and
+    /// the shards are killed. A rolling restart (SIGHUP) stops each shard
+    /// with SIGINT: its replacement is about to serve.
     public var shutdownGracePeriod: Duration = .seconds(30)
     /// Listeners the shards serve, set up by the supervisor before the
     /// first shard starts; a shard takes each with `Shard.listener(_:)`.
@@ -323,8 +331,9 @@ extension Runtime {
     /// the call must be deterministic and free of side effects. Events and
     /// restarts are the same in both modes. The calling process becomes the
     /// supervisor and never runs `body`: it starts the shards, restarts the
-    /// ones that crash, passes SIGTERM or SIGINT on to them (then SIGKILL
-    /// after `shutdownGracePeriod`), restarts them one by one on SIGHUP, and
+    /// ones that crash, passes SIGTERM, SIGINT or SIGQUIT on to them (then
+    /// SIGKILL after `shutdownGracePeriod`, which says how), restarts them
+    /// one by one on SIGHUP, and
     /// exits when they're all gone: 0 after a signal or when every shard
     /// finished cleanly, 1 when one crashed and isn't restarted.
     ///
@@ -451,7 +460,9 @@ private struct Supervisor {
     var quickCrashes: [Int]
     /// Shards waiting to restart, and when (cv_now_ns).
     var pending: [Int: UInt64] = [:]
-    var stopping = false
+    /// What the shards were told to stop with: SIGTERM, or SIGINT.
+    var stoppedWith: Int32?
+    var stopping: Bool { stoppedWith != nil }
     var killAt: UInt64?
     var crashed = false
     /// Rolling restart (SIGHUP): the shard being replaced, and what's left.
@@ -561,15 +572,25 @@ private struct Supervisor {
             reloadQueue = Array(layout.indices)
             nextReload()
         default:
-            if stopping {
-                killAll() // asked twice: don't wait
+            // SIGTERM is passed on as it is; SIGINT and SIGQUIT as SIGINT,
+            // which a shard takes as "now".
+            let pass = sig == SIGTERM ? SIGTERM : SIGINT
+            if let was = stoppedWith {
+                if pass == was {
+                    killAll() // asked twice: don't wait
+                    return
+                }
+                // SIGTERM, then a stop now: the shards are told, and the
+                // grace period runs on.
+                stoppedWith = pass
+                for pid in running.keys { kill(pid, pass) }
                 return
             }
-            stopping = true
+            stoppedWith = pass
             pending.removeAll()
             reloading = nil
             options.onEvent?(.stopping(signal: sig))
-            for pid in running.keys { kill(pid, SIGTERM) }
+            for pid in running.keys { kill(pid, pass) }
             killAt = cv_now_ns() &+ UInt64(Scheduler.nanoseconds(options.shutdownGracePeriod))
         }
     }
@@ -580,7 +601,7 @@ private struct Supervisor {
             let i = reloadQueue.removeFirst()
             if let pid = pids[i] {
                 reloading = i
-                kill(pid, SIGTERM)
+                kill(pid, SIGINT)
                 return
             }
         }

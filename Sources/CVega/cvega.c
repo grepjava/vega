@@ -1797,6 +1797,7 @@ static void sup_set(sigset_t *set) {
     sigaddset(set, SIGCHLD);
     sigaddset(set, SIGTERM);
     sigaddset(set, SIGINT);
+    sigaddset(set, SIGQUIT);
     sigaddset(set, SIGHUP);
 }
 
@@ -1807,14 +1808,15 @@ int cv_supervisor_init(void) {
 #if defined(__APPLE__)
     sup_kq = kqueue();
     if (sup_kq < 0) return errno;
-    struct kevent ev[4];
-    int sigs[4] = {SIGCHLD, SIGTERM, SIGINT, SIGHUP};
-    for (int i = 0; i < 4; i++) EV_SET(&ev[i], sigs[i], EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
-    if (kevent(sup_kq, ev, 4, NULL, 0, NULL) < 0) return errno;
+    struct kevent ev[5];
+    int sigs[5] = {SIGCHLD, SIGTERM, SIGINT, SIGQUIT, SIGHUP};
+    for (int i = 0; i < 5; i++) EV_SET(&ev[i], sigs[i], EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
+    if (kevent(sup_kq, ev, 5, NULL, 0, NULL) < 0) return errno;
     // Ignored, not blocked: kqueue still records them. SIGCHLD stays at its
     // default (ignoring it would reap children for us).
     signal(SIGTERM, SIG_IGN);
     signal(SIGINT, SIG_IGN);
+    signal(SIGQUIT, SIG_IGN);
     signal(SIGHUP, SIG_IGN);
     sigemptyset(&set);
 #endif
@@ -1866,6 +1868,7 @@ int cv_supervisor_fork(void) {
     // The shard: default dispositions, the mask from before the supervisor.
     signal(SIGTERM, SIG_DFL);
     signal(SIGINT, SIG_DFL);
+    signal(SIGQUIT, SIG_DFL);
     signal(SIGHUP, SIG_DFL);
     pthread_sigmask(SIG_SETMASK, &sup_old_mask, NULL);
 #if defined(__linux__)

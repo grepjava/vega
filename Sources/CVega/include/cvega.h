@@ -376,7 +376,8 @@ int cv_pidfd_signal(int pidfd, int sig);
 /// (nohang), or -errno.
 int cv_waitpid(int pid, int nohang, int *status);
 
-/// The shard supervisor's signals (SIGCHLD, SIGTERM, SIGINT, SIGHUP): from
+/// The shard supervisor's signals (SIGCHLD, SIGTERM, SIGINT, SIGQUIT,
+/// SIGHUP): from
 /// now on they're taken by cv_supervisor_next, not delivered. Call before
 /// any thread starts. 0 or an errno value.
 int cv_supervisor_init(void);
@@ -385,7 +386,7 @@ int cv_supervisor_init(void);
 /// The pid, 0 in the child, or -errno.
 int cv_supervisor_fork(void);
 /// Wait up to timeout_ns (< 0: forever): 1 when a child ended (*pid,
-/// *status as waitpid gives it), 2 for SIGTERM, SIGINT or SIGHUP (*status
+/// *status as waitpid gives it), 2 for SIGTERM, SIGINT, SIGQUIT or SIGHUP (*status
 /// = the signal), 0 on timeout, or -errno.
 int cv_supervisor_next(int64_t timeout_ns, int *pid, int *status);
 /// Exec mode: start a shard as a new run of `path`, with listener fds[i]
