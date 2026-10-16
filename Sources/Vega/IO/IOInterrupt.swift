@@ -159,20 +159,25 @@ final class IOTaskHook: IOInterruptSlot, @unchecked Sendable {
 
     /// The running task's own hook, if it has one.
     @inline(__always) static var active: IOTaskHook? {
+        activeUnmanaged?.takeUnretainedValue()
+    }
+
+    /// `active`, unretained: the task-local holds the hook for the task's
+    /// life, so the task's own I/O needs no reference of its own.
+    @inline(__always) static var activeUnmanaged: Unmanaged<IOTaskHook>? {
         if let worker = Worker.current {
             return worker._withUnsafeGuaranteedRef { active(key: $0.ioHookKey) }
         }
         return active(key: UnsafeRawPointer(Unmanaged.passUnretained(current).toOpaque()))
     }
 
-    /// `active`, given the task-local's key: read straight from the runtime
-    /// (TaskLocal.get is generic, and copies the value through its type's
-    /// witnesses).
-    @inline(__always) static func active(key: UnsafeRawPointer) -> IOTaskHook? {
+    /// `activeUnmanaged`, given the task-local's key: read straight from the
+    /// runtime (TaskLocal.get is generic, and copies the value through its
+    /// type's witnesses).
+    @inline(__always) static func active(key: UnsafeRawPointer) -> Unmanaged<IOTaskHook>? {
         guard let bound = cv_task_local_get(key),
               let ref = bound.assumingMemoryBound(to: Ref?.self).pointee else { return nil }
-        let hook = ref.hook.takeUnretainedValue()
-        return hook.owner == cv_task_current() ? hook : nil
+        return ref.hook._withUnsafeGuaranteedRef { $0.owner == cv_task_current() } ? ref.hook : nil
     }
 
     /// The task's innermost `withIODeadline` deadline, unretained (its scope
@@ -182,16 +187,44 @@ final class IOTaskHook: IOInterruptSlot, @unchecked Sendable {
     private let deadlineBits = Atomic<UInt>(0)
 
     var deadline: IODeadline? {
+        deadlineUnmanaged?.takeUnretainedValue()
+    }
+
+    /// `deadline`, unretained, as it is kept.
+    var deadlineUnmanaged: Unmanaged<IODeadline>? {
         get {
             let bits = deadlineBits.load(ordering: .relaxed)
             guard bits != 0 else { return nil }
             return Unmanaged<IODeadline>.fromOpaque(UnsafeRawPointer(bitPattern: bits).unsafelyUnwrapped)
-                .takeUnretainedValue()
         }
         set {
-            deadlineBits.store(newValue.map { UInt(bitPattern: Unmanaged.passUnretained($0).toOpaque()) } ?? 0,
-                               ordering: .relaxed)
+            deadlineBits.store(newValue.map { UInt(bitPattern: $0.toOpaque()) } ?? 0, ordering: .relaxed)
         }
+    }
+
+    /// A deadline a scope of the task gave back unfired, retained, for its
+    /// next scope (`IODeadlineScope`). Only the task itself touches it, as
+    /// `deadline`.
+    private let spareBits = Atomic<UInt>(0)
+
+    deinit {
+        let bits = spareBits.load(ordering: .relaxed)
+        if bits != 0 { Unmanaged<IODeadline>.fromOpaque(UnsafeRawPointer(bitPattern: bits).unsafelyUnwrapped).release() }
+    }
+
+    /// The spare, and its retain with it; nil if there is none.
+    @inline(__always) func takeSpareDeadline() -> Unmanaged<IODeadline>? {
+        let bits = spareBits.load(ordering: .relaxed)
+        guard bits != 0 else { return nil }
+        spareBits.store(0, ordering: .relaxed)
+        return Unmanaged<IODeadline>.fromOpaque(UnsafeRawPointer(bitPattern: bits).unsafelyUnwrapped)
+    }
+
+    /// Keeps `deadline` as the spare, with the retain the caller hands over.
+    @inline(__always) func giveSpareDeadline(_ deadline: Unmanaged<IODeadline>) {
+        let old = spareBits.load(ordering: .relaxed)
+        spareBits.store(UInt(bitPattern: deadline.toOpaque()), ordering: .relaxed)
+        if old != 0 { Unmanaged<IODeadline>.fromOpaque(UnsafeRawPointer(bitPattern: old).unsafelyUnwrapped).release() }
     }
 
     /// The task's `withWriteStallTimeout` limit in nanoseconds, 0 for none.

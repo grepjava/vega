@@ -36,22 +36,27 @@ extension Runtime {
 /// and the one it replaced.
 @usableFromInline
 struct WriteStallScope {
-    private let hook: IOTaskHook?
+    /// The task's I/O hook, unretained: its task-local holds it.
+    private let hook: Unmanaged<IOTaskHook>?
     private let previous: UInt64
     private let nanos: UInt64
     /// The limit is on the task's hook: `bind` is not needed.
     @usableFromInline let onHook: Bool
 
     @usableFromInline init(_ limit: Duration) {
-        nanos = UInt64(clamping: max(1, Scheduler.nanoseconds(limit)))
-        hook = IOTaskHook.active
-        previous = hook?.writeStall ?? 0
-        hook?.writeStall = nanos
+        let nanos = UInt64(clamping: max(1, Scheduler.nanoseconds(limit)))
+        self.nanos = nanos
+        let hook = IOTaskHook.activeUnmanaged
+        self.hook = hook
+        previous = hook?._withUnsafeGuaranteedRef { h in
+            defer { h.writeStall = nanos }
+            return h.writeStall
+        } ?? 0
         onHook = hook != nil
     }
 
     @usableFromInline func end() {
-        hook?.writeStall = previous
+        hook?._withUnsafeGuaranteedRef { $0.writeStall = previous }
     }
 
     /// `body` with the limit bound as a task-local, for a task without a

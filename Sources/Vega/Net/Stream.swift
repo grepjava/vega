@@ -35,8 +35,10 @@ extension IORegistration {
     @usableFromInline
     func ringRead(_ buffer: inout IOBuffer) -> RingRead? {
         #if os(Linux)
-        guard buffer.spareCapacity > 0, let ring = URing.current, let hook = IOTaskHook.active else { return nil }
-        return RingRead(ring: ring, hook: .passUnretained(hook), deadline: hook.deadline.map { .passUnretained($0) },
+        guard buffer.spareCapacity > 0, let ring = URing.current, let hook = IOTaskHook.activeUnmanaged else {
+            return nil
+        }
+        return RingRead(ring: ring, hook: hook, deadline: hook._withUnsafeGuaranteedRef { $0.deadlineUnmanaged },
                         base: buffer.base + buffer.count, length: buffer.spareCapacity)
         #else
         return nil
