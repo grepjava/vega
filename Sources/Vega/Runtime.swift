@@ -241,6 +241,19 @@ public final class Runtime: Sendable {
     /// The index of the Vega worker running the caller, or nil off-runtime.
     public static var currentWorker: Int? { Worker.current?._withUnsafeGuaranteedRef { $0.index } }
 
+    /// The physical core the calling thread is running on now, numbered from
+    /// 0 up: the hardware threads of one core (hyperthreads) give the same
+    /// number, on whichever runtime. nil where the platform does not say
+    /// (only Linux does). A pinned worker's answer never changes; a thread
+    /// not pinned may have moved by the time it acts on it.
+    public static var currentCore: Int? { Scheduler.core(of: Int(cv_current_cpu())) }
+
+    /// How many physical cores this runtime's workers run on: those they are
+    /// pinned to, or else those of every CPU the process may use. 0 where
+    /// `currentCore` is nil. Two workers on hyperthreads of one core share
+    /// it, and work that holds both for long runs at about half speed.
+    public var coreCount: Int { scheduler.coreCount }
+
     /// Which job the caller is running in: the worker, and how many jobs it
     /// had finished when this one started. Equal stamps on either side of a
     /// stretch of code mean it ran without suspending, so the time it took

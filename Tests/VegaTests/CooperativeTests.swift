@@ -40,6 +40,62 @@ final class Counter: Sendable {
 
     @Test func yieldOffRuntimeFallsBack() async {
         await Runtime.yield()
+        await Runtime.yieldToAnyWorker()
+    }
+
+    @Test func yieldToAnyWorkerLetsOthersRun() {
+        let rt = Runtime(workers: 1)
+        defer { rt.shutdown() }
+        let log = Log<String>()
+        rt.block { () async -> Void in
+            await withTaskGroup(of: Void.self) { g in
+                for name in ["a", "b"] {
+                    g.addTask(executorPreference: rt.executor) {
+                        for i in 0..<3 {
+                            log.append("\(name)\(i)")
+                            await Runtime.yieldToAnyWorker()
+                        }
+                    }
+                }
+            }
+        }
+        let all = log.all
+        #expect(all.count == 6)
+        for i in 1..<all.count { #expect(all[i].first != all[i - 1].first) }
+    }
+
+    @Test func yieldToAnyWorkerMovesOffABusyWorker() {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let released = Flag()
+        let (before, after) = rt.block { () async -> (Int?, Int?) in
+            await Task(executorPreference: rt.executor) { () async -> (Int?, Int?) in
+                let before = Runtime.currentWorker
+                // Scheduled here, it runs on this worker next, and holds it
+                // until the task below runs somewhere else.
+                Task(executorPreference: rt.executor) {
+                    let deadline = ContinuousClock.now + .seconds(5)
+                    while !released.isSet && ContinuousClock.now < deadline { spin(microseconds: 50) }
+                }
+                await Runtime.yieldToAnyWorker()
+                released.set()
+                return (before, Runtime.currentWorker)
+            }.value
+        }
+        #expect(before != nil && after != nil && before != after)
+    }
+
+    @Test func coresAreKnownOnLinux() {
+        let rt = Runtime(workers: 2, pinThreads: true)
+        defer { rt.shutdown() }
+        let core = rt.block { () async -> Int? in Runtime.currentCore }
+        #if os(Linux)
+        #expect(core != nil)
+        #expect(rt.coreCount >= 1 && rt.coreCount <= 2)
+        #else
+        #expect(core == nil)
+        #expect(rt.coreCount == 0)
+        #endif
     }
 
     /// Logs when `Runtime.afterJob` runs it; asks once more if told to.

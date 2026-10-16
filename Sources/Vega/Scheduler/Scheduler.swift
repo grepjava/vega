@@ -57,6 +57,8 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     let slowPollNanos = Atomic<UInt64>(UInt64.max)
     /// When the runtime started (cv_now_ns), for metrics.
     let startedAt = cv_now_ns()
+    /// How many physical cores the workers run on (`Runtime.coreCount`).
+    let coreCount: Int
 
     /// Written fields below, away from the read-mostly ones above.
     private let writePad = Pad128()
@@ -81,6 +83,16 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
         return Array(0..<Int(cv_cpu_count()))
     }
 
+    /// The physical core of `cpu`, as `Runtime.currentCore` numbers them;
+    /// nil where the platform does not say (only Linux does).
+    @inline(__always) static func core(of cpu: Int) -> Int? {
+        #if os(Linux)
+        return Topology.core(of: cpu)
+        #else
+        return nil
+        #endif
+    }
+
     /// `cpus`: with `pin`, worker i goes on `cpus[i % cpus.count]` (default:
     /// the i-th CPU the process may run on).
     init(workers count: Int, name: String, pin: Bool, cpus cpuList: [Int]? = nil, io: IOBackend = .automatic,
@@ -93,6 +105,12 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
         socketCount.initialize(to: 0)
         idle = Idle(workers: count)
         workerCount = count
+        let cpus = cpuList.flatMap { $0.isEmpty ? nil : $0 } ?? Scheduler.allowedCPUs()
+        // The cores the workers run on: those they are pinned to, or else
+        // those of every CPU they may run on.
+        let placed = pin && !currentThread ? (0..<count).map { cpus[$0 % cpus.count] } : cpus
+        let cores = placed.map(Scheduler.core(of:))
+        coreCount = cores.contains(nil) ? 0 : Set(cores.compactMap { $0 }).count
         timers = TimerWheel(shards: count, origin: cv_now_ns())
         blocking = BlockingPool(maxThreads: blockingThreads, maxQueued: blockingQueue.map { max($0, 0) } ?? .max,
                                 keepAlive: blockingKeepAlive, name: name)
@@ -149,7 +167,6 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
             w.spinNanos = spin
         }
 
-        let cpus = cpuList.flatMap { $0.isEmpty ? nil : $0 } ?? Scheduler.allowedCPUs()
         for w in workers where !currentThread {
             _ = Unmanaged.passRetained(self) // released by the thread when it exits
             let arg = Unmanaged.passRetained(w).toOpaque()

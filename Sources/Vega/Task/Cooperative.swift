@@ -38,6 +38,25 @@ extension Runtime {
         }
     }
 
+    /// Let other tasks run, then carry on on whichever of the runtime's
+    /// workers takes the caller first: it goes to the runtime's shared queue
+    /// rather than to the back of its own worker's, as `yield` sends it.
+    ///
+    /// For a task that should not stay where it is: one about to compute for
+    /// long on a core where another such task already runs
+    /// (`Runtime.currentCore`), say. It can come back to the same worker,
+    /// so a caller that must move checks again and repeats. Off a Vega
+    /// worker it falls back to `Task.yield()`.
+    public static func yieldToAnyWorker() async {
+        guard let w = Worker.current else {
+            await Task.yield()
+            return
+        }
+        await withUnsafeContinuation { (c: UnsafeContinuation<Void, Never>) in
+            w._withUnsafeGuaranteedRef { $0.deferYield(c, toAnyWorker: true) }
+        }
+    }
+
     /// Spend one unit of the running task's cooperative budget, yielding when
     /// it runs out (Tokio's coop budget: 128 per poll).
     ///

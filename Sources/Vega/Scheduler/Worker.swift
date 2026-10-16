@@ -72,6 +72,9 @@ final class Worker: @unchecked Sendable {
     private var running: UnsafeRawPointer?
     /// A task that called `Runtime.yield`, to resume once its job returns.
     private var deferred: UnsafeContinuation<Void, Never>?
+    /// A task that called `Runtime.yieldToAnyWorker`, to resume onto the
+    /// shared queue once its job returns.
+    private var deferredToAny: UnsafeContinuation<Void, Never>?
     /// `Runtime.afterJob` actions, run once the running job returns.
     private let afterJobActions = UnsafeMutablePointer<(any JobEndAction)?>.allocate(capacity: Worker.afterJobCapacity)
     private var afterJobCount = 0
@@ -266,10 +269,16 @@ final class Worker: @unchecked Sendable {
         afterJobCount = added
     }
 
-    /// Park a yielding task's continuation until the running job returns.
-    func deferYield(_ c: UnsafeContinuation<Void, Never>) {
+    /// Park a yielding task's continuation until the running job returns;
+    /// `toAnyWorker` resumes it onto the shared queue, not this worker's.
+    func deferYield(_ c: UnsafeContinuation<Void, Never>, toAnyWorker: Bool = false) {
         // One job can run several tasks (an actor draining its queue); an
         // earlier yielder in the same job is suspended by now, release it.
+        if toAnyWorker {
+            if let previous = deferredToAny, let s = scheduler { viaInject(s) { previous.resume() } }
+            deferredToAny = c
+            return
+        }
         if let previous = deferred { resumeToBack(previous) }
         deferred = c
     }
@@ -373,6 +382,10 @@ final class Worker: @unchecked Sendable {
             // Runtime.yield: the task has suspended now.
             deferred = nil
             resumeToBack(c)
+        }
+        if let c = deferredToAny {
+            deferredToAny = nil
+            viaInject(s) { c.resume() }
         }
         jobsRun.store(jobsRun.load(ordering: .relaxed) &+ 1, ordering: .relaxed)
     }

@@ -103,6 +103,8 @@ int cv_affinity_list(int *cpus, int max) {
     (void)max;
     return -1;
 }
+
+int cv_current_cpu(void) { return (int)GetCurrentProcessorNumber(); }
 #else
 uint64_t cv_now_ns(void) {
     struct timespec ts;
@@ -143,6 +145,14 @@ int cv_affinity_list(int *cpus, int max) {
 #else
     (void)cpus;
     (void)max;
+    return -1;
+#endif
+}
+
+int cv_current_cpu(void) {
+#if defined(__linux__)
+    return sched_getcpu();
+#else
     return -1;
 #endif
 }

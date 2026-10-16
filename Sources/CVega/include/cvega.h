@@ -28,6 +28,9 @@ int cv_cpu_count(void);
 /// The CPUs in this process's affinity mask, up to `max` of them, in
 /// order: how many, or -1 where there is no mask to read (not Linux).
 int cv_affinity_list(int *cpus, int max);
+/// The CPU the calling thread is running on now, or -1 where the platform
+/// does not say.
+int cv_current_cpu(void);
 
 // ---- parker --------------------------------------------------------------
 // One per worker thread. unpark before park makes the next park return at

@@ -902,6 +902,36 @@ enum Topology {
         return out
     }
 
+    /// Each CPU's physical core, by CPU number, as a dense index from 0: the
+    /// hardware threads of one core (hyperthreads) share it. -1 for a CPU
+    /// sysfs says nothing about; empty off Linux. Read once.
+    static let cores: [Int32] = {
+        #if os(Linux)
+        guard let possible = read("/sys/devices/system/cpu/possible").map(parseList),
+              let last = possible.max(), last < 4096 else { return [] }
+        var table = [Int32](repeating: -1, count: last + 1)
+        var dense: [Int: Int32] = [:]
+        for cpu in possible {
+            let dir = "/sys/devices/system/cpu/cpu\(cpu)/topology"
+            guard let core = read(dir + "/core_id").flatMap({ Int($0) }) else { continue }
+            let package = read(dir + "/physical_package_id").flatMap { Int($0) } ?? 0
+            let key = package << 32 | core
+            if dense[key] == nil { dense[key] = Int32(dense.count) }
+            table[cpu] = dense[key]!
+        }
+        return table
+        #else
+        return []
+        #endif
+    }()
+
+    /// The core of `cpu` (see `cores`), or nil if unknown.
+    @inline(__always) static func core(of cpu: Int) -> Int? {
+        let table = cores
+        guard cpu >= 0, cpu < table.count, table[cpu] >= 0 else { return nil }
+        return Int(table[cpu])
+    }
+
     private static func read(_ path: String) -> String? {
         var buf = [UInt8](repeating: 0, count: 4096)
         let n = buf.withUnsafeMutableBytes { cv_read_small_file(path, $0.baseAddress, $0.count) }
