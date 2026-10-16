@@ -147,8 +147,24 @@ struct IORegistration: @unchecked Sendable {
     /// EAGAIN). Throws `.cancelled` if the task is cancelled first, or
     /// `.timedOut` if its I/O deadline passes: only this wait is abandoned,
     /// the fd stays usable.
+    ///
+    /// A write's wait under `Runtime.withWriteStallTimeout`, and no deadline
+    /// of its own, gives up after the stall limit: each wait follows a send
+    /// that took what the socket had room for, so it is the peer taking
+    /// nothing at all that runs the limit out.
     @inline(__always)
     func wait(_ direction: Int32) async throws(IOError) {
+        if direction == CV_IO_WRITE, let stall = WriteStall.active, IODeadline.active == nil {
+            try await Runtime.withIODeadline(.nanoseconds(Int64(clamping: stall))) { () async throws(IOError) in
+                try await waitReady(direction)
+            }
+            return
+        }
+        try await waitReady(direction)
+    }
+
+    @inline(__always)
+    private func waitReady(_ direction: Int32) async throws(IOError) {
         if let res = await URing.perform(.poll(fd, direction), owner: owner) {
             // Any mask means "try again"; errors and hang-ups show up there.
             // A poll consumes nothing, so a cancelled task gives up even if

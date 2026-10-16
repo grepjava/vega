@@ -194,6 +194,15 @@ final class IOTaskHook: IOInterruptSlot, @unchecked Sendable {
         }
     }
 
+    /// The task's `withWriteStallTimeout` limit in nanoseconds, 0 for none.
+    /// Only the task itself touches it, as `deadline`.
+    private let writeStallBits = Atomic<UInt64>(0)
+
+    var writeStall: UInt64 {
+        get { writeStallBits.load(ordering: .relaxed) }
+        set { writeStallBits.store(newValue, ordering: .relaxed) }
+    }
+
     /// Run `body`, the whole of a task Vega starts, with a hook for its I/O.
     @inline(__always)
     static func run<T>(_ body: () async throws -> T) async rethrows -> T {
