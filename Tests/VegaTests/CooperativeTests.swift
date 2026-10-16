@@ -42,6 +42,54 @@ final class Counter: Sendable {
         await Runtime.yield()
     }
 
+    /// Logs when `Runtime.afterJob` runs it; asks once more if told to.
+    final class JobEnd: JobEndAction, @unchecked Sendable {
+        let log: Log<String>
+        var again: Bool
+        init(_ log: Log<String>, again: Bool = false) {
+            self.log = log
+            self.again = again
+        }
+        func jobEnded() {
+            log.append("ended")
+            if again {
+                again = false
+                _ = Runtime.afterJob(self)
+            }
+        }
+    }
+
+    @Test func afterJobRunsOnceTheJobReturns() {
+        let rt = Runtime(workers: 1)
+        defer { rt.shutdown() }
+        let log = Log<String>()
+        rt.block { () async -> Void in
+            #expect(Runtime.afterJob(JobEnd(log)))
+            log.append("same job")
+            await Runtime.yield()
+            log.append("next job")
+        }
+        #expect(log.all == ["same job", "ended", "next job"])
+    }
+
+    @Test func anActionThatAsksAgainRunsAfterTheNextJob() {
+        let rt = Runtime(workers: 1)
+        defer { rt.shutdown() }
+        let log = Log<String>()
+        rt.block { () async -> Void in
+            #expect(Runtime.afterJob(JobEnd(log, again: true)))
+            await Runtime.yield()
+            log.append("second job")
+            await Runtime.yield()
+            log.append("third job")
+        }
+        #expect(log.all == ["ended", "second job", "ended", "third job"])
+    }
+
+    @Test func afterJobOffRuntimeSaysNo() {
+        #expect(!Runtime.afterJob(JobEnd(Log<String>())))
+    }
+
     @Test func budgetForcesYield() {
         let rt = Runtime(workers: 1)
         defer { rt.shutdown() }

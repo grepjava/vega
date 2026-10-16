@@ -72,6 +72,10 @@ final class Worker: @unchecked Sendable {
     private var running: UnsafeRawPointer?
     /// A task that called `Runtime.yield`, to resume once its job returns.
     private var deferred: UnsafeContinuation<Void, Never>?
+    /// `Runtime.afterJob` actions, run once the running job returns.
+    private let afterJobActions = UnsafeMutablePointer<(any JobEndAction)?>.allocate(capacity: Worker.afterJobCapacity)
+    private var afterJobCount = 0
+    static let afterJobCapacity = 32
     /// While set, jobs scheduled here go to the back of the queue instead of
     /// the LIFO slot: a resumed yielder, or timers fired in deadline order
     /// (through the LIFO slot a batch of them would run newest first).
@@ -121,6 +125,8 @@ final class Worker: @unchecked Sendable {
     deinit {
         cv_parker_free(parker)
         injectBuffer.deallocate()
+        afterJobActions.deinitialize(count: afterJobCount)
+        afterJobActions.deallocate()
         pollHistogram.deinitialize(count: Self.pollBuckets)
         pollHistogram.deallocate()
     }
@@ -238,6 +244,28 @@ final class Worker: @unchecked Sendable {
         injectCount = 0
     }
 
+    /// Keep `action` for when the running job returns; false when as many
+    /// are kept as there is room for.
+    func afterJob(_ action: any JobEndAction) -> Bool {
+        guard afterJobCount < Self.afterJobCapacity else { return false }
+        (afterJobActions + afterJobCount).initialize(to: action)
+        afterJobCount &+= 1
+        return true
+    }
+
+    /// The running job has returned: its actions run, each once. One that
+    /// asks again is kept for the next job's end.
+    private func runAfterJob() {
+        let n = afterJobCount
+        for i in 0..<n {
+            let action = (afterJobActions + i).move()
+            action?.jobEnded()
+        }
+        let added = afterJobCount &- n
+        if added > 0 { (afterJobActions).moveInitialize(from: afterJobActions + n, count: added) }
+        afterJobCount = added
+    }
+
     /// Park a yielding task's continuation until the running job returns.
     func deferYield(_ c: UnsafeContinuation<Void, Never>) {
         // One job can run several tasks (an actor draining its queue); an
@@ -340,6 +368,7 @@ final class Worker: @unchecked Sendable {
         JobAudit.note(job, "done")
         #endif
         running = nil
+        if afterJobCount > 0 { runAfterJob() }
         if let c = deferred {
             // Runtime.yield: the task has suspended now.
             deferred = nil

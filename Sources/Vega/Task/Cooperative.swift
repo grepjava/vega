@@ -1,4 +1,26 @@
+/// Something to do once the job running now has returned: see
+/// `Runtime.afterJob(_:)`.
+public protocol JobEndAction: AnyObject, Sendable {
+    /// The job that asked has returned. Runs on the worker that ran it,
+    /// outside any task: start a task for anything that waits.
+    func jobEnded()
+}
+
 extension Runtime {
+    /// Call `action.jobEnded()` once the job running now has returned: when
+    /// the calling task next suspends or finishes, on this worker, before
+    /// it runs anything else. For work that is only needed if the task stops
+    /// part-way -- bytes a handler queued and then went off to wait on
+    /// something else -- and costs a task to do: asked for here, it costs
+    /// nothing when the task carries on and does it itself. The action is
+    /// held until it has run. False off a Vega worker, and when the worker
+    /// is holding as many actions as it has room for: then do the work
+    /// another way.
+    public static func afterJob(_ action: some JobEndAction) -> Bool {
+        guard let w = Worker.current else { return false }
+        return w._withUnsafeGuaranteedRef { $0.afterJob(action) }
+    }
+
     /// Let other tasks run: the caller goes to the back of its worker's queue.
     ///
     /// Cheaper than `Task.yield()`, which asks Swift for the current executor
