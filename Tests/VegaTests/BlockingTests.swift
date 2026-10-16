@@ -106,6 +106,45 @@ private final class PoolGauge: Sendable {
         #expect(rt.scheduler.blocking.threadCount <= 2)
     }
 
+    /// With one thread and a queue of one, a third job while the first runs
+    /// and the second waits is refused, unless its error type cannot say so.
+    @Test func refusesPastTheQueue() {
+        let rt = Runtime(workers: 2, blockingThreads: 1, blockingQueue: 1)
+        defer { rt.shutdown() }
+        let outcome = rt.block { () async -> [String] in
+            let release = PoolGauge()
+            let running = rt.spawn { () async throws -> Int in
+                try await Runtime.blocking { () throws -> Int in
+                    while release.running.load(ordering: .acquiring) == 0 { usleep(1_000) }
+                    return 1
+                }
+            }
+            while rt.scheduler.blocking.counts.threads == 0 || rt.scheduler.blocking.counts.queued > 0 {
+                try? await Runtime.sleep(for: .milliseconds(1))
+            }
+            let queued = rt.spawn { () async throws -> Int in try await Runtime.blocking { () throws -> Int in 2 } }
+            while rt.scheduler.blocking.counts.queued == 0 { try? await Runtime.sleep(for: .milliseconds(1)) }
+            var seen: [String] = []
+            do {
+                _ = try await Runtime.blocking { () throws -> Int in 3 }
+                seen.append("ran")
+            } catch is BlockingQueueFull {
+                seen.append("refused")
+            } catch {
+                seen.append("\(error)")
+            }
+            // A body that cannot throw cannot be refused: it waits its turn.
+            let unrefusable = rt.spawn { await Runtime.blocking { 4 } }
+            while rt.scheduler.blocking.counts.queued < 2 { try? await Runtime.sleep(for: .milliseconds(1)) }
+            release.running.store(1, ordering: .releasing)
+            seen.append("\((try? await running.value) ?? 0)")
+            seen.append("\((try? await queued.value) ?? 0)")
+            seen.append("\(await unrefusable.value)")
+            return seen
+        }
+        #expect(outcome == ["refused", "1", "2", "4"])
+    }
+
     /// Idle threads exit after the keep-alive.
     @Test func idleThreadsExit() {
         let rt = Runtime(workers: 1, blockingKeepAlive: .milliseconds(50))

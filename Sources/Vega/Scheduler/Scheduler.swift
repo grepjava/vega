@@ -78,7 +78,7 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     /// the i-th CPU the process may run on).
     init(workers count: Int, name: String, pin: Bool, cpus cpuList: [Int]? = nil, io: IOBackend = .automatic,
          currentThread: Bool = false,
-         blockingThreads: Int = 512, blockingKeepAlive: Duration = .seconds(10)) {
+         blockingThreads: Int = 512, blockingQueue: Int? = nil, blockingKeepAlive: Duration = .seconds(10)) {
         precondition(count >= 1, "a runtime needs at least one worker")
         precondition(!currentThread || count == 1, "a current-thread runtime has one worker")
         isCurrentThread = currentThread
@@ -86,7 +86,8 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
         idle = Idle(workers: count)
         workerCount = count
         timers = TimerWheel(shards: count, origin: cv_now_ns())
-        blocking = BlockingPool(maxThreads: blockingThreads, keepAlive: blockingKeepAlive, name: name)
+        blocking = BlockingPool(maxThreads: blockingThreads, maxQueued: blockingQueue.map { max($0, 0) } ?? .max,
+                                keepAlive: blockingKeepAlive, name: name)
         workers = (0..<count).map(Worker.init(index:))
         queues = .allocate(capacity: count)
         parkers = .allocate(capacity: count)

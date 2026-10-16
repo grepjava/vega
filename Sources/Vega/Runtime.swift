@@ -28,12 +28,16 @@ public final class Runtime: Sendable {
     ///   - pinThreads: pin worker *i* to CPU *i*.
     ///   - io: the I/O driver; see ``IOBackend``.
     ///   - blockingThreads: most threads ``blocking(_:)`` runs at once.
+    ///   - blockingQueue: most work ``blocking(_:)`` lets wait for one of
+    ///     those threads; past it, work is refused with `BlockingQueueFull`.
+    ///     nil: work waits for as long as it takes.
     ///   - blockingKeepAlive: how long an idle blocking thread lives.
     public init(workers: Int? = nil, name: String = "vega", pinThreads: Bool = false,
                 io: IOBackend = .automatic,
-                blockingThreads: Int = 512, blockingKeepAlive: Duration = .seconds(10)) {
+                blockingThreads: Int = 512, blockingQueue: Int? = nil,
+                blockingKeepAlive: Duration = .seconds(10)) {
         scheduler = Scheduler(workers: workers ?? Int(cv_cpu_count()), name: name, pin: pinThreads,
-                              io: io, blockingThreads: blockingThreads,
+                              io: io, blockingThreads: blockingThreads, blockingQueue: blockingQueue,
                               blockingKeepAlive: blockingKeepAlive)
     }
 

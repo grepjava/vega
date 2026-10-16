@@ -292,6 +292,9 @@ public struct ShardOptions: Sendable {
     public var pinThreads = true
     /// Most threads each shard's `Runtime.blocking` runs at once.
     public var blockingThreads = 512
+    /// Most work each shard's `Runtime.blocking` lets wait for one of those
+    /// threads before refusing more with `BlockingQueueFull`; nil: no bound.
+    public var blockingQueue: Int? = nil
     /// Start a shard again when it crashes (dies by a signal, or exits
     /// non-zero). A shard that exits 0 has finished and isn't restarted.
     public var restartCrashed = true
@@ -460,7 +463,8 @@ extension Runtime {
         let listeners = prepareListeners(local)
         SharedRegions.prepare(options.sharedRegions)
         let rt = Runtime(scheduler: Scheduler(workers: max(workers, 1), name: "\(options.name)0", pin: false,
-                                              blockingThreads: max(options.blockingThreads, 1)))
+                                              blockingThreads: max(options.blockingThreads, 1),
+                                              blockingQueue: options.blockingQueue))
         body(Shard(index: 0, count: 1, cpus: cpus, runtime: rt, listeners: listeners))
         rt.shutdown()
         for l in listeners where l.shared >= 0 { close(l.shared) }
@@ -628,7 +632,8 @@ private struct Supervisor {
         let workers = options.workersPerShard ?? cpus.count
         let rt = Runtime(scheduler: Scheduler(workers: max(workers, 1), name: "\(options.name)\(i)",
                                               pin: options.pinThreads, cpus: cpus,
-                                              blockingThreads: max(options.blockingThreads, 1)))
+                                              blockingThreads: max(options.blockingThreads, 1),
+                                              blockingQueue: options.blockingQueue))
         body(Shard(index: i, count: count, cpus: cpus, runtime: rt, listeners: listeners))
         rt.shutdown()
         exit(0)

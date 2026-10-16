@@ -6,7 +6,7 @@ import CVega
 /// A worker thread that blocks stalls every task queued behind it, so this
 /// work runs here instead. Threads start on demand, up to `maxThreads`, and
 /// one that sits idle for `keepAlive` exits. Jobs beyond `maxThreads` queue
-/// in FIFO order.
+/// in FIFO order, at most `maxQueued` of them for a bounded submit.
 final class BlockingPool: @unchecked Sendable {
     typealias Job = @Sendable () -> Void
 
@@ -16,6 +16,9 @@ final class BlockingPool: @unchecked Sendable {
         /// Parkers of idle threads; a submit pops one and wakes it.
         var idle: [OpaquePointer] = []
         var threads = 0
+        /// Threads a submit started or woke for its job that have not yet
+        /// looked for it: the jobs they will take are not waiting.
+        var claimed = 0
         var isShutdown = false
 
         var hasJob: Bool { head < jobs.count }
@@ -34,12 +37,16 @@ final class BlockingPool: @unchecked Sendable {
     private let lock = RawLock()
     private let state = Guarded(State())
     let maxThreads: Int
+    /// Jobs a bounded submit lets wait for a thread; `Int.max` for no bound.
+    let maxQueued: Int
     private let keepAlive: Int64
     private let name: String
 
-    init(maxThreads: Int, keepAlive: Duration, name: String) {
+    init(maxThreads: Int, maxQueued: Int = .max, keepAlive: Duration, name: String) {
         precondition(maxThreads >= 1, "the blocking pool needs at least one thread")
+        precondition(maxQueued >= 0, "the blocking pool's queue cannot be negative")
         self.maxThreads = maxThreads
+        self.maxQueued = maxQueued
         self.keepAlive = max(1, Scheduler.nanoseconds(keepAlive))
         self.name = name
     }
@@ -60,27 +67,37 @@ final class BlockingPool: @unchecked Sendable {
         }
     }
 
-    /// Run `job` on a pool thread.
-    func submit(_ job: @escaping Job) {
+    /// Run `job` on a pool thread. `bounded`: refuse it, and return false,
+    /// when every thread is busy and `maxQueued` jobs already wait for one.
+    @discardableResult
+    func submit(bounded: Bool = false, _ job: @escaping Job) -> Bool {
         lock.lock()
         let s = state.pointer
+        if bounded && s.pointee.idle.isEmpty && s.pointee.threads >= maxThreads
+            && s.pointee.jobs.count - s.pointee.head - s.pointee.claimed >= maxQueued {
+            lock.unlock()
+            return false
+        }
         s.pointee.jobs.append(job)
         if let parker = s.pointee.idle.popLast() {
+            s.pointee.claimed += 1
             lock.unlock()
             cv_unpark(parker)
-            return
+            return true
         }
         guard s.pointee.threads < maxThreads else {
             lock.unlock() // a busy thread takes it when done
-            return
+            return true
         }
         s.pointee.threads += 1
+        s.pointee.claimed += 1
         let index = s.pointee.threads
         lock.unlock()
         let rc = cv_thread_spawn({ raw in
             Unmanaged<BlockingPool>.fromOpaque(raw!).takeRetainedValue().runThread()
         }, Unmanaged.passRetained(self).toOpaque(), "\(name)-blocking-\(index)", -1)
         precondition(rc == 0, "vega: cannot start blocking thread (errno \(rc))")
+        return true
     }
 
     /// Let idle threads exit. Jobs still queued, or submitted later, run;
@@ -97,6 +114,8 @@ final class BlockingPool: @unchecked Sendable {
         let parker = cv_parker_new()!
         let s = state.pointer
         lock.lock()
+        // Started by a submit, for the job it queued.
+        s.pointee.claimed -= 1
         while true {
             if s.pointee.hasJob {
                 let job = s.pointee.takeJob()
@@ -117,6 +136,7 @@ final class BlockingPool: @unchecked Sendable {
                 lock.lock()
                 guard let i = s.pointee.idle.firstIndex(of: parker) else {
                     claimed = true // a submit popped us: there is a job
+                    s.pointee.claimed -= 1
                     break
                 }
                 if s.pointee.isShutdown || s.pointee.hasJob || cv_now_ns() >= deadline {
@@ -145,15 +165,24 @@ extension Runtime {
     /// `body` always runs to completion: cancelling the caller does not stop
     /// it, and the caller still waits for it. Off a Vega runtime it uses a
     /// process-wide pool.
+    ///
+    /// On a runtime made with a `blockingQueue`, work that finds every
+    /// thread busy and that many jobs already waiting is refused: this
+    /// throws `BlockingQueueFull` without running `body`. Only work whose
+    /// error type can carry that is refused -- `body` throws any error, as
+    /// an untyped `throws` closure does -- and any other waits its turn.
     public static func blocking<T: Sendable, E: Error>(
         _ body: sending @escaping () throws(E) -> T
     ) async throws(E) -> T {
         let scheduler = Worker.currentScheduler
         let pool = scheduler?.blocking ?? BlockingPool.shared
         nonisolated(unsafe) let body = body
+        // The cast looks the error type up at run time, so only a bounded
+        // pool pays for it.
+        let refusal: E? = pool.maxQueued == .max ? nil : BlockingQueueFull() as? E
         scheduler?.blockingInFlight.add(1, ordering: .sequentiallyConsistent)
         let result = await withUnsafeContinuation { (c: UnsafeContinuation<Result<T, E>, Never>) in
-            pool.submit {
+            let queued = pool.submit(bounded: refusal != nil) {
                 let r: Result<T, E>
                 do throws(E) {
                     r = .success(try body())
@@ -163,18 +192,38 @@ extension Runtime {
                 c.resume(returning: r)
                 // Only once the resume has made the caller runnable: paused
                 // time must see one or the other, or it could jump ahead.
-                if let scheduler,
-                   scheduler.blockingInFlight.subtract(1, ordering: .sequentiallyConsistent).oldValue == 1,
-                   scheduler.clock.isPaused {
-                    // The workers may all have parked while this job was
-                    // out, the timer owner seeing it and declining to
-                    // advance: have it look again.
-                    scheduler.clockAdvanced()
-                }
+                blockingDone(scheduler)
+            }
+            if !queued {
+                c.resume(returning: .failure(refusal.unsafelyUnwrapped))
+                blockingDone(scheduler)
             }
         }
         // A quick job can resume us before we suspend; see cv_tsan_acquire.
         cv_tsan_acquire(cv_task_current())
         return try result.get()
     }
+
+    /// A `blocking` job is over, run or refused: one fewer in flight.
+    private static func blockingDone(_ scheduler: Scheduler?) {
+        if let scheduler,
+           scheduler.blockingInFlight.subtract(1, ordering: .sequentiallyConsistent).oldValue == 1,
+           scheduler.clock.isPaused {
+            // The workers may all have parked while this job was out, the
+            // timer owner seeing it and declining to advance: have it look
+            // again.
+            scheduler.clockAdvanced()
+        }
+    }
+}
+
+/// What `Runtime.blocking` throws when its runtime's `blockingQueue` is
+/// full: every blocking thread is busy and that many jobs already wait for
+/// one. The work was not run. A server answers it as overloaded (503): a
+/// pool that cannot keep up only falls further behind, and saying so at
+/// once beats an answer later than any client will wait for.
+public struct BlockingQueueFull: Error, Hashable, Sendable, CustomStringConvertible {
+    public init() {}
+
+    public var description: String { "the blocking pool's queue is full" }
 }
