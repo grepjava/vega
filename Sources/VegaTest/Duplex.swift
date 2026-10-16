@@ -18,9 +18,10 @@ import VegaIO
 /// which makes small capacities good for testing backpressure and short
 /// reads. Dropping an end (or `shutdownWrite()`) ends the stream for the
 /// peer's reads once it has read what was buffered; writes to a dropped end
-/// throw `.brokenPipe`. Waiting reads and writes end with `.cancelled` when
-/// their task is cancelled. `split()` gives an end's read and write sides
-/// to two tasks.
+/// throw `.brokenPipe`. Waiting reads and writes end as a socket's do: with
+/// `.cancelled` when their task is cancelled, and `.timedOut` when the
+/// task's `Runtime.withIODeadline` deadline passes or its trigger fires.
+/// `split()` gives an end's read and write sides to two tasks.
 public func duplex(capacity: Int = 64 * 1024) -> DuplexStream.Pair {
     precondition(capacity > 0, "a duplex stream needs room for a byte")
     let ab = Pipe(capacity: capacity), ba = Pipe(capacity: capacity)
@@ -140,7 +141,7 @@ public struct DuplexWriter: ~Copyable, Sendable, AsyncWriter {
 fileprivate final class Pipe: @unchecked Sendable {
     private struct Waiter {
         let id: UInt64
-        let continuation: UnsafeContinuation<Bool, Never>
+        let event: IOEvent
     }
 
     private struct State {
@@ -197,7 +198,7 @@ fileprivate final class Pipe: @unchecked Sendable {
                 woken = w
                 return n
             }
-            for w in woken { w.continuation.resume(returning: true) }
+            for w in woken { w.event.signal() }
             let n = buffer.count - before
             if n > 0 {
                 await Runtime.consumeBudget()
@@ -208,7 +209,7 @@ fileprivate final class Pipe: @unchecked Sendable {
             switch state.withLock({ s -> Bool? in s.buffered > 0 ? nil : s.writeClosed }) {
             case nil: continue
             case true?: return 0
-            case false?: guard await park(.reader) else { throw .cancelled }
+            case false?: try await park(.reader)
             }
         }
     }
@@ -228,12 +229,12 @@ fileprivate final class Pipe: @unchecked Sendable {
                 return (n, woken)
             }
             guard let (n, woken) = result else { throw .brokenPipe }
-            for w in woken { w.continuation.resume(returning: true) }
+            for w in woken { w.event.signal() }
             if n > 0 {
                 at += n
                 await Runtime.consumeBudget()
             } else {
-                guard await park(.writer) else { throw .cancelled }
+                try await park(.writer)
             }
         }
     }
@@ -272,43 +273,41 @@ fileprivate final class Pipe: @unchecked Sendable {
             s.writers.removeAll()
             return all
         }
-        for w in woken { w.continuation.resume(returning: true) }
+        for w in woken { w.event.signal() }
     }
 
-    /// Wait until `side` might make progress. Returns false if the task was
-    /// cancelled.
-    private func park(_ side: Side) async -> Bool {
+    /// Wait until `side` might make progress. A wait on an `IOEvent`, so it
+    /// ends as a socket's does: `.cancelled` when the task is cancelled,
+    /// `.timedOut` when its `Runtime.withIODeadline` deadline passes or that
+    /// scope's trigger fires.
+    private func park(_ side: Side) async throws(IOError) {
         let id = nextID.add(1, ordering: .relaxed).newValue
         let capacity = self.capacity
-        let woken = await withTaskCancellationHandler {
-            await withUnsafeContinuation { (c: UnsafeContinuation<Bool, Never>) in
-                let now = state.withLock { s -> Bool? in
-                    // Checked under the lock: either the cancel handler runs
-                    // after this and finds the waiter, or the flag shows here.
-                    if Task.isCancelled { return false }
-                    switch side {
-                    case .reader:
-                        if s.buffered > 0 || s.writeClosed { return true }
-                        s.readers.append(Waiter(id: id, continuation: c))
-                    case .writer:
-                        if s.buffered < capacity || s.readClosed || s.writeClosed { return true }
-                        s.writers.append(Waiter(id: id, continuation: c))
-                    }
-                    return nil
-                }
-                if let now { c.resume(returning: now) }
+        let event = IOEvent()
+        let ready = state.withLock { s -> Bool in
+            switch side {
+            case .reader:
+                if s.buffered > 0 || s.writeClosed { return true }
+                s.readers.append(Waiter(id: id, event: event))
+            case .writer:
+                if s.buffered < capacity || s.readClosed || s.writeClosed { return true }
+                s.writers.append(Waiter(id: id, event: event))
             }
-        } onCancel: {
-            let waiter = state.withLock { s -> Waiter? in
-                if let i = s.readers.firstIndex(where: { $0.id == id }) { return s.readers.remove(at: i) }
-                if let i = s.writers.firstIndex(where: { $0.id == id }) { return s.writers.remove(at: i) }
-                return nil
-            }
-            waiter?.continuation.resume(returning: false)
+            return false
         }
-        // The other side can resume us before we suspend; see cv_tsan_acquire.
+        if ready { return }
+        do {
+            // A signal sent before the wait is kept for it.
+            try await event.wait()
+        } catch {
+            state.withLock { s in
+                s.readers.removeAll { $0.id == id }
+                s.writers.removeAll { $0.id == id }
+            }
+            throw error
+        }
+        // The other side can wake us before we suspend; see cv_tsan_acquire.
         cv_tsan_acquire(cv_task_current())
-        return woken
     }
 }
 

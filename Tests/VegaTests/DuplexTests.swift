@@ -132,6 +132,48 @@ import VegaTest
         #expect(after == "hi")
     }
 
+    /// A waiting read ends as a socket's does at its I/O deadline, and when
+    /// another task fires the scope's trigger; the task is not cancelled,
+    /// and the stream still works afterwards.
+    @Test func aWaitingReadEndsAtItsDeadlineOrTrigger() throws {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let (deadline, triggered, cancelled, after) = try rt.block {
+            () async throws -> (IOError?, IOError?, Bool, String) in
+            let pair = duplex()
+            let a = pair.first, b = pair.second
+            var buf = IOBuffer(capacity: 8)
+            var deadline: IOError?
+            do throws(IOError) {
+                _ = try await Runtime.withIODeadline(.milliseconds(20)) { () async throws(IOError) -> Int in
+                    try await b.read(into: &buf)
+                }
+            } catch {
+                deadline = error
+            }
+            let trigger = IODeadlineTrigger()
+            rt.spawn {
+                try? await Runtime.sleep(for: .milliseconds(20))
+                trigger.fire()
+            }
+            var triggered: IOError?
+            do throws(IOError) {
+                _ = try await Runtime.withIODeadline(.seconds(30), trigger: trigger) { () async throws(IOError) -> Int in
+                    try await b.read(into: &buf)
+                }
+            } catch {
+                triggered = error
+            }
+            try await a.write(IOBuffer(copying: Array("hi".utf8)))
+            _ = try await b.read(into: &buf)
+            return (deadline, triggered, Task.isCancelled, buf.string)
+        }
+        #expect(deadline == .timedOut)
+        #expect(triggered == .timedOut)
+        #expect(!cancelled)
+        #expect(after == "hi")
+    }
+
     /// Lines through a duplex pipe with a capacity that splits every line.
     @Test func framedOverDuplex() throws {
         let rt = Runtime(workers: 2)
