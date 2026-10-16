@@ -66,6 +66,10 @@ public struct SocketOption: Sendable, Hashable {
     /// SO_LINGER, in seconds; -1 turns it off (the default). 0 makes close
     /// reset the connection instead of a graceful FIN.
     public static let linger = SocketOption(CV_OPT_LINGER)
+    /// SO_TIMESTAMP: the kernel stamps what the socket receives, for
+    /// `read(into:arrival:)` to say when its bytes arrived. Set on a
+    /// listener, the connections it accepts have it too (Linux, Darwin).
+    public static let receiveTimestamps = SocketOption(CV_OPT_TIMESTAMP)
 }
 
 /// A Vega socket: options, and the OS handle for anything Vega doesn't wrap.

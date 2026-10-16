@@ -440,6 +440,23 @@ intptr_t cv_recv(int fd, void *buf, intptr_t len);
 /// What a read would find, without taking it: 1 input, 0 end of stream,
 /// -errno otherwise (-EAGAIN: nothing yet).
 intptr_t cv_peek(int fd);
+
+/// A read that says when its bytes arrived: with CV_OPT_TIMESTAMP on the
+/// socket, the kernel stamps what it receives and recvmsg hands the stamp
+/// over with the bytes. `space` holds the message header, its one buffer
+/// and the control space the kernel fills, all of which must stay where
+/// they are while a read on a ring waits; `micros` is then the arrival in
+/// wall-clock microseconds since the epoch, 0 when there was no stamp.
+typedef struct cv_arrival {
+    uint64_t micros;
+    uint64_t space[16];
+} cv_arrival;
+/// recv into buf through `arrival`, which then says when the bytes arrived.
+/// Bytes read, or -errno.
+intptr_t cv_recv_stamped(int fd, void *buf, intptr_t len, cv_arrival *arrival);
+/// After a ring's cv_uring_recv_stamped has completed: read the stamp out
+/// of `arrival`'s control space into `micros`.
+void cv_arrival_settle(cv_arrival *arrival);
 intptr_t cv_send(int fd, const void *buf, intptr_t len);
 
 /// A UDP socket bound to host:port (port 0: any free one).
@@ -488,6 +505,7 @@ enum {
     CV_OPT_IPV6_MULTICAST_LOOP,
     CV_OPT_UDP_GRO,        // receive coalesced datagrams (Linux)
     CV_OPT_LINGER,         // seconds; -1 is off
+    CV_OPT_TIMESTAMP,      // SO_TIMESTAMP: reads can say when their bytes arrived
 };
 /// 0 or an errno value.
 int cv_sockopt_set(int fd, int opt, int value);
@@ -601,6 +619,10 @@ void cv_uring_free(cv_uring *r);
 /// Returns its slot; *gen gets the generation that cv_uring_cancel checks.
 /// The result is the syscall's (>= 0) or -errno, -ECANCELED once cancelled.
 cv_uring_op *cv_uring_recv(cv_uring *r, uintptr_t waiter, int fd, void *buf, size_t len, uint64_t *gen);
+/// cv_uring_recv as a recvmsg through `arrival`, which stays put until
+/// completion; then cv_arrival_settle says when the bytes arrived.
+cv_uring_op *cv_uring_recv_stamped(cv_uring *r, uintptr_t waiter, int fd, void *buf, size_t len,
+                                   cv_arrival *arrival, uint64_t *gen);
 /// Result: the accepted fd (non-blocking, close-on-exec).
 cv_uring_op *cv_uring_accept(cv_uring *r, uintptr_t waiter, int fd, uint64_t *gen);
 /// One-shot readiness of direction dir (CV_IO_READ / CV_IO_WRITE). Result:

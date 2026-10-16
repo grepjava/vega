@@ -7,6 +7,20 @@ public protocol AsyncReader: ~Copyable {
     /// Read into `buffer`'s spare capacity. Returns the bytes read: 0 means
     /// end of stream (or a full buffer).
     func read(into buffer: inout IOBuffer) async throws(IOError) -> Int
+
+    /// `read(into:)`, saying in `arrival` when the bytes read arrived where
+    /// the stream can tell: a TCP stream with `receiveTimestamps` on (see
+    /// `ReadArrival`). Any other stream reads as `read(into:)` does and
+    /// clears `arrival`.
+    func read(into buffer: inout IOBuffer, arrival: UnsafeMutablePointer<ReadArrival>) async throws(IOError) -> Int
+}
+
+extension AsyncReader where Self: ~Copyable {
+    public func read(into buffer: inout IOBuffer,
+                     arrival: UnsafeMutablePointer<ReadArrival>) async throws(IOError) -> Int {
+        arrival.pointee.clear()
+        return try await read(into: &buffer)
+    }
 }
 
 /// A byte stream that can be written: Tokio's `AsyncWrite`.

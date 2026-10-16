@@ -313,6 +313,15 @@ intptr_t cv_recv(int fd, void *buf, intptr_t len) {
     return n >= 0 ? (intptr_t)n : -(intptr_t)last_error();
 }
 
+// Winsock stamps no stream reads: a stamped read is a plain one, with no
+// arrival to report.
+intptr_t cv_recv_stamped(int fd, void *buf, intptr_t len, cv_arrival *arrival) {
+    arrival->micros = 0;
+    return cv_recv(fd, buf, len);
+}
+
+void cv_arrival_settle(cv_arrival *arrival) { arrival->micros = 0; }
+
 intptr_t cv_sendfile(int fd, int file, int64_t offset, intptr_t count) {
     (void)fd; (void)file; (void)offset; (void)count;
     return -ENOSYS;

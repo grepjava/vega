@@ -2129,6 +2129,53 @@ intptr_t cv_recv(int fd, void *buf, intptr_t len) {
     return n >= 0 ? (long)n : -(long)errno;
 }
 
+/// What a cv_arrival's space holds.
+struct arrival_msg {
+    struct msghdr mh;
+    struct iovec iov;
+    union {
+        char buf[CMSG_SPACE(sizeof(struct timeval))];
+        struct cmsghdr align;
+    } control;
+};
+_Static_assert(sizeof(struct arrival_msg) <= sizeof(((cv_arrival *)0)->space), "cv_arrival's space is too small");
+
+static struct msghdr *arrival_prepare(cv_arrival *arrival, void *buf, size_t len) {
+    struct arrival_msg *m = (struct arrival_msg *)arrival->space;
+    memset(m, 0, sizeof *m);
+    m->iov.iov_base = buf;
+    m->iov.iov_len = len;
+    m->mh.msg_iov = &m->iov;
+    m->mh.msg_iovlen = 1;
+    m->mh.msg_control = m->control.buf;
+    m->mh.msg_controllen = sizeof m->control.buf;
+    arrival->micros = 0;
+    return &m->mh;
+}
+
+void cv_arrival_settle(cv_arrival *arrival) {
+    struct arrival_msg *m = (struct arrival_msg *)arrival->space;
+    arrival->micros = 0;
+    // The control space was zeroed, so a stamp the kernel did not write is
+    // a header of length 0, which ends the walk.
+    for (struct cmsghdr *cm = CMSG_FIRSTHDR(&m->mh); cm; cm = CMSG_NXTHDR(&m->mh, cm)) {
+        if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_TIMESTAMP &&
+            cm->cmsg_len >= CMSG_LEN(sizeof(struct timeval))) {
+            struct timeval tv;
+            memcpy(&tv, CMSG_DATA(cm), sizeof tv);
+            arrival->micros = (uint64_t)tv.tv_sec * 1000000u + (uint64_t)tv.tv_usec;
+        }
+    }
+}
+
+intptr_t cv_recv_stamped(int fd, void *buf, intptr_t len, cv_arrival *arrival) {
+    struct msghdr *mh = arrival_prepare(arrival, buf, (size_t)len);
+    ssize_t n = recvmsg(fd, mh, 0);
+    if (n < 0) return -(long)errno;
+    cv_arrival_settle(arrival);
+    return (long)n;
+}
+
 intptr_t cv_sendfile(int fd, int file, int64_t offset, intptr_t count) {
 #if defined(__linux__)
     off_t off = (off_t)offset;
@@ -2403,6 +2450,7 @@ static int sockopt_name(int opt, int *level, int *name) {
     case CV_OPT_RCVBUF: *level = SOL_SOCKET; *name = SO_RCVBUF; return 0;
     case CV_OPT_SNDBUF: *level = SOL_SOCKET; *name = SO_SNDBUF; return 0;
     case CV_OPT_REUSEADDR: *level = SOL_SOCKET; *name = SO_REUSEADDR; return 0;
+    case CV_OPT_TIMESTAMP: *level = SOL_SOCKET; *name = SO_TIMESTAMP; return 0;
 #ifdef SO_REUSEPORT
     case CV_OPT_REUSEPORT: *level = SOL_SOCKET; *name = SO_REUSEPORT; return 0;
 #endif
@@ -2429,7 +2477,7 @@ static int sockopt_name(int opt, int *level, int *name) {
 static int is_flag(int opt) {
     switch (opt) {
     case CV_OPT_TCP_NODELAY: case CV_OPT_KEEPALIVE: case CV_OPT_TCP_QUICKACK:
-    case CV_OPT_REUSEADDR: case CV_OPT_REUSEPORT: case CV_OPT_BROADCAST:
+    case CV_OPT_REUSEADDR: case CV_OPT_REUSEPORT: case CV_OPT_BROADCAST: case CV_OPT_TIMESTAMP:
     case CV_OPT_IPV6_V6ONLY: case CV_OPT_IP_MULTICAST_LOOP: case CV_OPT_IPV6_MULTICAST_LOOP:
         return 1;
     default:
@@ -3262,6 +3310,17 @@ cv_uring_op *cv_uring_recv(cv_uring *r, uintptr_t waiter, int fd, void *buf, siz
     cv_uring_op *op = submit_op(r, waiter, gen, IORING_OP_RECV, fd, (uintptr_t)buf, (uint32_t)len);
     // A task reads when it has handled what came before, so the socket is
     // usually empty: arm the poll first instead of a recv that fails.
+    r->sqes[r->sq_tail & r->sq_mask].ioprio = IORING_RECVSEND_POLL_FIRST;
+    push_sqe(r);
+    return op;
+}
+
+cv_uring_op *cv_uring_recv_stamped(cv_uring *r, uintptr_t waiter, int fd, void *buf, size_t len,
+                                   cv_arrival *arrival, uint64_t *gen) {
+    if (len > 0x7ffff000) len = 0x7ffff000;
+    struct msghdr *mh = arrival_prepare(arrival, buf, len);
+    cv_uring_op *op = submit_op(r, waiter, gen, IORING_OP_RECVMSG, fd, (uintptr_t)mh, 1);
+    // As cv_uring_recv: the socket is usually empty when a task reads.
     r->sqes[r->sq_tail & r->sq_mask].ioprio = IORING_RECVSEND_POLL_FIRST;
     push_sqe(r);
     return op;

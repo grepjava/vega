@@ -29,6 +29,9 @@ public enum IOBackend: Sendable, Equatable {
 /// operation completes: the task waits for that, even when cancelled.
 enum URingRequest: @unchecked Sendable {
     case recv(Int32, UnsafeMutableRawPointer, Int)
+    /// A recv as a recvmsg through the arrival record, which says when the
+    /// bytes arrived once `cv_arrival_settle` has read it.
+    case recvStamped(Int32, UnsafeMutableRawPointer, Int, UnsafeMutablePointer<cv_arrival>)
     case accept(Int32)
     /// One-shot readiness (`CV_IO_READ` / `CV_IO_WRITE`), for operations
     /// with no completion form here: writes that found the socket full,
@@ -74,6 +77,8 @@ enum URing {
                                _ gen: UnsafeMutablePointer<UInt64>) -> OpaquePointer {
         switch request {
         case let .recv(fd, buf, len): return cv_uring_recv(ring, waiter, fd, buf, len, gen)
+        case let .recvStamped(fd, buf, len, arrival):
+            return cv_uring_recv_stamped(ring, waiter, fd, buf, len, arrival, gen)
         case let .accept(fd): return cv_uring_accept(ring, waiter, fd, gen)
         case let .poll(fd, dir): return cv_uring_poll_ready(ring, waiter, fd, dir, gen)
         case let .fileRead(fd, buf, len, off): return cv_uring_file_rw(ring, waiter, 0, fd, buf, len, off, gen)
