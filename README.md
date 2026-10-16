@@ -1,34 +1,124 @@
+<p align="center">
+  <img src="assets/vega.png" alt="Vega, a high-speed I/O engine for Swift" width="720">
+</p>
+
 # Vega
 
-A high-speed I/O engine for Swift, meant to fully replace SwiftNIO. It provides a Tokio-style work-stealing scheduler, completion-based I/O on io_uring and IOCP, and readiness-based I/O on epoll and kqueue. It targets Swift 6.2+ and modern Swift concurrency, with no backward-compatibility layer.
+A high-speed I/O engine for Swift, and an alternative to SwiftNIO for code
+written with Swift concurrency. It provides a Tokio-style work-stealing
+scheduler, completion-based I/O on io_uring and IOCP, and readiness-based I/O on
+epoll and kqueue. It targets Swift 6.2 and newer, and is tuned for Swift 6.3.
 
-Vega aims for feature parity with Tokio and SwiftNIO. It can be swapped in for SwiftNIO through the `VegaNIO` package, and it will become the engine under [Garuda](https://github.com/grepjava/garuda), succeeding [aviancore](https://github.com/grepjava/aviancore).
+[Garuda 2](https://github.com/grepjava/garuda) is built on it, and Hummingbird
+and Vapor can run on it through [VegaNIO](VegaNIO/README.md), which keeps
+their SwiftNIO code as it is and hands Vega the scheduling and the socket I/O.
 
-**Status:** pre-alpha. v0.1 is feature-complete: the work-stealing and current-thread runtimes, the blocking pool, timers and paused time, io_uring (the Linux default), epoll and kqueue drivers, TCP/UDP/Unix sockets, and the sync primitives. v0.2 is feature-complete too: VegaIO codecs and framing, Happy Eyeballs, an async DNS resolver, in-memory test streams, server and client bootstraps, VegaFS file I/O, VegaProcess child processes and pipes, Unix signals, runtime metrics, and the sharded runtime (`Runtime.sharded`: supervised shard processes, one per cache domain). See [docs/PLAN.md](docs/PLAN.md) for the design, the parity matrix and the milestones, [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for measurements against SwiftNIO and Tokio, [docs/MIGRATING-FROM-NIO.md](docs/MIGRATING-FROM-NIO.md) for moving SwiftNIO code to Vega, and [docs/SHARDING.md](docs/SHARDING.md) for running a server as supervised shard processes.
+**Status:** 0.4. Young, used in production by one framework so far, and
+measured more than it has been battle-tested. The API may still change between
+minor versions. See [docs/PLAN.md](docs/PLAN.md) for the design and the parity
+matrix, [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for measurements against
+SwiftNIO and Tokio, [docs/MIGRATING-FROM-NIO.md](docs/MIGRATING-FROM-NIO.md) for
+moving SwiftNIO code over, and [docs/SHARDING.md](docs/SHARDING.md) for running
+a server as supervised shard processes.
+
+## Why Vega
+
+SwiftNIO is the foundation most server-side Swift stands on, and Vega owes a
+great deal to it. NIO was designed before Swift had async/await: its unit of
+work is a `Channel` bound to one event loop thread for life, and its API is
+`EventLoopFuture` and the channel pipeline, with async bridges added later.
+Tokio, on the Rust side, showed another shape: tasks that any worker thread may
+run, with idle threads stealing work from busy ones.
+
+Vega began as the question of what that shape would look like in Swift, now
+that the language can host it:
+
+- **Bring a work-stealing scheduler to Swift.** Per-worker run queues with a
+  LIFO slot, stealing, a shared inject queue and cooperative budgets, as in
+  Tokio. A connection is a task, and a busy one never holds up others pinned
+  to the same loop, because nothing is pinned.
+- **Build on Swift 6.3's executor hooks, not around them.** Swift 6.3 lets a
+  library install the process's global executor and give tasks an executor
+  preference, so plain `Task {}`, `async let` and task groups run on Vega's
+  workers with no wrapper types. Vega's hot paths are written for that runtime:
+  no reference counting on the per-request path where it can be avoided,
+  `~Copyable` buffers, and allocation-free I/O deadlines.
+- **Use the kernel's completion I/O where it exists.** io_uring is the default
+  on Linux, a ring per worker; epoll and kqueue stay as fallbacks, and Windows
+  has an IOCP driver.
+- **Fix what belongs upstream, upstream.** Where the Swift runtime was the
+  bottleneck, the fix is offered to swiftlang/swift rather than kept in a
+  private fork, and Vega runs on the stock toolchain.
+- **Scale out with processes as well as threads.** `Runtime.sharded` runs a
+  supervised process per cache domain, each with its own runtime, sharing a
+  listening socket and memory regions.
+
+## Vega, SwiftNIO and Tokio
+
+How the three compare, as fairly as we can put it. SwiftNIO and Tokio are
+mature, widely deployed and far more proven than Vega.
+
+| | Vega | SwiftNIO | Tokio |
+|---|---|---|---|
+| Language | Swift 6.2+ (tuned for 6.3) | Swift | Rust |
+| Programming model | Swift concurrency: tasks, `async`/`await`, structured concurrency | `Channel`, `ChannelPipeline` and `EventLoopFuture`; async bridges (`NIOAsyncChannel`) | `async`/`await` on Rust futures |
+| Scheduling | work stealing across worker threads; current-thread runtime | an event loop per thread; a channel stays on its loop | work stealing (multi-thread runtime); current-thread runtime |
+| Multi-process | `Runtime.sharded`: supervised shard processes | none built in | none built in |
+| Linux I/O | io_uring (default), epoll | epoll | epoll (io_uring through `tokio-uring`) |
+| Apple I/O | kqueue, Network.framework | kqueue, Network.framework (NIOTransportServices) | kqueue |
+| Windows | IOCP, experimental | in progress upstream | IOCP |
+| Blocking work | `Runtime.blocking` | `NIOThreadPool` | `spawn_blocking` |
+| Timers and tests | timer wheel; `MockClock` paused time, in-memory `duplex()` streams | `EmbeddedEventLoop`, `NIOAsyncTestingChannel` | timer wheel; `time::pause`, `tokio-test` |
+| TLS | VegaTLS on OpenSSL 3 or vendored BoringSSL | swift-nio-ssl (BoringSSL) | rustls or native-tls, separate crates |
+| HTTP | VegaHTTP1, VegaHTTP2, VegaWebSocket | NIOHTTP1, swift-nio-http2, NIOWebSocket | hyper, tungstenite, separate crates |
+| Maturity | 0.4, since 2026 | since 2018, the base of Vapor, Hummingbird, gRPC Swift and more | since 2016, the base of most async Rust |
+
+**What has been measured** ([docs/BENCHMARKS.md](docs/BENCHMARKS.md), one
+i5-8250U, Linux 7.0, Swift 6.3.3):
+
+- **TCP echo, 64-byte messages, four workers each:** at 64 connections Vega
+  served 308k requests a second, SwiftNIO 226k and Tokio 268k; at 1,024
+  connections Tokio led with 255k, against Vega's 241k and SwiftNIO's 206k.
+- **Scheduler microbenchmarks:** Vega is 1.6 to 17 times faster than Swift's
+  default executor. On the stock Swift runtime it is still 1.3 to 4.9 times
+  slower than Tokio at spawning, yielding and handing a value between two
+  tasks: a Swift task costs more to create and to resume than a Tokio task.
+  Runtime patches, offered upstream, close most of that and put Vega ahead on
+  hand-offs, but Vega does not depend on them.
+- **Hummingbird and Vapor on VegaNIO** run within a few per cent of the same
+  servers on NIOPosix, not faster: the pipeline above the transport is the
+  same.
+
+These are one machine's figures, for workloads chosen to stress the engine.
+Measure your own.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `Sources/Vega` | runtime, scheduler, I/O drivers, sockets, DNS resolver, timers, sync primitives |
+| `Sources/Vega` | runtime, scheduler, I/O drivers, sockets, DNS resolver, timers, sync primitives, the sharded runtime |
 | `Sources/VegaIO` | stream protocols, `Framed`, codecs (length-delimited, lines, bytes) |
 | `Sources/VegaFS` | files and paths: `File` (io_uring-native reads, writes, syncs and opens; the blocking pool elsewhere), `FileSystem` |
 | `Sources/VegaProcess` | child processes: `Command`, `Child` (exit watched through a pidfd on Linux), `Output`; pipes (`makePipe()`) live in Vega |
 | `Sources/VegaMetrics` | `metricsSamples(every:)` (periodic deltas of `Runtime.metrics`), Prometheus text export |
-| `Sources/VegaTest` | test support: `MockClock` (paused time), `duplex()` (in-memory byte streams) |
-| `Sources/CVega` | C shim: parking, threads, the epoll/kqueue/io_uring drivers, sockets |
 | `Sources/VegaTLS` | `TLSStream` over any stream, `TLSConfiguration`, `TLSContext` |
 | `Sources/VegaCrypto` | over the same library: `Hash`, `HMAC`, `PBKDF2`, `HKDF`, `AEAD`, QUIC `HeaderProtection`, `KeyExchange`, JWS/TLS `SigningKey` and `PublicKey`, `CertificateKey`, `SecureRandom` |
-| `Sources/CVegaTLS` | C shim between VegaTLS, VegaCrypto and the TLS library |
+| `Sources/VegaHTTP1`, `Sources/VegaHTTP2` | HTTP/1.1 parsing, codecs and connections; HTTP/2 frames, HPACK and connections |
+| `Sources/VegaWebSocket` | WebSocket framing and permessage-deflate |
+| `Sources/VegaExtras` | HTTP content codings (gzip, deflate, brotli, zstd) and SOCKS and HTTP proxy handshakes |
+| `Sources/VegaTest` | test support: `MockClock` (paused time), `duplex()` (in-memory byte streams) |
+| `Sources/CVega` | C shim: parking, threads, the epoll/kqueue/io_uring/IOCP drivers, sockets |
+| `Sources/CVegaTLS`, `Sources/CVegaCompress` | C shims for the TLS library and for compression |
 | `Sources/CVegaBoringSSL` | vendored BoringSSL, used only with the `BoringSSL` trait (see its `VENDORING.md`) |
+| `VegaNIO` | separate package: SwiftNIO's `EventLoopGroup` and bootstraps on Vega |
 | `Tests/VegaTests` | swift-testing suite |
 | `Benchmarks/` | separate package, so Vega itself keeps zero dependencies |
-| `Spikes/executor` | Phase 0: which Swift 6.3 executor hooks reach a custom executor |
-| `Spikes/uring-probe` | Phase 0: io_uring features available on a host or in a container |
+| `Spikes/` | the Phase 0 probes: which Swift 6.3 executor hooks reach a custom executor, and which io_uring features a host has |
 
 ## Build
 
-Linux is the primary target. Building through WSL works:
+Linux is the primary target; macOS 26.4 and newer is supported, and Windows is
+experimental. On Windows, Linux builds work through WSL:
 
 ```sh
 swift build --scratch-path ~/.cache/vega-build
@@ -48,7 +138,7 @@ TSAN_OPTIONS=suppressions=$PWD/Tests/tsan.supp VEGA_MODEL_N=50000 \
 VegaTLS runs on the system's OpenSSL 3 by default (`libssl-dev` on Linux, Homebrew's `openssl@3` on macOS). The `BoringSSL` package trait builds it on a vendored BoringSSL instead, with no system OpenSSL needed:
 
 ```swift
-.package(url: "https://github.com/grepjava/vega.git", from: "0.1.0", traits: ["BoringSSL"])
+.package(url: "https://github.com/grepjava/vega.git", from: "0.4.10", traits: ["BoringSSL"])
 ```
 
 or, building Vega itself, `swift build --traits BoringSSL`.
