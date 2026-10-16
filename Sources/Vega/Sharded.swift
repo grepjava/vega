@@ -385,7 +385,10 @@ extension Runtime {
     ///
     /// In a shard, `body` runs on the process's main thread with the
     /// shard's runtime; when it returns, the shard exits 0. A shard gets
-    /// SIGTERM if the supervisor dies.
+    /// SIGTERM if the supervisor dies. On Linux the shard's runtime is its
+    /// process's global executor, as ``installGlobal(workers:name:)`` makes
+    /// one: a plain `Task {}` in a shard runs on its workers too, and no
+    /// task needs an executor preference to stay there.
     ///
     /// With `shards` 0 (or `VEGA_SHARDS=0` in the environment, which
     /// overrides `shards`), there is no supervisor and no shard process:
@@ -630,10 +633,18 @@ private struct Supervisor {
     static func runShard(_ options: ShardOptions, _ i: Int, count: Int, cpus: [Int],
                          listeners: [PreparedListener], body: (Shard) -> Void) -> Never {
         let workers = options.workersPerShard ?? cpus.count
+        // The shard's runtime is its process's global executor: a shard
+        // starts with no task, and every task in it runs on its workers.
+        #if os(Linux)
+        let global = true
+        #else
+        let global = false
+        #endif
         let rt = Runtime(scheduler: Scheduler(workers: max(workers, 1), name: "\(options.name)\(i)",
-                                              pin: options.pinThreads, cpus: cpus,
+                                              pin: options.pinThreads, cpus: cpus, global: global,
                                               blockingThreads: max(options.blockingThreads, 1),
                                               blockingQueue: options.blockingQueue))
+        if global { rt.scheduler.becomeGlobal() }
         body(Shard(index: i, count: count, cpus: cpus, runtime: rt, listeners: listeners))
         rt.shutdown()
         exit(0)

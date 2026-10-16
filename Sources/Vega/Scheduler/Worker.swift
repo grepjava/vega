@@ -256,7 +256,7 @@ final class Worker: @unchecked Sendable {
     func run() {
         cv_current_set(Unmanaged.passUnretained(self).toOpaque())
         let s = scheduler.unsafelyUnwrapped
-        let executor = s.asUnownedTaskExecutor()
+        let executor: UnownedTaskExecutor? = s.runsGlobal ? nil : s.asUnownedTaskExecutor()
         #if os(Linux)
         if let ring {
             let e = cv_uring_enable(ring)
@@ -300,7 +300,17 @@ final class Worker: @unchecked Sendable {
         cv_current_set(nil)
     }
 
-    @inline(__always) private func runJob(_ job: UnownedJob, _ s: Scheduler, _ executor: UnownedTaskExecutor) {
+    @inline(__always) private static func run(_ job: UnownedJob, _ executor: UnownedTaskExecutor?) {
+        if let executor {
+            job.runSynchronously(on: executor)
+        } else {
+            cv_job_run_generic(unsafeBitCast(job, to: UnsafeMutableRawPointer.self))
+        }
+    }
+
+    /// `executor`: the runtime as the job's task executor; nil runs it as
+    /// the global executor does (`Scheduler.runsGlobal`).
+    @inline(__always) private func runJob(_ job: UnownedJob, _ s: Scheduler, _ executor: UnownedTaskExecutor?) {
         if isSearching {
             isSearching = false
             if s.idle.transitionFromSearching() { s.notifyParked() }
@@ -312,10 +322,10 @@ final class Worker: @unchecked Sendable {
         budget = Self.budgetPerPoll
         if s.pollTiming.load(ordering: .relaxed) {
             let start = cv_now_ns()
-            job.runSynchronously(on: executor)
+            Self.run(job, executor)
             recordPoll(cv_now_ns() &- start, s)
         } else {
-            job.runSynchronously(on: executor)
+            Self.run(job, executor)
         }
         #if VEGA_JOB_AUDIT
         JobAudit.note(job, "done")

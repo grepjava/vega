@@ -56,7 +56,7 @@ extension Runtime {
         // group's body closure just can't see that.
         nonisolated(unsafe) let operation = operation
         return try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask(executorPreference: scheduler) {
+            group.addTask(on: scheduler) {
                 // The timer holds a retain on this child task, consumed by
                 // whoever unlinks it: the firing worker (which cancels us)
                 // or us, below.

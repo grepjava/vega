@@ -16,7 +16,10 @@ import Synchronization
 /// Tasks started with ``spawn(_:)``, and everything they `await`, run on the
 /// runtime. A plain `Task {}` started inside one does **not** inherit it
 /// (Swift drops the executor preference for unstructured tasks) unless the
-/// runtime was made the process's global executor with ``installGlobal(workers:name:)``.
+/// runtime is the process's global executor: made so with
+/// ``installGlobal(workers:name:)``, or a shard's on Linux (``sharded(_:_:)``).
+/// Then nothing carries a preference, and an executor hop costs a compare
+/// rather than a look-up under the task's status-record lock.
 public final class Runtime: Sendable {
     let scheduler: Scheduler
 
@@ -77,7 +80,7 @@ public final class Runtime: Sendable {
         priority: TaskPriority? = nil,
         _ operation: sending @escaping () async -> Success
     ) -> Task<Success, Never> {
-        Task(executorPreference: scheduler, priority: priority) { await IOTaskHook.run(operation) }
+        scheduler.task(priority: priority) { await IOTaskHook.run(operation) }
     }
 
     @discardableResult
@@ -85,7 +88,7 @@ public final class Runtime: Sendable {
         priority: TaskPriority? = nil,
         _ operation: sending @escaping () async throws -> Success
     ) -> Task<Success, any Error> {
-        Task(executorPreference: scheduler, priority: priority) { try await IOTaskHook.run(operation) }
+        scheduler.task(priority: priority) { try await IOTaskHook.run(operation) }
     }
 
     /// Spawn a task that takes ownership of `value`, such as a `TCPStream`
@@ -102,7 +105,7 @@ public final class Runtime: Sendable {
         _ operation: sending @escaping (consuming Value) async -> Success
     ) -> Task<Success, Never> {
         let box = Handoff(value)
-        return Task(executorPreference: scheduler, priority: priority) {
+        return scheduler.task(priority: priority) {
             await IOTaskHook.run { await operation(box.take()) }
         }
     }
@@ -115,7 +118,7 @@ public final class Runtime: Sendable {
         precondition(Worker.current == nil, "Runtime.block called on a Vega worker thread")
         if scheduler.isCurrentThread { return try blockDriving(operation) }
         let waiter = BlockWaiter<T, E>()
-        Task(executorPreference: scheduler) {
+        scheduler.task {
             await IOTaskHook.run {
                 let result: Result<T, E>
                 do throws(E) {
@@ -139,7 +142,7 @@ public final class Runtime: Sendable {
                      "Runtime.block: a current-thread runtime runs one block at a time")
         defer { scheduler.driving.store(false, ordering: .releasing) }
         let result = DriveResult<T, E>()
-        Task(executorPreference: scheduler) {
+        scheduler.task {
             let r: Result<T, E> = await IOTaskHook.run {
                 do throws(E) {
                     return .success(try await operation())
@@ -223,8 +226,10 @@ public final class Runtime: Sendable {
         priority: TaskPriority? = nil,
         _ operation: sending @escaping () async -> Success
     ) -> Task<Success, Never> {
-        let scheduler: (any TaskExecutor)? = Worker.currentScheduler
-        return Task(executorPreference: scheduler, priority: priority) { await IOTaskHook.run(operation) }
+        guard let scheduler = Worker.currentScheduler else {
+            return Task(priority: priority) { await IOTaskHook.run(operation) }
+        }
+        return scheduler.task(priority: priority) { await IOTaskHook.run(operation) }
     }
 
     /// The index of the Vega worker running the caller, or nil off-runtime.
@@ -372,13 +377,15 @@ extension Runtime {
     /// to Vega (through the runtime's enqueue hook), and `Task.sleep` keeps
     /// the platform's timers.
     public static func installGlobal(workers: Int? = nil, name: String = "vega") -> Runtime {
-        precondition(installedGlobal == nil, "Runtime.installGlobal called twice")
-        let rt = Runtime(workers: workers, name: name)
-        installedGlobal = rt.scheduler
+        precondition(installedGlobal == nil,
+                     "Runtime.installGlobal called twice, or in a shard, whose runtime is the global executor")
         #if os(Linux)
-        _createExecutors(factory: VegaExecutorFactory.self)
+        let rt = Runtime(scheduler: Scheduler(workers: workers ?? Int(cv_cpu_count()), name: name, pin: false,
+                                              global: true))
+        #else
+        let rt = Runtime(workers: workers, name: name)
         #endif
-        rt.scheduler.installEnqueueGlobalHook()
+        rt.scheduler.becomeGlobal()
         return rt
     }
 }

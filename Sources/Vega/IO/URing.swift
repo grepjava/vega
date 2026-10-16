@@ -132,7 +132,7 @@ enum URing {
     /// Off the runtime's workers: run the operation in a task on them.
     @inline(never)
     private static func hop(_ request: URingRequest, to s: Scheduler) async -> Int64 {
-        let task = Task(executorPreference: s) { () async -> Int64 in
+        let task = s.task { () async -> Int64 in
             while true {
                 let res = await run(request)
                 if res != noRing { return res }

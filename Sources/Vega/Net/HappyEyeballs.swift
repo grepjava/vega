@@ -71,7 +71,7 @@ extension TCPStream {
                 let address = ordered[next]
                 next += 1
                 running += 1
-                group.addTask(executorPreference: scheduler) {
+                group.addTask(on: scheduler) {
                     do throws(IOError) {
                         let stream = try await TCPStream.connect(to: address)
                         return race.offer(stream) ? .connected : .lost
@@ -82,7 +82,7 @@ extension TCPStream {
                 guard next < ordered.count else { return }
                 generation += 1
                 let mine = generation
-                group.addTask(executorPreference: scheduler) {
+                group.addTask(on: scheduler) {
                     do {
                         try await Runtime.sleep(for: delay)
                         return .delayElapsed(generation: mine)

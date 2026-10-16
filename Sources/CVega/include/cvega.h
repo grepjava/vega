@@ -687,6 +687,11 @@ static inline void *cv_task_current(void) { return swift_task_getCurrent(); }
 extern void *swift_task_localValueGet(const void *key) __attribute__((swiftcall));
 static inline void *cv_task_local_get(const void *key) { return swift_task_localValueGet(key); }
 static inline void cv_task_cancel(void *task) { swift_task_cancel(task); }
+/// Run `job` on the generic executor with no task executor: how Swift's own
+/// global executor runs a job. `swift_job_run` takes a SerialExecutorRef,
+/// its identity and implementation words; both 0 is the generic executor.
+extern void swift_job_run(void *job, const void *identity, uintptr_t implementation) __attribute__((swiftcall));
+static inline void cv_job_run_generic(void *job) { swift_job_run(job, 0, 0); }
 
 // Retain and release a task (or any native Swift object). Unmanaged<AnyObject>
 // would go through objc_retain on Darwin, which can't handle a task.

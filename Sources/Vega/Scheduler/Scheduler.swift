@@ -39,6 +39,13 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     /// A current-thread runtime: one worker and no thread of its own; the
     /// thread in `Runtime.block` runs its loop.
     let isCurrentThread: Bool
+    /// The process's global executor (`Runtime.installGlobal`, a shard's
+    /// runtime): its workers run jobs as Swift's global executor does, on
+    /// the generic executor, and the tasks it starts carry no executor
+    /// preference. Every executor hop of a task with a preference looks the
+    /// preference up under the task's status-record lock; without one, the
+    /// hop is a compare.
+    let runsGlobal: Bool
     /// Open sockets under the uring driver (C atomics; for tests).
     let socketCount = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
     let isShutdown = Atomic<Bool>(false)
@@ -77,11 +84,12 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     /// `cpus`: with `pin`, worker i goes on `cpus[i % cpus.count]` (default:
     /// the i-th CPU the process may run on).
     init(workers count: Int, name: String, pin: Bool, cpus cpuList: [Int]? = nil, io: IOBackend = .automatic,
-         currentThread: Bool = false,
+         currentThread: Bool = false, global: Bool = false,
          blockingThreads: Int = 512, blockingQueue: Int? = nil, blockingKeepAlive: Duration = .seconds(10)) {
         precondition(count >= 1, "a runtime needs at least one worker")
         precondition(!currentThread || count == 1, "a current-thread runtime has one worker")
         isCurrentThread = currentThread
+        runsGlobal = global
         socketCount.initialize(to: 0)
         idle = Idle(workers: count)
         workerCount = count
@@ -151,6 +159,25 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     }
 
     // MARK: Executor
+
+    /// A task on this runtime, as `Task(executorPreference: self)` starts
+    /// one; or, as the global executor, a plain `Task`, which runs here
+    /// anyway. Not `Task(executorPreference: nil)`: that still gives the
+    /// task a preference record, an undefined one, and with it the lock.
+    @inline(__always)
+    func task<T: Sendable>(priority: TaskPriority? = nil,
+                           _ operation: sending @escaping @isolated(any) () async -> T) -> Task<T, Never> {
+        runsGlobal ? Task(priority: priority, operation: operation)
+            : Task(executorPreference: self, priority: priority, operation: operation)
+    }
+
+    /// `task`, for an operation that throws.
+    @inline(__always)
+    func task<T: Sendable>(priority: TaskPriority? = nil,
+                           _ operation: sending @escaping @isolated(any) () async throws -> T) -> Task<T, any Error> {
+        runsGlobal ? Task(priority: priority, operation: operation)
+            : Task(executorPreference: self, priority: priority, operation: operation)
+    }
 
     deinit {
         queues.deallocate()
@@ -330,7 +357,39 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
 
 nonisolated(unsafe) var installedGlobal: Scheduler?
 
+extension TaskGroup {
+    /// A child task on `scheduler`: see `Scheduler.task`. A child inherits
+    /// its parent's preference, so on the global executor it needs none.
+    mutating func addTask(on scheduler: Scheduler, operation: sending @escaping @isolated(any) () async -> ChildTaskResult) {
+        if scheduler.runsGlobal {
+            addTask(operation: operation)
+        } else {
+            addTask(executorPreference: scheduler, operation: operation)
+        }
+    }
+}
+
+extension ThrowingTaskGroup {
+    /// A child task on `scheduler`: see `Scheduler.task`.
+    mutating func addTask(on scheduler: Scheduler, operation: sending @escaping @isolated(any) () async throws -> ChildTaskResult) {
+        if scheduler.runsGlobal {
+            addTask(operation: operation)
+        } else {
+            addTask(executorPreference: scheduler, operation: operation)
+        }
+    }
+}
+
 extension Scheduler {
+    /// Become the process's global executor: before the first task.
+    func becomeGlobal() {
+        installedGlobal = self
+        #if os(Linux)
+        _createExecutors(factory: VegaExecutorFactory.self)
+        #endif
+        installEnqueueGlobalHook()
+    }
+
     /// Take global enqueues straight from the runtime's hook: Swift's own
     /// route copies `Task.defaultExecutor` (a retain and release of this
     /// object, from every worker) and calls through an existential.
