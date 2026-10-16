@@ -21,10 +21,10 @@ final class Worker: @unchecked Sendable {
     /// Check timers every this many ticks while busy.
     static let timerInterval: UInt32 = 61
     /// How long a worker with nothing to do spins before sleeping in the
-    /// kernel. Work that arrives meanwhile wakes it with a plain store
-    /// instead of a futex syscall on both sides. `VEGA_SPIN_NS` overrides.
-    static let spinNanos: Int64 = {
-        if let v = getenv("VEGA_SPIN_NS"), let n = Int64(String(cString: v)) { return n }
+    /// kernel, by default. Work that arrives meanwhile wakes it with a plain
+    /// store instead of a futex syscall on both sides. A runtime may be
+    /// given its own (`Runtime(idleSpin:)`); `VEGA_SPIN_NS` overrides both.
+    static let defaultSpinNanos: Int64 = {
         #if canImport(Darwin)
         // Apple machines usually share cores with whatever drives them, where
         // a spin costs battery and the client's CPU (M1: docs/BENCHMARKS.md).
@@ -33,6 +33,15 @@ final class Worker: @unchecked Sendable {
         return 50_000
         #endif
     }()
+
+    /// `VEGA_SPIN_NS`, if set.
+    static let environmentSpinNanos: Int64? = {
+        guard let v = getenv("VEGA_SPIN_NS") else { return nil }
+        return Int64(String(cString: v))
+    }()
+
+    /// This worker's spin before it sleeps, set with `scheduler`.
+    var spinNanos = Worker.defaultSpinNanos
 
     let index: Int
     let queue = LocalQueue()
@@ -389,7 +398,7 @@ final class Worker: @unchecked Sendable {
     @inline(__always) private func parkInRing(_ timeout: Int64) -> Int? {
         #if os(Linux)
         guard let ring else { return nil }
-        return URing.deliver(cv_uring_park(ring, timeout, Self.spinNanos), ring, on: self, busy: false)
+        return URing.deliver(cv_uring_park(ring, timeout, spinNanos), ring, on: self, busy: false)
         #else
         return nil
         #endif
@@ -478,10 +487,10 @@ final class Worker: @unchecked Sendable {
                 if ownsTimers, let driver = s.driver {
                     fired = driver.park(parker, timeout: timeout, on: self)
                 } else {
-                    cv_park_spin(parker, timeout, Self.spinNanos)
+                    cv_park_spin(parker, timeout, spinNanos)
                 }
                 #else
-                cv_park_spin(parker, timeout, Self.spinNanos)
+                cv_park_spin(parker, timeout, spinNanos)
                 #endif
             }
 

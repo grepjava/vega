@@ -295,6 +295,9 @@ public struct ShardOptions: Sendable {
     /// Most work each shard's `Runtime.blocking` lets wait for one of those
     /// threads before refusing more with `BlockingQueueFull`; nil: no bound.
     public var blockingQueue: Int? = nil
+    /// How long each shard's idle workers spin before they sleep; nil for
+    /// the platform's default. See `Runtime(idleSpin:)`.
+    public var idleSpin: Duration? = nil
     /// Start a shard again when it crashes (dies by a signal, or exits
     /// non-zero). A shard that exits 0 has finished and isn't restarted.
     public var restartCrashed = true
@@ -466,6 +469,7 @@ extension Runtime {
         let listeners = prepareListeners(local)
         SharedRegions.prepare(options.sharedRegions)
         let rt = Runtime(scheduler: Scheduler(workers: max(workers, 1), name: "\(options.name)0", pin: false,
+                                              idleSpin: options.idleSpin,
                                               blockingThreads: max(options.blockingThreads, 1),
                                               blockingQueue: options.blockingQueue))
         body(Shard(index: 0, count: 1, cpus: cpus, runtime: rt, listeners: listeners))
@@ -642,6 +646,7 @@ private struct Supervisor {
         #endif
         let rt = Runtime(scheduler: Scheduler(workers: max(workers, 1), name: "\(options.name)\(i)",
                                               pin: options.pinThreads, cpus: cpus, global: global,
+                                              idleSpin: options.idleSpin,
                                               blockingThreads: max(options.blockingThreads, 1),
                                               blockingQueue: options.blockingQueue))
         if global { rt.scheduler.becomeGlobal() }

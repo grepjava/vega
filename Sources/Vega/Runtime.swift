@@ -35,13 +35,19 @@ public final class Runtime: Sendable {
     ///     those threads; past it, work is refused with `BlockingQueueFull`.
     ///     nil: work waits for as long as it takes.
     ///   - blockingKeepAlive: how long an idle blocking thread lives.
+    ///   - idleSpin: how long a worker with nothing to do spins before it
+    ///     sleeps in the kernel; nil for the platform's default (50 µs on
+    ///     Linux, none on Darwin). While work keeps coming, a spin saves
+    ///     the syscalls of a wake; it takes the CPU from whatever shares
+    ///     it, a load generator or another server. `VEGA_SPIN_NS`
+    ///     overrides it.
     public init(workers: Int? = nil, name: String = "vega", pinThreads: Bool = false,
                 io: IOBackend = .automatic,
                 blockingThreads: Int = 512, blockingQueue: Int? = nil,
-                blockingKeepAlive: Duration = .seconds(10)) {
+                blockingKeepAlive: Duration = .seconds(10), idleSpin: Duration? = nil) {
         scheduler = Scheduler(workers: workers ?? Int(cv_cpu_count()), name: name, pin: pinThreads,
-                              io: io, blockingThreads: blockingThreads, blockingQueue: blockingQueue,
-                              blockingKeepAlive: blockingKeepAlive)
+                              io: io, idleSpin: idleSpin, blockingThreads: blockingThreads,
+                              blockingQueue: blockingQueue, blockingKeepAlive: blockingKeepAlive)
     }
 
     /// A runtime with no threads of its own (Tokio's `current_thread`): its

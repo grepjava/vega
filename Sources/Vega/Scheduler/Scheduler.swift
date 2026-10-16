@@ -84,7 +84,7 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     /// `cpus`: with `pin`, worker i goes on `cpus[i % cpus.count]` (default:
     /// the i-th CPU the process may run on).
     init(workers count: Int, name: String, pin: Bool, cpus cpuList: [Int]? = nil, io: IOBackend = .automatic,
-         currentThread: Bool = false, global: Bool = false,
+         currentThread: Bool = false, global: Bool = false, idleSpin: Duration? = nil,
          blockingThreads: Int = 512, blockingQueue: Int? = nil, blockingKeepAlive: Duration = .seconds(10)) {
         precondition(count >= 1, "a runtime needs at least one worker")
         precondition(!currentThread || count == 1, "a current-thread runtime has one worker")
@@ -142,9 +142,11 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
             #endif
         }
         let me = Unmanaged.passUnretained(self).toOpaque()
+        let spin = Worker.environmentSpinNanos ?? idleSpin.map { Scheduler.nanoseconds($0) } ?? Worker.defaultSpinNanos
         for w in workers {
             w.scheduler = self
             w.owner = me
+            w.spinNanos = spin
         }
 
         let cpus = cpuList.flatMap { $0.isEmpty ? nil : $0 } ?? Scheduler.allowedCPUs()
