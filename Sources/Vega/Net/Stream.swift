@@ -44,11 +44,18 @@ extension IORegistration {
     }
 
     /// Submit `read` and arm its task's hook, from inside the continuation.
+    /// With `arrival`, as a recvmsg that says when the bytes arrived.
     @usableFromInline
-    func submit(_ read: RingRead, _ c: UnsafeContinuation<Int64, Never>) {
+    func submit(_ read: RingRead, _ c: UnsafeContinuation<Int64, Never>,
+                arrival: UnsafeMutablePointer<cv_arrival>? = nil) {
         #if os(Linux)
         var gen: UInt64 = 0
-        let op: OpaquePointer = cv_uring_recv(read.ring, unsafeBitCast(c, to: UInt.self), fd, read.base, read.length, &gen)
+        let waiter = unsafeBitCast(c, to: UInt.self)
+        let op: OpaquePointer = if let arrival {
+            cv_uring_recv_stamped(read.ring, waiter, fd, read.base, read.length, arrival, &gen)
+        } else {
+            cv_uring_recv(read.ring, waiter, fd, read.base, read.length, &gen)
+        }
         // Cancelled or past the deadline already: cancel it now.
         let cancel = IOInterrupt.uring(op, gen)
         let armed = read.hook._withUnsafeGuaranteedRef { $0.arm(cancel) }
