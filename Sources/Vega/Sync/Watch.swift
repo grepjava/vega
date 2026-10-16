@@ -61,6 +61,17 @@ public final class Watch<Value: Sendable>: @unchecked Sendable {
         for w in woken { w.continuation.resume(returning: Watch.codeChanged) }
     }
 
+    /// Change the value in place and wake no receiver, returning what
+    /// `body` does; nil once closed. For a change no receiver waits on:
+    /// one that does see it with the next `modify` or `send`.
+    func modifyQuietly<R>(_ body: (inout Value) -> R) -> R? {
+        let s = state.pointer
+        return lock.withLock { () -> R? in
+            guard !s.pointee.closed else { return nil }
+            return body(&s.pointee.value)
+        }
+    }
+
     /// No more values: waiting and future `changed()` calls throw `.closed`
     /// once they have seen the last value.
     public func close() {

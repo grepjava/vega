@@ -26,6 +26,8 @@ import ucrt
 ///   connections wait in the kernel's backlog instead of exhausting fds.
 /// - Transient accept failures (out of fds or memory, a connection aborted
 ///   before it was accepted) don't stop the server; it backs off and goes on.
+/// - Each connection's task is detached from the accept loop: its handler
+///   sees none of the task-locals of the code that started the server.
 /// - `shutdown(gracePeriod:)` stops accepting, lets open connections finish
 ///   for the grace period, then cancels the rest. It triggers
 ///   `shutdownSignal` first: give that to `HTTP1Server` and `HTTP2Server`
@@ -62,6 +64,11 @@ public final class TCPServer: Sendable {
         case running(Task<Void, Never>)
     }
 
+    /// Waited on by `wait` and `shutdown`. A connection opening or closing
+    /// changes it quietly (`Watch.modifyQuietly`): only the last one to
+    /// close once no accept loop runs can end a wait, and only that one
+    /// wakes the waiters. A server's `wait` is waited on for its whole life,
+    /// and a wake for every connection would cost each one a task switch.
     private struct State: Sendable {
         /// Set once open connections are being cancelled: late starters
         /// cancel themselves.
@@ -295,24 +302,29 @@ public final class TCPServer: Sendable {
     private func start(_ stream: consuming TCPStream) {
         let id = nextID.add(1, ordering: .relaxed).newValue
         open.add(1, ordering: .relaxed)
-        state.modify { $0.connections[id] = .starting }
+        state.modifyQuietly { $0.connections[id] = .starting }
         let box = Handoff(stream)
         let handler = handler
-        let task = scheduler.task { [self] in
+        // Detached: the accept loop's task-locals -- its own I/O hook among
+        // them -- are nothing the connection's task can use.
+        let task = scheduler.detachedTask { [self] in
             await IOTaskHook.run { await handler(box.take()) }
             open.subtract(1, ordering: .relaxed)
             permits?.release()
-            state.modify { $0.connections[id] = nil }
+            let drained = state.modifyQuietly { s -> Bool in
+                s.connections[id] = nil
+                return s.connections.isEmpty && s.acceptorsRunning == 0
+            }
+            if drained == true { state.modify { _ in } }
         }
         // Recorded unless it already finished; cancelled if shutdown got
         // there first.
-        var cancel = false
-        state.modify { s in
-            guard s.connections[id] != nil else { return }
+        let cancel = state.modifyQuietly { s -> Bool in
+            guard s.connections[id] != nil else { return false }
             s.connections[id] = .running(task)
-            cancel = s.cancelling
+            return s.cancelling
         }
-        if cancel { task.cancel() }
+        if cancel == true { task.cancel() }
     }
 }
 

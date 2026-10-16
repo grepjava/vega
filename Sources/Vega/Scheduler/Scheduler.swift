@@ -164,15 +164,25 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     /// one; or, as the global executor, a plain `Task`, which runs here
     /// anyway. Not `Task(executorPreference: nil)`: that still gives the
     /// task a preference record, an undefined one, and with it the lock.
-    @inline(__always)
+    @inline(__always) @discardableResult
     func task<T: Sendable>(priority: TaskPriority? = nil,
                            _ operation: sending @escaping @isolated(any) () async -> T) -> Task<T, Never> {
         runsGlobal ? Task(priority: priority, operation: operation)
             : Task(executorPreference: self, priority: priority, operation: operation)
     }
 
+    /// `task`, detached: it inherits none of its starter's task-locals, nor
+    /// its priority. For a task that sets up what it needs itself, as a
+    /// connection's does: a task-local copied into a task costs it an
+    /// allocation for the binding, and the copy a set of the keys it saw.
+    @inline(__always) @discardableResult
+    func detachedTask<T: Sendable>(_ operation: sending @escaping @concurrent () async -> T) -> Task<T, Never> {
+        runsGlobal ? Task.detached(operation: operation)
+            : Task.detached(executorPreference: self, operation: operation)
+    }
+
     /// `task`, for an operation that throws.
-    @inline(__always)
+    @inline(__always) @discardableResult
     func task<T: Sendable>(priority: TaskPriority? = nil,
                            _ operation: sending @escaping @isolated(any) () async throws -> T) -> Task<T, any Error> {
         runsGlobal ? Task(priority: priority, operation: operation)
