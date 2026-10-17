@@ -31,6 +31,7 @@
 // CVegaBoringSSL prefix.
 #include "CVegaBoringSSL_err.h"
 #include "CVegaBoringSSL_evp.h"
+#include "CVegaBoringSSL_hmac.h"
 #include "CVegaBoringSSL_pem.h"
 #include "CVegaBoringSSL_ssl.h"
 #include "CVegaBoringSSL_x509v3.h"
@@ -38,6 +39,7 @@
 #elif defined(VEGA_TLS_OPENSSL) && __has_include(<openssl/ssl.h>) // none on iOS and the like: VegaTLS is empty there
 #include <openssl/err.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
@@ -125,6 +127,23 @@ static SSL_SESSION *cv_session_dup(SSL_SESSION *s) {
 #define strtok_r strtok_s
 #endif
 
+// Kernel TLS: Linux's, where its header is.
+#if defined(__linux__) && __has_include(<linux/tls.h>)
+#define CV_KTLS 1
+#include <errno.h>
+#include <linux/tls.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#ifndef TCP_ULP
+#define TCP_ULP 31
+#endif
+#ifndef SOL_TLS
+#define SOL_TLS 282
+#endif
+struct cv_ktls;
+#endif
+
 #define MAX_NAMES 64
 
 struct cv_tls_ctx {
@@ -171,6 +190,10 @@ struct cv_tls {
     int eof; // and after in, the end of the peer's ciphertext
     // What the engine wrote, and the buffer taken to be sent meanwhile.
     struct cv_out out, taken;
+#if CV_KTLS
+    // Kernel TLS asked for: what handing the records to the kernel needs.
+    struct cv_ktls *k;
+#endif
     char err[256];
 };
 
@@ -619,6 +642,573 @@ static SSL_SESSION *take_session(cv_tls_ctx *c, const char *host) {
     return s;
 }
 
+// MARK: - Kernel TLS
+//
+// After the handshake the kernel can take over a direction's records
+// (TCP_ULP "tls", then TLS_TX or TLS_RX): it is handed that direction's key,
+// IV and next sequence number, and from then on the socket carries
+// plaintext for this process. The engine runs over a BIO of our own, so
+// OpenSSL's own kernel TLS, which needs its socket BIO, is out of reach, and
+// BoringSSL has none. Both libraries give the secrets, though: TLS 1.3's
+// application traffic secrets through the key log, expanded here into key
+// and IV (RFC 8446 7.3), and TLS 1.2's master secret, expanded into the key
+// block (RFC 5246 6.3). BoringSSL says the sequence numbers; with OpenSSL they
+// are counted, from the records that went through the BIO since the key took
+// effect: that is why the BIO watches record boundaries while a connection
+// may still hand a direction over.
+#if CV_KTLS
+/// Records one way, counted as their bytes pass the BIO.
+struct cv_records {
+    uint64_t count;     // whole records
+    uint64_t since_ccs; // whole records since the last ChangeCipherSpec
+    uint8_t head[5];
+    int head_len; // header bytes of the record under way
+    size_t left;  // its body bytes still to come
+    int type;
+};
+
+struct cv_ktls {
+    int want;        // CV_KTLS_TX | CV_KTLS_RX
+    int on;          // the directions the kernel has
+    int stale;       // directions the engine rekeyed (KeyUpdate) before the kernel took them
+    int update_owed; // the peer asked for our KeyUpdate: the kernel's to send
+    struct cv_records tx, rx;
+    uint64_t tx_base, rx_base; // TLS 1.3: counts when the application keys took effect
+    int tx_based;
+    uint8_t tx_secret[48], rx_secret[48]; // TLS 1.3 application traffic secrets
+    size_t tx_secret_len, rx_secret_len;
+};
+
+static void record_done(struct cv_records *r) {
+    r->count++;
+    r->since_ccs = r->type == 20 ? 0 : r->since_ccs + 1;
+}
+
+static void records_track(struct cv_records *r, const unsigned char *p, size_t n) {
+    while (n > 0) {
+        if (r->left > 0) {
+            size_t m = n < r->left ? n : r->left;
+            r->left -= m;
+            p += m;
+            n -= m;
+            if (r->left == 0) record_done(r);
+            continue;
+        }
+        r->head[r->head_len++] = *p++;
+        n--;
+        if (r->head_len == 5) {
+            r->type = r->head[0];
+            r->left = (size_t)r->head[3] << 8 | r->head[4];
+            r->head_len = 0;
+            if (r->left == 0) record_done(r);
+        }
+    }
+}
+
+static inline int records_whole(const struct cv_records *r) { return r->head_len == 0 && r->left == 0; }
+
+static void ktls_track_in(cv_tls *t, const unsigned char *p, size_t n) {
+    if (!(t->k->on & CV_KTLS_RX)) records_track(&t->k->rx, p, n);
+}
+
+/// 1: the kernel sends now, and the engine's output is dropped.
+static int ktls_track_out(cv_tls *t, const char *p, size_t n) {
+    if (t->k->on & CV_KTLS_TX) return 1;
+    records_track(&t->k->tx, (const unsigned char *)p, n);
+    return 0;
+}
+
+/// TLS 1.3 records the peer sends after its Finished are under the
+/// application key, and the handshake has read nothing past that Finished.
+static void ktls_handshake_done(cv_tls *t) { t->k->rx_base = t->k->rx.count; }
+
+static int hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/// "LABEL <client random> <secret>": keep the application traffic secrets.
+/// OpenSSL logs our direction's secret as its key takes effect, so the
+/// records written by then are the ones under earlier keys.
+static void keylog(const SSL *ssl, const char *line) {
+    cv_tls *t = SSL_get_app_data(ssl);
+    if (!t || !t->k) return;
+    static const char client[] = "CLIENT_TRAFFIC_SECRET_0 ", server[] = "SERVER_TRAFFIC_SECRET_0 ";
+    int ours;
+    if (strncmp(line, client, sizeof client - 1) == 0)
+        ours = !t->ctx->server;
+    else if (strncmp(line, server, sizeof server - 1) == 0)
+        ours = t->ctx->server;
+    else
+        return;
+    const char *p = strchr(line + sizeof client - 1, ' ');
+    if (!p) return;
+    p++;
+    uint8_t secret[48];
+    size_t n = 0;
+    while (n < sizeof secret && hex_digit(p[0]) >= 0 && hex_digit(p[1]) >= 0) {
+        secret[n++] = (uint8_t)(hex_digit(p[0]) << 4 | hex_digit(p[1]));
+        p += 2;
+    }
+    struct cv_ktls *k = t->k;
+    if (n == 32 || n == 48) {
+        if (ours) {
+            memcpy(k->tx_secret, secret, n);
+            k->tx_secret_len = n;
+            k->tx_base = k->tx.count;
+            k->tx_based = 1;
+        } else {
+            memcpy(k->rx_secret, secret, n);
+            k->rx_secret_len = n;
+        }
+    }
+    OPENSSL_cleanse(secret, sizeof secret);
+}
+
+/// Handshake messages the engine sends and reads: a KeyUpdate before the
+/// kernel has a direction leaves what we know of that direction's key
+/// stale; one the peer sends asking for ours, once the kernel sends, is
+/// the kernel's to answer.
+static void ktls_message(int write_p, int version, int content_type, const void *buf, size_t len, SSL *ssl,
+                         void *arg) {
+    (void)version;
+    (void)arg;
+    const uint8_t *m = buf;
+    if (content_type != SSL3_RT_HANDSHAKE || len < 1 || m[0] != 24) return; // KeyUpdate
+    cv_tls *t = SSL_get_app_data(ssl);
+    if (!t || !t->k) return;
+    struct cv_ktls *k = t->k;
+    if (write_p) {
+        if (!(k->on & CV_KTLS_TX)) k->stale |= CV_KTLS_TX;
+    } else {
+        if (!(k->on & CV_KTLS_RX)) k->stale |= CV_KTLS_RX;
+        if ((k->on & CV_KTLS_TX) && len >= 5 && m[4] == 1) __atomic_store_n(&k->update_owed, 1, __ATOMIC_RELEASE);
+    }
+}
+
+void cv_tls_ctx_set_ktls(cv_tls_ctx *c) { SSL_CTX_set_keylog_callback(c->ssl, keylog); }
+
+void cv_tls_ktls_want(cv_tls *t, int directions) {
+    if (t->k || !(directions & CV_KTLS_TX)) return;
+    t->k = calloc(1, sizeof *t->k);
+    if (!t->k) return;
+    t->k->want = directions & (CV_KTLS_TX | CV_KTLS_RX);
+    SSL_set_msg_callback(t->ssl, ktls_message);
+}
+
+/// No kernel TLS for this connection after all: stop watching for it.
+static void ktls_drop(cv_tls *t) {
+    if (!t->k) return;
+    SSL_set_msg_callback(t->ssl, NULL);
+    OPENSSL_cleanse(t->k, sizeof *t->k);
+    free(t->k);
+    t->k = NULL;
+}
+
+int cv_tls_ktls_state(cv_tls *t) { return t->k ? t->k->on : 0; }
+
+intptr_t cv_tls_ktls_rx_short(cv_tls *t) {
+    struct cv_ktls *k = t->k;
+    if (!k || (k->on & CV_KTLS_RX) || !(k->want & CV_KTLS_RX)) return 0;
+    return k->rx.head_len ? 5 - k->rx.head_len : (intptr_t)k->rx.left;
+}
+
+/// The suites the kernel takes, by IANA number: the AEAD, its key length,
+/// the IV the key schedule makes (TLS 1.2's AES-GCM makes only the 4-byte
+/// salt, and sends the rest of the nonce), and SHA-384 or SHA-256.
+static const struct ktls_suite {
+    uint16_t id, cipher;
+    uint8_t key_len, iv_len, sha384;
+} ktls_suites[] = {
+    {0x1301, TLS_CIPHER_AES_GCM_128, 16, 12, 0},       // TLS_AES_128_GCM_SHA256
+    {0x1302, TLS_CIPHER_AES_GCM_256, 32, 12, 1},       // TLS_AES_256_GCM_SHA384
+    {0x1303, TLS_CIPHER_CHACHA20_POLY1305, 32, 12, 0}, // TLS_CHACHA20_POLY1305_SHA256
+    {0xC02B, TLS_CIPHER_AES_GCM_128, 16, 4, 0},        // ECDHE-ECDSA-AES128-GCM-SHA256
+    {0xC02F, TLS_CIPHER_AES_GCM_128, 16, 4, 0},        // ECDHE-RSA-AES128-GCM-SHA256
+    {0x009C, TLS_CIPHER_AES_GCM_128, 16, 4, 0},        // AES128-GCM-SHA256
+    {0x009E, TLS_CIPHER_AES_GCM_128, 16, 4, 0},        // DHE-RSA-AES128-GCM-SHA256
+    {0xC02C, TLS_CIPHER_AES_GCM_256, 32, 4, 1},        // ECDHE-ECDSA-AES256-GCM-SHA384
+    {0xC030, TLS_CIPHER_AES_GCM_256, 32, 4, 1},        // ECDHE-RSA-AES256-GCM-SHA384
+    {0x009D, TLS_CIPHER_AES_GCM_256, 32, 4, 1},        // AES256-GCM-SHA384
+    {0x009F, TLS_CIPHER_AES_GCM_256, 32, 4, 1},        // DHE-RSA-AES256-GCM-SHA384
+    {0xCCA8, TLS_CIPHER_CHACHA20_POLY1305, 32, 12, 0}, // ECDHE-RSA-CHACHA20-POLY1305
+    {0xCCA9, TLS_CIPHER_CHACHA20_POLY1305, 32, 12, 0}, // ECDHE-ECDSA-CHACHA20-POLY1305
+    {0xCCAA, TLS_CIPHER_CHACHA20_POLY1305, 32, 12, 0}, // DHE-RSA-CHACHA20-POLY1305
+};
+
+static const struct ktls_suite *ktls_suite(cv_tls *t, int *v13) {
+    int v = SSL_version(t->ssl);
+    if (v != TLS1_2_VERSION && v != TLS1_3_VERSION) return NULL;
+    *v13 = v == TLS1_3_VERSION;
+    const SSL_CIPHER *c = SSL_get_current_cipher(t->ssl);
+    if (!c) return NULL;
+    uint16_t id = SSL_CIPHER_get_protocol_id(c);
+    for (size_t i = 0; i < sizeof ktls_suites / sizeof ktls_suites[0]; i++) {
+        if (ktls_suites[i].id == id && ((id >> 8) == 0x13) == *v13) return &ktls_suites[i];
+    }
+    return NULL;
+}
+
+/// HKDF-Expand-Label(secret, label, "", out_len): RFC 8446 7.1.
+static int hkdf_expand_label(const EVP_MD *md, const uint8_t *secret, size_t secret_len, const char *label,
+                             uint8_t *out, size_t out_len) {
+    uint8_t info[4 + 6 + 32];
+    size_t label_len = strlen(label), n = 0;
+    if (label_len > 32 || out_len > 255 * (size_t)EVP_MD_size(md)) return 0;
+    info[n++] = (uint8_t)(out_len >> 8);
+    info[n++] = (uint8_t)out_len;
+    info[n++] = (uint8_t)(6 + label_len);
+    memcpy(info + n, "tls13 ", 6);
+    n += 6;
+    memcpy(info + n, label, label_len);
+    n += label_len;
+    info[n++] = 0; // no context
+    // HKDF-Expand: T(i) = HMAC(secret, T(i-1) | info | i).
+    uint8_t block[EVP_MAX_MD_SIZE], in[EVP_MAX_MD_SIZE + sizeof info + 1];
+    unsigned int block_len = 0;
+    int ok = 1;
+    for (size_t done = 0, i = 1; done < out_len; i++) {
+        size_t m = block_len;
+        memcpy(in, block, block_len);
+        memcpy(in + m, info, n);
+        m += n;
+        in[m++] = (uint8_t)i;
+        if (!HMAC(md, secret, (int)secret_len, in, m, block, &block_len)) {
+            ok = 0;
+            break;
+        }
+        size_t take = out_len - done < block_len ? out_len - done : block_len;
+        memcpy(out + done, block, take);
+        done += take;
+    }
+    OPENSSL_cleanse(block, sizeof block);
+    OPENSSL_cleanse(in, sizeof in);
+    return ok;
+}
+
+/// TLS 1.2's PRF(secret, label, seed) over md: RFC 5246 5.
+static int tls12_prf(const EVP_MD *md, const uint8_t *secret, size_t secret_len, const char *label,
+                     const uint8_t *seed, size_t seed_len, uint8_t *out, size_t out_len) {
+    uint8_t ls[32 + 64], a[EVP_MAX_MD_SIZE], in[EVP_MAX_MD_SIZE + sizeof ls], block[EVP_MAX_MD_SIZE];
+    size_t label_len = strlen(label);
+    if (label_len + seed_len > sizeof ls) return 0;
+    memcpy(ls, label, label_len);
+    memcpy(ls + label_len, seed, seed_len);
+    size_t ls_len = label_len + seed_len;
+    unsigned int a_len = 0, block_len = 0;
+    int ok = HMAC(md, secret, (int)secret_len, ls, ls_len, a, &a_len) != NULL; // A(1)
+    for (size_t done = 0; ok && done < out_len;) {
+        memcpy(in, a, a_len);
+        memcpy(in + a_len, ls, ls_len);
+        if (!HMAC(md, secret, (int)secret_len, in, a_len + ls_len, block, &block_len)) {
+            ok = 0;
+            break;
+        }
+        size_t take = out_len - done < block_len ? out_len - done : block_len;
+        memcpy(out + done, block, take);
+        done += take;
+        memcpy(in, a, a_len);
+        ok = HMAC(md, secret, (int)secret_len, in, a_len, a, &a_len) != NULL; // A(i+1)
+    }
+    OPENSSL_cleanse(a, sizeof a);
+    OPENSSL_cleanse(in, sizeof in);
+    OPENSSL_cleanse(block, sizeof block);
+    return ok;
+}
+
+/// The key and IV one way: ours (tx) or the peer's.
+static int ktls_keys(cv_tls *t, const struct ktls_suite *s, int v13, int tx, uint8_t *key, uint8_t *iv) {
+    const EVP_MD *md = s->sha384 ? EVP_sha384() : EVP_sha256();
+    struct cv_ktls *k = t->k;
+    if (v13) {
+        const uint8_t *secret = tx ? k->tx_secret : k->rx_secret;
+        size_t n = tx ? k->tx_secret_len : k->rx_secret_len;
+        if (n != (size_t)EVP_MD_size(md)) return 0;
+        return hkdf_expand_label(md, secret, n, "key", key, s->key_len) &&
+               hkdf_expand_label(md, secret, n, "iv", iv, s->iv_len);
+    }
+    // The key block: client_write_key, server_write_key, client_write_IV,
+    // server_write_IV (an AEAD has no MAC keys).
+    uint8_t master[48], seed[64], block[2 * 32 + 2 * 12];
+    SSL_SESSION *session = SSL_get_session(t->ssl);
+    int ok = session && SSL_SESSION_get_master_key(session, master, sizeof master) == sizeof master &&
+             SSL_get_server_random(t->ssl, seed, 32) == 32 && SSL_get_client_random(t->ssl, seed + 32, 32) == 32 &&
+             tls12_prf(md, master, sizeof master, "key expansion", seed, sizeof seed, block,
+                       2 * (size_t)s->key_len + 2 * (size_t)s->iv_len);
+    if (ok) {
+        int client = tx == !t->ctx->server; // the client's keys, or the server's
+        memcpy(key, block + (client ? 0 : s->key_len), s->key_len);
+        memcpy(iv, block + 2 * s->key_len + (client ? 0 : s->iv_len), s->iv_len);
+    }
+    OPENSSL_cleanse(master, sizeof master);
+    OPENSSL_cleanse(block, sizeof block);
+    return ok;
+}
+
+/// The sequence number of the next record one way.
+static int ktls_sequence(cv_tls *t, int v13, int tx, uint64_t *seq) {
+#if defined(OPENSSL_IS_BORINGSSL)
+    (void)v13;
+    *seq = tx ? SSL_get_write_sequence(t->ssl) : SSL_get_read_sequence(t->ssl);
+    return 1;
+#else
+    struct cv_ktls *k = t->k;
+    if (!v13) {
+        // TLS 1.2's keys take effect after a ChangeCipherSpec.
+        *seq = tx ? k->tx.since_ccs : k->rx.since_ccs;
+        return 1;
+    }
+    if (tx) {
+        if (!k->tx_based) return 0;
+        *seq = k->tx.count - k->tx_base;
+    } else {
+        *seq = k->rx.count - k->rx_base;
+    }
+    return 1;
+#endif
+}
+
+/// Hand one direction to the kernel: 0, or -errno.
+static int ktls_install(int fd, int direction, const struct ktls_suite *s, int v13, const uint8_t *key,
+                        const uint8_t *iv, uint64_t seq) {
+    union {
+        struct tls12_crypto_info_aes_gcm_128 g128;
+        struct tls12_crypto_info_aes_gcm_256 g256;
+        struct tls12_crypto_info_chacha20_poly1305 chacha;
+    } info;
+    memset(&info, 0, sizeof info);
+    uint8_t rec_seq[8];
+    for (int i = 0; i < 8; i++) rec_seq[i] = (uint8_t)(seq >> (56 - 8 * i));
+    uint16_t version = v13 ? TLS_1_3_VERSION : TLS_1_2_VERSION;
+    socklen_t size = 0;
+    // AES-GCM: a 4-byte salt, then 8 bytes of nonce. TLS 1.3 makes all 12
+    // from the IV; TLS 1.2 sends the 8 with each record, here the sequence
+    // number, as OpenSSL and BoringSSL do.
+    switch (s->cipher) {
+    case TLS_CIPHER_AES_GCM_128:
+        info.g128.info.version = version;
+        info.g128.info.cipher_type = s->cipher;
+        memcpy(info.g128.key, key, 16);
+        memcpy(info.g128.salt, iv, 4);
+        memcpy(info.g128.iv, v13 ? iv + 4 : rec_seq, 8);
+        memcpy(info.g128.rec_seq, rec_seq, 8);
+        size = sizeof info.g128;
+        break;
+    case TLS_CIPHER_AES_GCM_256:
+        info.g256.info.version = version;
+        info.g256.info.cipher_type = s->cipher;
+        memcpy(info.g256.key, key, 32);
+        memcpy(info.g256.salt, iv, 4);
+        memcpy(info.g256.iv, v13 ? iv + 4 : rec_seq, 8);
+        memcpy(info.g256.rec_seq, rec_seq, 8);
+        size = sizeof info.g256;
+        break;
+    default: // ChaCha20-Poly1305: all 12 bytes of IV, in both versions
+        info.chacha.info.version = version;
+        info.chacha.info.cipher_type = s->cipher;
+        memcpy(info.chacha.key, key, 32);
+        memcpy(info.chacha.iv, iv, 12);
+        memcpy(info.chacha.rec_seq, rec_seq, 8);
+        size = sizeof info.chacha;
+        break;
+    }
+    int r = setsockopt(fd, SOL_TLS, direction, &info, size) == 0 ? 0 : -errno;
+    OPENSSL_cleanse(&info, sizeof info);
+    return r;
+}
+
+/// Hand a direction to the kernel at the key and record the engine is at.
+static int ktls_direction(cv_tls *t, int fd, int tx) {
+    int v13 = 0;
+    const struct ktls_suite *s = ktls_suite(t, &v13);
+    uint8_t key[32], iv[12];
+    uint64_t seq = 0;
+    int r = -ENOTSUP;
+    if (s && ktls_sequence(t, v13, tx, &seq) && ktls_keys(t, s, v13, tx, key, iv))
+        r = ktls_install(fd, tx ? TLS_TX : TLS_RX, s, v13, key, iv, seq);
+    OPENSSL_cleanse(key, sizeof key);
+    OPENSSL_cleanse(iv, sizeof iv);
+    ERR_clear_error();
+    return r;
+}
+
+int cv_tls_ktls_enable_tx(cv_tls *t, int fd) {
+    struct cv_ktls *k = t->k;
+    if (!k) return 0;
+    if (k->on & CV_KTLS_TX) return 1;
+    // All our ciphertext sent, in whole records, and the key the handshake
+    // made still ours: else the connection stays in userspace.
+    int v13 = 0;
+    if (!(k->stale & CV_KTLS_TX) && !t->out.len && !t->taken.p && records_whole(&k->tx) && ktls_suite(t, &v13)) {
+        int ulp = setsockopt(fd, IPPROTO_TCP, TCP_ULP, "tls", sizeof "tls") == 0 || errno == EEXIST;
+        if (ulp && ktls_direction(t, fd, 1) == 0) {
+            k->on |= CV_KTLS_TX;
+            return 1;
+        }
+    }
+    ktls_drop(t);
+    return 0;
+}
+
+int cv_tls_ktls_enable_rx(cv_tls *t, int fd) {
+    struct cv_ktls *k = t->k;
+    if (!k || !(k->on & CV_KTLS_TX) || !(k->want & CV_KTLS_RX) || (k->stale & CV_KTLS_RX)) return -1;
+    if (k->on & CV_KTLS_RX) return 1;
+    // Not while the engine holds part of a record or plaintext not yet
+    // read: the kernel must start at a record's first byte.
+    if (!records_whole(&k->rx) || SSL_has_pending(t->ssl) || t->eof) return 0;
+    // A TLS 1.3 client keeping sessions waits for a record after the
+    // handshake: the server's tickets come first, and the kernel would only
+    // hand them over.
+    if (SSL_version(t->ssl) == TLS1_3_VERSION && !t->ctx->server && t->ctx->cache_size > 0 &&
+        k->rx.count == k->rx_base)
+        return 0;
+    if (ktls_direction(t, fd, 0) != 0) {
+        k->want &= ~CV_KTLS_RX;
+        return -1;
+    }
+    k->on |= CV_KTLS_RX;
+    return 1;
+}
+
+int cv_tls_ktls_update(cv_tls *t, int fd, int tx) {
+    struct cv_ktls *k = t->k;
+    int v13 = 0;
+    const struct ktls_suite *s = k ? ktls_suite(t, &v13) : NULL;
+    if (!s || !v13 || !(k->on & (tx ? CV_KTLS_TX : CV_KTLS_RX))) return -EINVAL;
+    const EVP_MD *md = s->sha384 ? EVP_sha384() : EVP_sha256();
+    uint8_t *secret = tx ? k->tx_secret : k->rx_secret;
+    size_t n = tx ? k->tx_secret_len : k->rx_secret_len;
+    // RFC 8446 7.2: the next secret, its key and IV, sequence numbers from 0.
+    uint8_t next[48], key[32], iv[12];
+    int r = -EINVAL;
+    if (n <= sizeof next && hkdf_expand_label(md, secret, n, "traffic upd", next, n)) {
+        memcpy(secret, next, n);
+        if (hkdf_expand_label(md, secret, n, "key", key, s->key_len) &&
+            hkdf_expand_label(md, secret, n, "iv", iv, s->iv_len))
+            r = ktls_install(fd, tx ? TLS_TX : TLS_RX, s, 1, key, iv, 0);
+    }
+    OPENSSL_cleanse(next, sizeof next);
+    OPENSSL_cleanse(key, sizeof key);
+    OPENSSL_cleanse(iv, sizeof iv);
+    ERR_clear_error();
+    return r;
+}
+
+void cv_tls_ktls_owe_update(cv_tls *t) {
+    if (t->k) __atomic_store_n(&t->k->update_owed, 1, __ATOMIC_RELEASE);
+}
+
+int cv_tls_ktls_take_owed_update(cv_tls *t) {
+    return t->k && __atomic_load_n(&t->k->update_owed, __ATOMIC_ACQUIRE) &&
+           __atomic_exchange_n(&t->k->update_owed, 0, __ATOMIC_ACQ_REL);
+}
+
+intptr_t cv_ktls_send_record(int fd, int type, const void *buf, intptr_t len) {
+    union {
+        char buf[CMSG_SPACE(sizeof(unsigned char))];
+        struct cmsghdr align;
+    } control;
+    memset(&control, 0, sizeof control);
+    struct iovec iov = {(void *)buf, (size_t)len};
+    struct msghdr mh;
+    memset(&mh, 0, sizeof mh);
+    mh.msg_iov = &iov;
+    mh.msg_iovlen = 1;
+    mh.msg_control = control.buf;
+    mh.msg_controllen = sizeof control.buf;
+    struct cmsghdr *c = CMSG_FIRSTHDR(&mh);
+    c->cmsg_level = SOL_TLS;
+    c->cmsg_type = TLS_SET_RECORD_TYPE;
+    c->cmsg_len = CMSG_LEN(sizeof(unsigned char));
+    *CMSG_DATA(c) = (unsigned char)type;
+    mh.msg_controllen = c->cmsg_len;
+    ssize_t n = sendmsg(fd, &mh, MSG_DONTWAIT | MSG_NOSIGNAL);
+    return n >= 0 ? (intptr_t)n : -(intptr_t)errno;
+}
+
+/// recvmsg, with room for the record's type.
+static ssize_t recv_typed(int fd, void *buf, size_t len, int flags, int *type) {
+    union {
+        char buf[CMSG_SPACE(sizeof(unsigned char))];
+        struct cmsghdr align;
+    } control;
+    struct iovec iov = {buf, len};
+    struct msghdr mh;
+    memset(&mh, 0, sizeof mh);
+    mh.msg_iov = &iov;
+    mh.msg_iovlen = 1;
+    mh.msg_control = control.buf;
+    mh.msg_controllen = sizeof control.buf;
+    *type = 0;
+    ssize_t n = recvmsg(fd, &mh, flags | MSG_DONTWAIT);
+    if (n < 0) return -errno;
+    for (struct cmsghdr *c = CMSG_FIRSTHDR(&mh); c; c = CMSG_NXTHDR(&mh, c)) {
+        if (c->cmsg_level == SOL_TLS && c->cmsg_type == TLS_GET_RECORD_TYPE) *type = *CMSG_DATA(c);
+    }
+    return n;
+}
+
+intptr_t cv_ktls_recv_record(int fd, void *buf, intptr_t len, int *type) {
+    // A look first: application data is left for the plain reads.
+    ssize_t n = recv_typed(fd, buf, (size_t)len, MSG_PEEK, type);
+    if (n <= 0) return n;
+    if (*type == 23) return 0;
+    return recv_typed(fd, buf, (size_t)len, 0, type);
+}
+#else
+void cv_tls_ctx_set_ktls(cv_tls_ctx *c) { (void)c; }
+void cv_tls_ktls_want(cv_tls *t, int directions) {
+    (void)t;
+    (void)directions;
+}
+int cv_tls_ktls_state(cv_tls *t) {
+    (void)t;
+    return 0;
+}
+intptr_t cv_tls_ktls_rx_short(cv_tls *t) {
+    (void)t;
+    return 0;
+}
+int cv_tls_ktls_enable_tx(cv_tls *t, int fd) {
+    (void)t;
+    (void)fd;
+    return 0;
+}
+int cv_tls_ktls_enable_rx(cv_tls *t, int fd) {
+    (void)t;
+    (void)fd;
+    return -1;
+}
+int cv_tls_ktls_update(cv_tls *t, int fd, int tx) {
+    (void)t;
+    (void)fd;
+    (void)tx;
+    return -1;
+}
+void cv_tls_ktls_owe_update(cv_tls *t) { (void)t; }
+int cv_tls_ktls_take_owed_update(cv_tls *t) {
+    (void)t;
+    return 0;
+}
+intptr_t cv_ktls_send_record(int fd, int type, const void *buf, intptr_t len) {
+    (void)fd;
+    (void)type;
+    (void)buf;
+    (void)len;
+    return -1;
+}
+intptr_t cv_ktls_recv_record(int fd, void *buf, intptr_t len, int *type) {
+    (void)fd;
+    (void)buf;
+    (void)len;
+    *type = 0;
+    return -1;
+}
+#endif
+
 // MARK: - The BIO
 
 /// Room for `more` bytes after the ones in o. Sizes go 4.25 KiB, 8.5, 17,
@@ -649,6 +1239,9 @@ static int bio_read(BIO *b, char *buf, int len) {
     }
     size_t n = (size_t)len < t->in_len ? (size_t)len : t->in_len;
     memcpy(buf, t->in, n);
+#if CV_KTLS
+    if (t->k) ktls_track_in(t, t->in, n);
+#endif
     t->in += n;
     t->in_len -= n;
     return (int)n;
@@ -659,6 +1252,11 @@ static int bio_write(BIO *b, const char *buf, int len) {
     cv_tls *t = BIO_get_data(b);
     BIO_clear_retry_flags(b);
     if (len <= 0) return 0;
+#if CV_KTLS
+    // The kernel encrypts now: what the engine still writes (a KeyUpdate's
+    // answer, an alert) is its own business, and goes nowhere.
+    if (t->k && ktls_track_out(t, buf, (size_t)len)) return len;
+#endif
     if (!out_reserve(&t->out, (size_t)len)) return -1; // out of memory: the engine fails the call
     memcpy(t->out.p + t->out.len, buf, (size_t)len);
     t->out.len += (size_t)len;
@@ -768,6 +1366,12 @@ cv_tls *cv_tls_new(cv_tls_ctx *c, const char *host, char *err, int errlen) {
 
 void cv_tls_free(cv_tls *t) {
     if (!t) return;
+#if CV_KTLS
+    if (t->k) {
+        OPENSSL_cleanse(t->k, sizeof *t->k);
+        free(t->k);
+    }
+#endif
     SSL_free(t->ssl); // and the BIO
     OPENSSL_free(t->host);
     free(t->out.p);
@@ -834,6 +1438,9 @@ static int handshake_step(cv_tls *t) {
 int cv_tls_handshake(cv_tls *t, const void *in, intptr_t in_len, cv_tls_status *st) {
     enter(t, in, in_len);
     int r = handshake_step(t);
+#if CV_KTLS
+    if (r == 1 && t->k) ktls_handshake_done(t);
+#endif
     st->drained = 0;
     leave(t, in_len, st);
     return r;
@@ -902,6 +1509,44 @@ void cv_tls_close(cv_tls *t) {
     clean_queue();
     SSL_shutdown(t->ssl);
     ERR_clear_error();
+}
+
+int cv_tls_key_update(cv_tls *t, int request, cv_tls_status *st) {
+    enter(t, NULL, 0);
+    int r = 0;
+    if (SSL_version(t->ssl) != TLS1_3_VERSION) {
+        snprintf(t->err, sizeof t->err, "key update: TLS 1.3 only");
+        r = CV_TLS_ERROR;
+    } else if (SSL_key_update(t->ssl, request ? SSL_KEY_UPDATE_REQUESTED : SSL_KEY_UPDATE_NOT_REQUESTED) != 1) {
+        record_error(t, "key update");
+        r = CV_TLS_ERROR;
+    } else {
+        // Queued: a write sends it (BoringSSL's, of nothing), or OpenSSL's
+        // handshake call.
+#if defined(OPENSSL_IS_BORINGSSL)
+        int sent = SSL_write(t->ssl, "", 0) >= 0;
+#else
+        int sent = SSL_do_handshake(t->ssl) == 1;
+#endif
+        if (!sent) {
+            record_error(t, "key update");
+            r = CV_TLS_ERROR;
+        }
+    }
+    st->drained = 0;
+    leave(t, 0, st);
+    return r;
+}
+
+void cv_tls_ktls_settle(cv_tls *t, cv_tls_status *st) {
+    enter(t, NULL, 0);
+#if defined(OPENSSL_IS_BORINGSSL) && CV_KTLS
+    // A BoringSSL server keeps its TLS 1.3 tickets until it writes; the
+    // kernel will do the writing, so out with them now.
+    if (t->k && SSL_write(t->ssl, "", 0) < 0) ERR_clear_error();
+#endif
+    st->drained = 0;
+    leave(t, 0, st);
 }
 
 const char *cv_tls_error(cv_tls *t) { return t->err; }

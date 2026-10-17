@@ -114,6 +114,55 @@ int cv_tls_buffered(cv_tls *t);
 /// 0 if there is none.
 int cv_tls_peer_certificate(cv_tls *t, uint8_t *out, int len);
 
+/// TLS 1.3: send a KeyUpdate (request: ask the peer for its own), new
+/// keys for what we send from then on. 0, or CV_TLS_ERROR (TLS 1.2).
+int cv_tls_key_update(cv_tls *t, int request, cv_tls_status *st);
+
+/// Kernel TLS (Linux): after the handshake the kernel encrypts what goes
+/// out (and decrypts what comes in) on the connection's TCP socket. Where
+/// there's no kernel TLS these do nothing and say it's off.
+#define CV_KTLS_TX 1
+#define CV_KTLS_RX 2
+/// A context whose connections may ask for it: keeps the TLS 1.3 secrets
+/// the kernel needs (the library's key log).
+void cv_tls_ctx_set_ktls(cv_tls_ctx *ctx);
+/// Before the handshake: the directions to hand over (CV_KTLS_TX, with or
+/// without CV_KTLS_RX; RX is only with TX).
+void cv_tls_ktls_want(cv_tls *t, int directions);
+/// The directions the kernel has.
+int cv_tls_ktls_state(cv_tls *t);
+/// After the handshake, before cv_tls_ktls_enable_tx: anything the
+/// library keeps back until it writes (BoringSSL's TLS 1.3 session
+/// tickets) is put out now, pending to be sent.
+void cv_tls_ktls_settle(cv_tls *t, cv_tls_status *st);
+/// After the handshake, with its ciphertext all sent: give our direction to
+/// the kernel on the TCP socket fd. 1, or 0 when it can't be (no kernel
+/// TLS, a suite it lacks): then the connection stays in userspace, RX too.
+int cv_tls_ktls_enable_tx(cv_tls *t, int fd);
+/// Give the peer's direction to the kernel, once TX is there: 1 done, 0
+/// not yet (the engine is inside a record, or holds plaintext; call again
+/// after it has given everything out), -1 never.
+int cv_tls_ktls_enable_rx(cv_tls *t, int fd);
+/// While RX waits: how many more bytes of the peer's ciphertext end the
+/// record the engine is inside (0 at a boundary), so that a read of no
+/// more leaves it at one.
+intptr_t cv_tls_ktls_rx_short(cv_tls *t);
+/// TLS 1.3 KeyUpdate for a direction the kernel has (tx 1: ours, after
+/// sending the KeyUpdate; 0: the peer's, after reading one): the next
+/// secret, installed. 0, or -errno (a kernel that can't rekey).
+int cv_tls_ktls_update(cv_tls *t, int fd, int tx);
+/// The peer asked for our KeyUpdate: owe it; and take the debt (1 if owed).
+void cv_tls_ktls_owe_update(cv_tls *t);
+int cv_tls_ktls_take_owed_update(cv_tls *t);
+/// A record of the given type (21 alert, 22 handshake) through the kernel,
+/// without waiting: bytes sent, or -errno (-EAGAIN when the socket is full).
+intptr_t cv_ktls_send_record(int fd, int type, const void *buf, intptr_t len);
+/// The record at the head of the socket's queue, without waiting, when a
+/// plain read failed with EIO (a record other than application data):
+/// bytes, with its type; type 23 (application data) is left in the queue
+/// and 0 returned; or -errno.
+intptr_t cv_ktls_recv_record(int fd, void *buf, intptr_t len, int *type);
+
 /// A self-signed certificate and its P-256 key, as PEM, for tests and
 /// development: names is a comma-separated list of DNS names and IP
 /// addresses (the first is also the subject's CN). 0, or -1 with a message

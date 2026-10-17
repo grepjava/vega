@@ -850,6 +850,11 @@ public struct WriteHalf: ~Copyable, Sendable {
         try reg.trySend(parts: parts.count) { parts[$0] }
     }
 
+    /// `TCPStream.sendFile(_:offset:count:)`, from the writing half.
+    public func sendFile(_ file: Int32, offset: Int64 = 0, count: Int) async throws(IOError) -> Int {
+        try await reg.sendFile(file, offset: offset, count: count)
+    }
+
     /// Stop sending now rather than when the half is dropped.
     public func shutdownWrite() throws(IOError) { try reg.shutdownWrite() }
 }

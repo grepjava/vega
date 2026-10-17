@@ -55,6 +55,18 @@ public struct TLSConfiguration: Sendable {
         public static func < (a: Version, b: Version) -> Bool { a.rawValue < b.rawValue }
     }
 
+    /// Which directions of a connection's records Linux's kernel TLS takes
+    /// over once the handshake is done (`kernelOffload`).
+    public enum KernelOffload: Sendable, Hashable {
+        /// None: the TLS library encrypts and decrypts, here.
+        case off
+        /// What we send: the kernel encrypts writes, and `sendFile` sends
+        /// a file without it passing through this process.
+        case transmit
+        /// What we send and what we receive.
+        case transmitAndReceive
+    }
+
     public var role: Role
     /// Our certificate and key: a server's, or a client's for mutual TLS.
     public var identity: TLSIdentity?
@@ -89,6 +101,16 @@ public struct TLSConfiguration: Sendable {
     /// it quick, and return contexts made beforehand. Every context it
     /// returns is kept alive by this one.
     public var selectContext: (@Sendable (ClientHello) -> TLSContext?)?
+    /// Linux: hand record encryption (and with `.transmitAndReceive`
+    /// decryption) to the kernel after the handshake, on a `TLSStream` over
+    /// a `TCPStream` (or its halves). Writes then go to the socket as they
+    /// are and `sendFile` works through the kernel. Off by default; a
+    /// connection the kernel can't take -- no `tls` module, a cipher suite
+    /// it lacks (AES-GCM and ChaCha20-Poly1305 it has), another transport,
+    /// another platform -- stays in userspace without a word, and
+    /// `TLSStream.kernelOffload` says which it got. See `TLSStream` for what
+    /// changes with receive offload.
+    public var kernelOffload: KernelOffload = .off
 
     public init(role: Role, identity: TLSIdentity? = nil, trustRoots: TrustRoots = .system,
                 verification: Verification? = nil, applicationProtocols: [String] = []) {
@@ -267,6 +289,9 @@ public final class TLSContext: @unchecked Sendable {
         if let key = c.ticketKey, c.role == .server {
             try check { err, len in cv_tls_ctx_set_ticket_key(ctx, key, Int32(key.count), err, len) }
         }
+        #if os(Linux)
+        if c.kernelOffload != .off { cv_tls_ctx_set_ktls(ctx) }
+        #endif
         return ctx
     }
 

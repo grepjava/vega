@@ -69,7 +69,7 @@ mature, widely deployed and far more proven than Vega.
 | Windows | IOCP: AFD readiness, `TransmitFile` | in progress upstream | IOCP |
 | Blocking work | `Runtime.blocking` | `NIOThreadPool` | `spawn_blocking` |
 | Timers and tests | timer wheel; `MockClock` paused time, in-memory `duplex()` streams | `EmbeddedEventLoop`, `NIOAsyncTestingChannel` | timer wheel; `time::pause`, `tokio-test` |
-| TLS | VegaTLS on OpenSSL 3 or vendored BoringSSL | swift-nio-ssl (BoringSSL) | rustls or native-tls, separate crates |
+| TLS | VegaTLS on OpenSSL 3 or vendored BoringSSL; kernel TLS offload on Linux | swift-nio-ssl (BoringSSL) | rustls or native-tls, separate crates |
 | HTTP | VegaHTTP1, VegaHTTP2, VegaWebSocket | NIOHTTP1, swift-nio-http2, NIOWebSocket | hyper, tungstenite, separate crates |
 | QUIC and HTTP/3 | VegaQUIC (sans-I/O, client and server), VegaQUICNet (on Vega's UDP sockets), VegaHTTP3 (frames, QPACK), VegaHTTP3Net (server and client) | not in SwiftNIO itself; on Apple platforms, Network.framework's QUIC | quinn, h3, separate crates |
 | Maturity | 0.5, since 2026 | since 2018, the base of Vapor, Hummingbird, gRPC Swift and more | since 2016, the base of most async Rust |
@@ -102,7 +102,7 @@ Measure your own.
 | `Sources/VegaFS` | files and paths: `File` (io_uring-native reads, writes, syncs and opens; the blocking pool elsewhere), `FileSystem` |
 | `Sources/VegaProcess` | child processes: `Command`, `Child` (exit watched through a pidfd on Linux), `Output`; pipes (`makePipe()`) live in Vega |
 | `Sources/VegaMetrics` | `metricsSamples(every:)` (periodic deltas of `Runtime.metrics`), Prometheus text export |
-| `Sources/VegaTLS` | `TLSStream` over any stream, `TLSConfiguration`, `TLSContext` |
+| `Sources/VegaTLS` | `TLSStream` over any stream, `TLSConfiguration`, `TLSContext`; ALPN, SNI, mutual TLS, session resumption, Linux kernel TLS (kTLS) offload |
 | `Sources/VegaCrypto` | over the same library: `Hash`, `HMAC`, `PBKDF2`, `HKDF`, `AEAD`, QUIC `HeaderProtection`, `KeyExchange`, JWS/TLS `SigningKey` and `PublicKey`, `CertificateKey`, `SecureRandom` |
 | `Sources/VegaWire` | wire formats, sans I/O: `ByteBuffer`, HPACK, HTTP/2 frame headers, WebSocket frames, permessage-deflate negotiation |
 | `Sources/VegaHTTP1`, `Sources/VegaHTTP2` | HTTP/1.1 parsing, codecs and connections; HTTP/2 connections |
@@ -164,3 +164,27 @@ There are costs:
 - Vega, not the operating system, ships BoringSSL's security fixes.
 - The binary is about 11 MB larger.
 - OpenSSL 3.5 negotiates the post-quantum X25519MLKEM768 key exchange by default, and this BoringSSL negotiates X25519.
+
+### Kernel TLS
+
+On Linux, `TLSConfiguration.kernelOffload` gives a connection's records to the
+kernel's TLS (kTLS) once the handshake is done, for a `TLSStream` over a
+`TCPStream`:
+
+```swift
+var config = TLSConfiguration.server(identity: identity)
+config.kernelOffload = .transmit            // or .transmitAndReceive
+let tls = try await TLSStream.accept(conn, context: TLSContext(config))
+_ = try await tls.sendFile(fd, count: size) // sendfile(2), encrypted by the kernel
+```
+
+With `.transmit` the kernel encrypts: writes go to the socket as they are,
+and `sendFile` sends a file without copying it through the process. With
+`.transmitAndReceive` it decrypts too. It works with OpenSSL and BoringSSL
+alike, for AES-128-GCM, AES-256-GCM and ChaCha20-Poly1305 under TLS 1.2 and
+1.3. It is off by default, and a connection the kernel can't take (no `tls`
+module, a cipher it lacks, any other transport) stays in userspace without
+error: `tls.kernelOffload` says what the kernel has. With receive offload,
+TLS 1.3 session tickets that come after the switch are dropped. A client
+reads one record itself first, so it keeps the first ticket. A peer's
+KeyUpdate needs Linux 6.14 or later.
