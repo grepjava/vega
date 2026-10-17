@@ -479,6 +479,13 @@ int cv_unix_connect(const char *path, int *err);
 int cv_unix_accept(int fd, int *err);
 /// A connected pair of Unix stream sockets. 0 or an errno value.
 int cv_unix_pair(int fds[2]);
+/// A Unix datagram socket bound to path, or unbound for a NULL path. -1
+/// with *err on failure.
+int cv_unix_dgram_bind(const char *path, int *err);
+/// A connected pair of Unix datagram sockets. 0 or an errno value.
+int cv_unix_dgram_pair(int fds[2]);
+/// A Unix socket address for path. 0, or an errno value (ENAMETOOLONG).
+int cv_unix_sockaddr(const char *path, cv_sockaddr *out);
 
 // ---- socket options ------------------------------------------------------
 // Portable option ids, mapped to each platform's level and name in cvega.c.

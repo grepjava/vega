@@ -2347,6 +2347,49 @@ int cv_unix_connect(const char *path, int *err) {
 
 int cv_unix_accept(int fd, int *err) { return accept_nb(fd, err); }
 
+int cv_unix_dgram_bind(const char *path, int *err) {
+    struct sockaddr_un un;
+    socklen_t len;
+    if (path && (*err = unix_address(path, &un, &len)) != 0) return -1;
+    int fd = new_socket(AF_UNIX, SOCK_DGRAM);
+    if (fd < 0) {
+        *err = errno;
+        return -1;
+    }
+    if (path && bind(fd, (struct sockaddr *)&un, len) != 0) {
+        *err = errno;
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+int cv_unix_dgram_pair(int fds[2]) {
+#if defined(__linux__)
+    if (socketpair(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds) != 0) return errno;
+#else
+    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, fds) != 0) return errno;
+    if (prepare_fd(fds[0]) != 0 || prepare_fd(fds[1]) != 0) {
+        int e = errno;
+        close(fds[0]);
+        close(fds[1]);
+        return e;
+    }
+#endif
+    return 0;
+}
+
+int cv_unix_sockaddr(const char *path, cv_sockaddr *out) {
+    struct sockaddr_un un;
+    socklen_t len;
+    int e = unix_address(path, &un, &len);
+    if (e != 0) return e;
+    memset(out, 0, sizeof *out);
+    memcpy(out->storage, &un, len);
+    out->len = (uint32_t)len;
+    return 0;
+}
+
 int cv_unix_pair(int fds[2]) {
 #if defined(__linux__)
     if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds) != 0) return errno;
