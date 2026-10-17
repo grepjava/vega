@@ -233,7 +233,7 @@ Spike: `scratchpad/spike` (built in WSL, run on the bench box 192.168.100.100: i
   - the deterministic seeded runtime in `VegaTest` for reproducing failures;
   - a fault-injecting driver (`EAGAIN`, short writes, `ECONNRESET`, slow completions).
 - **CI matrix:** Linux on kernels 6.1 and 6.8+ (uring and epoll), macOS (kqueue), Windows (IOCP), iOS simulator (network).
-  - Local, not hosted: `ci/run.ps1` sends the working tree to the Linux box and runs `ci/linux.sh` there in Docker (io_uring and epoll on OpenSSL, io_uring on BoringSSL, ThreadSanitizer not yet required), and `ci/windows.ps1` here. `ci/macos.sh` runs on the Mac (kqueue, and Network.framework on the iOS simulator).
+  - Local, not hosted: `ci/run.ps1` sends the working tree to the Linux box and runs `ci/linux.sh` there in Docker (io_uring and epoll on OpenSSL, io_uring on BoringSSL, ThreadSanitizer), and `ci/windows.ps1` here. `ci/macos.sh` runs on the Mac (kqueue, and Network.framework on the iOS simulator).
   - The box runs kernel 7.0; 6.1 needs a VM.
 - **Parity:** one conformance test per row of the matrix, ported from the equivalent Tokio or SwiftNIO tests (NIO's `EmbeddedChannel` tests become `VegaTest` duplex tests). Also h2spec, Autobahn for WebSocket, and Garuda's existing `garuda-conformance` once integrated.
 - **Benchmarks** (separate `Benchmarks/` package), Vega against SwiftNIO 2.x (`MultiThreadedEventLoopGroup` + `NIOAsyncChannel`) and Tokio:

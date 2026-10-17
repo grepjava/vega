@@ -4,7 +4,7 @@
 #   uring     io_uring, OpenSSL
 #   epoll     epoll, OpenSSL
 #   boringssl io_uring, BoringSSL
-#   tsan      ThreadSanitizer, io_uring (reported, not yet required)
+#   tsan      ThreadSanitizer, io_uring
 # Docker's default seccomp profile blocks io_uring, so containers run
 # unconfined. Each job builds in its own .build-ci/<job>, kept between runs.
 # Logs go to .build-ci/<job>.log; exits non-zero if a required job fails.
@@ -26,7 +26,7 @@ for job in "${JOBS[@]}"; do
     uring) ;;
     epoll) driver=epoll ;;
     boringssl) traits=BoringSSL ;;
-    tsan) extra=--sanitize=thread required=0 ;;
+    tsan) extra=--sanitize=thread ;;
     *) echo "unknown job $job"; exit 2 ;;
   esac
   log=.build-ci/$job.log
