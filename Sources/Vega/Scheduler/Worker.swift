@@ -118,6 +118,16 @@ final class Worker: @unchecked Sendable {
     let pollNanos = Atomic<UInt64>(0)
     static let pollBuckets = 24
 
+    /// Jobs of the `LocalExecutor`s bound to this worker, each with the
+    /// executor it runs isolated to. Only this worker runs them, and none is
+    /// stolen. `pinnedCount` lets the loop skip the lock.
+    private let pinnedLock = RawLock()
+    private let pinned = Guarded(RawRing<PinnedJob>(capacity: 16))
+    let pinnedCount = Atomic<Int>(0)
+    /// At most this many pinned jobs between two of the shared queues', so
+    /// a busy `LocalExecutor` can't starve them.
+    static let pinnedBatch = 32
+
     init(index: Int) {
         self.index = index
         rng = UInt32(truncatingIfNeeded: index &* 0x9E37_79B9) | 1
@@ -126,6 +136,9 @@ final class Worker: @unchecked Sendable {
     }
 
     deinit {
+        pinned.pointer.pointee.destroy()
+        pinned.destroy()
+        pinnedLock.destroy()
         cv_parker_free(parker)
         injectBuffer.deallocate()
         afterJobActions.deinitialize(count: afterJobCount)
@@ -311,9 +324,10 @@ final class Worker: @unchecked Sendable {
         #endif
         activeSince.store(cv_now_coarse_ns(), ordering: .relaxed)
         while !s.isShutdown.load(ordering: .relaxed) {
+            if pinnedCount.load(ordering: .relaxed) != 0 { runPinned(s, executor) }
             if let job = nextJob(s) ?? ringJob() ?? steal(s) {
                 runJob(job, s, executor)
-            } else {
+            } else if pinnedCount.load(ordering: .relaxed) == 0 {
                 parkCounted(s)
             }
         }
@@ -332,9 +346,10 @@ final class Worker: @unchecked Sendable {
         let executor = s.asUnownedTaskExecutor()
         activeSince.store(cv_now_coarse_ns(), ordering: .relaxed)
         while !s.isShutdown.load(ordering: .relaxed) && !driveDone.load(ordering: .acquiring) {
+            if pinnedCount.load(ordering: .relaxed) != 0 { runPinned(s, executor) }
             if let job = nextJob(s) ?? steal(s) {
                 runJob(job, s, executor)
-            } else {
+            } else if pinnedCount.load(ordering: .relaxed) == 0 {
                 parkCounted(s)
             }
         }
@@ -346,8 +361,15 @@ final class Worker: @unchecked Sendable {
         cv_current_set(nil)
     }
 
-    @inline(__always) private static func run(_ job: UnownedJob, _ executor: UnownedTaskExecutor?) {
-        if let executor {
+    @inline(__always) private static func run(_ job: UnownedJob, _ executor: UnownedTaskExecutor?,
+                                              _ serial: UnownedSerialExecutor?) {
+        if let serial {
+            if let executor {
+                job.runSynchronously(isolatedTo: serial, taskExecutor: executor)
+            } else {
+                job.runSynchronously(on: serial)
+            }
+        } else if let executor {
             job.runSynchronously(on: executor)
         } else {
             cv_job_run_generic(unsafeBitCast(job, to: UnsafeMutableRawPointer.self))
@@ -356,7 +378,8 @@ final class Worker: @unchecked Sendable {
 
     /// `executor`: the runtime as the job's task executor; nil runs it as
     /// the global executor does (`Scheduler.runsGlobal`).
-    @inline(__always) private func runJob(_ job: UnownedJob, _ s: Scheduler, _ executor: UnownedTaskExecutor?) {
+    @inline(__always) private func runJob(_ job: UnownedJob, _ s: Scheduler, _ executor: UnownedTaskExecutor?,
+                                          isolatedTo serial: UnownedSerialExecutor? = nil) {
         if isSearching {
             isSearching = false
             if s.idle.transitionFromSearching() { s.notifyParked() }
@@ -368,10 +391,10 @@ final class Worker: @unchecked Sendable {
         budget = Self.budgetPerPoll
         if s.pollTiming.load(ordering: .relaxed) {
             let start = cv_now_ns()
-            Self.run(job, executor)
+            Self.run(job, executor, serial)
             recordPoll(cv_now_ns() &- start, s)
         } else {
-            Self.run(job, executor)
+            Self.run(job, executor, serial)
         }
         #if VEGA_JOB_AUDIT
         JobAudit.note(job, "done")
@@ -388,6 +411,39 @@ final class Worker: @unchecked Sendable {
             viaInject(s) { c.resume() }
         }
         jobsRun.store(jobsRun.load(ordering: .relaxed) &+ 1, ordering: .relaxed)
+    }
+
+    // MARK: pinned jobs
+
+    struct PinnedJob {
+        let job: UnownedJob
+        let executor: UnownedSerialExecutor
+    }
+
+    /// A `LocalExecutor`'s job, to run on this worker only; from any thread.
+    func pushPinned(_ job: UnownedJob, isolatedTo executor: UnownedSerialExecutor) {
+        let p = pinned.pointer
+        pinnedLock.withLock {
+            p.pointee.pushBack(PinnedJob(job: job, executor: executor))
+            pinnedCount.add(1, ordering: .sequentiallyConsistent)
+        }
+        // From another thread this worker may be parked: wake it (an unpark
+        // before it parks makes the park return at once).
+        if Worker.current?.toOpaque() != Unmanaged.passUnretained(self).toOpaque() { cv_unpark(parker) }
+    }
+
+    /// Run the pinned jobs queued now, up to `pinnedBatch`.
+    @inline(never) private func runPinned(_ s: Scheduler, _ executor: UnownedTaskExecutor?) {
+        let p = pinned.pointer
+        for _ in 0..<Self.pinnedBatch {
+            let next = pinnedLock.withLock { () -> PinnedJob? in
+                guard let j = p.pointee.popFront() else { return nil }
+                pinnedCount.subtract(1, ordering: .sequentiallyConsistent)
+                return j
+            }
+            guard let next else { return }
+            runJob(next.job, s, executor, isolatedTo: next.executor)
+        }
     }
 
     private func nextJob(_ s: Scheduler) -> UnownedJob? {
@@ -485,7 +541,7 @@ final class Worker: @unchecked Sendable {
         // Paused time: the last round polled I/O and found nothing to do.
         var idleChecked = false
         while !s.isShutdown.load(ordering: .relaxed) {
-            if lifo != nil || driveDone.load(ordering: .acquiring) {
+            if lifo != nil || driveDone.load(ordering: .acquiring) || pinnedCount.load(ordering: .sequentiallyConsistent) != 0 {
                 // Never sleep on a runnable job of our own.
                 reclaim(s)
                 return
@@ -546,7 +602,7 @@ final class Worker: @unchecked Sendable {
                 if ownsTimers { handOverTimers(s) }
                 return
             }
-            if fired > 0 || lifo != nil || !queue.isEmpty {
+            if fired > 0 || lifo != nil || !queue.isEmpty || pinnedCount.load(ordering: .sequentiallyConsistent) != 0 {
                 reclaim(s)
                 return
             }
