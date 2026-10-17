@@ -37,3 +37,23 @@ struct Guarded<Value>: @unchecked Sendable {
         pointer.deallocate()
     }
 }
+
+/// A value behind a `RawLock`, with `Mutex`'s `withLock`: for the package's
+/// other modules, where ThreadSanitizer must see the lock (it doesn't see
+/// `Synchronization.Mutex` on Linux, and reports what it guards as racing).
+package final class Locked<Value>: @unchecked Sendable {
+    private let lock = RawLock()
+    private var value: Value
+
+    package init(_ value: Value) {
+        self.value = value
+    }
+
+    deinit { lock.destroy() }
+
+    package func withLock<R, E: Error>(_ body: (inout Value) throws(E) -> R) throws(E) -> R {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body(&value)
+    }
+}

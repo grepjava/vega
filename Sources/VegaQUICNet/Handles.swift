@@ -59,7 +59,7 @@ public final class QUICConnectionHandle: Sendable {
     let endpoint: QUICEndpoint
     /// The endpoint task's side: only that task touches it.
     nonisolated(unsafe) let core: EndpointConnection
-    let state = Mutex(State())
+    let state = Locked(State())
     /// Where the peer was when the connection began.
     public let remoteAddress: SocketAddress
 
@@ -219,7 +219,7 @@ public final class QUICStreamHandle: AsyncReader, AsyncWriter, Sendable {
     /// unidirectional (RFC 9000 section 2.1).
     public let id: UInt64
     let connection: QUICConnectionHandle
-    let state = Mutex(State())
+    let state = Locked(State())
 
     init(id: UInt64, connection: QUICConnectionHandle) {
         self.id = id

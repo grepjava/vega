@@ -92,7 +92,7 @@ public final class QUICEndpoint: @unchecked Sendable {
 
     let runtime: Runtime
     let serverConfig: QUICServerConfig?
-    let shared = Mutex(Shared())
+    let shared = Locked(Shared())
     let wake = IODeadlineTrigger()
     /// The port the socket is bound to.
     public let localPort: Int

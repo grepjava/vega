@@ -87,7 +87,7 @@ public enum HTTP3Server {
 
     /// Which of the peer's critical streams have been seen: each once.
     final class PeerStreams: Sendable {
-        let seen = Mutex<Set<UInt64>>([])
+        let seen = Locked<Set<UInt64>>([])
         func first(_ type: UInt64) -> Bool { seen.withLock { $0.insert(type).inserted } }
     }
 
