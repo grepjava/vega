@@ -102,3 +102,65 @@ public struct BytesCodec: Decoder, Encoder, Sendable {
         item.withUnsafeBytes { buffer.write($0) }
     }
 }
+
+/// Messages framed by a `Content-Length` header and a blank line, as the
+/// Language Server Protocol frames JSON-RPC (NIOExtras'
+/// `ContentLengthHeaderFrameDecoder`): `Content-Length: 17\r\n\r\n` and then
+/// the 17 bytes. Other header lines are allowed and ignored.
+public struct ContentLengthCodec: Decoder, Encoder, Sendable {
+    public typealias Item = [UInt8]
+
+    /// A longer message, or a longer header, is an error.
+    public var maxLength: Int
+
+    public init(maxLength: Int = 16 << 20) {
+        self.maxLength = maxLength
+    }
+
+    public mutating func decode(_ bytes: UnsafeRawBufferPointer) throws(CodecError) -> (item: [UInt8], consumed: Int)? {
+        // The header ends at the first blank line.
+        var headerEnd: Int?
+        if bytes.count >= 4 {
+            for i in 0...(bytes.count - 4)
+            where bytes[i] == 0x0D && bytes[i + 1] == 0x0A && bytes[i + 2] == 0x0D && bytes[i + 3] == 0x0A {
+                headerEnd = i
+                break
+            }
+        }
+        guard let headerEnd else {
+            if bytes.count > 4096 { throw .malformed("no end to a Content-Length header in 4096 bytes") }
+            return nil
+        }
+        var length: Int?
+        for line in String(decoding: UnsafeRawBufferPointer(rebasing: bytes[..<headerEnd]), as: UTF8.self)
+            .split(separator: "\r\n") {
+            guard let colon = line.firstIndex(of: ":") else { throw .malformed("a header line without a colon") }
+            if line[..<colon].lowercased() == "content-length" {
+                guard let n = Int(line[line.index(after: colon)...].trimmingSpaces), n >= 0 else {
+                    throw .malformed("a bad Content-Length")
+                }
+                length = n
+            }
+        }
+        guard let length else { throw .malformed("no Content-Length") }
+        guard length <= maxLength else { throw .malformed("a message of \(length) bytes") }
+        let start = headerEnd + 4
+        guard bytes.count - start >= length else { return nil }
+        return (Array(UnsafeRawBufferPointer(rebasing: bytes[start..<(start + length)])), start + length)
+    }
+
+    public mutating func encode(_ item: [UInt8], into buffer: inout IOBuffer) throws(CodecError) {
+        guard item.count <= maxLength else { throw .malformed("a message of \(item.count) bytes") }
+        Array("Content-Length: \(item.count)\r\n\r\n".utf8).withUnsafeBytes { buffer.write($0) }
+        item.withUnsafeBytes { buffer.write($0) }
+    }
+}
+
+extension Substring {
+    fileprivate var trimmingSpaces: Substring {
+        var s = self
+        while s.first == " " || s.first == "\t" { s.removeFirst() }
+        while s.last == " " || s.last == "\t" { s.removeLast() }
+        return s
+    }
+}
