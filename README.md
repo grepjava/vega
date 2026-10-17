@@ -66,7 +66,7 @@ mature, widely deployed and far more proven than Vega.
 | Multi-process | `Runtime.sharded`: supervised shard processes | none built in | none built in |
 | Linux I/O | io_uring (default), epoll | epoll | epoll (io_uring through `tokio-uring`) |
 | Apple I/O | kqueue, Network.framework | kqueue, Network.framework (NIOTransportServices) | kqueue |
-| Windows | IOCP, experimental | in progress upstream | IOCP |
+| Windows | IOCP: AFD readiness, `TransmitFile` | in progress upstream | IOCP |
 | Blocking work | `Runtime.blocking` | `NIOThreadPool` | `spawn_blocking` |
 | Timers and tests | timer wheel; `MockClock` paused time, in-memory `duplex()` streams | `EmbeddedEventLoop`, `NIOAsyncTestingChannel` | timer wheel; `time::pause`, `tokio-test` |
 | TLS | VegaTLS on OpenSSL 3 or vendored BoringSSL | swift-nio-ssl (BoringSSL) | rustls or native-tls, separate crates |
@@ -123,8 +123,16 @@ Measure your own.
 
 ## Build
 
-Linux is the primary target; macOS 26.4 and newer is supported, and Windows is
-experimental. On Windows, Linux builds work through WSL:
+Linux is the primary target; macOS 26.4 and newer and Windows (x64, Swift
+6.3.3) are supported. On Windows the whole test suite runs natively
+(`ci/windows.ps1`): sockets on an I/O completion port with AFD readiness, as
+Tokio's mio does, `sendFile` by `TransmitFile`, files, processes, TLS,
+HTTP/1, HTTP/2, HTTP/3 and QUIC, WebSocket with permessage-deflate, and gzip
+and deflate on a vendored zlib. What Windows lacks: `Runtime.sharded` (it
+needs `fork`), brotli and zstd, Unix datagram sockets (Windows has none), and
+arrival timestamps on reads. A cancelled or timed-out `sendFile` there aborts
+the connection, since Winsock can't say how much of a cancelled send went.
+See docs/PLAN.md for the driver. Linux builds also work through WSL:
 
 ```sh
 swift build --scratch-path ~/.cache/vega-build

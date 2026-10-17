@@ -8,7 +8,10 @@ import Glibc
 public enum IOBackend: Sendable, Equatable {
     /// `.ioUring` where the kernel can run it, else `.readiness`; on iOS,
     /// tvOS, watchOS and visionOS, `.network`. `VEGA_DRIVER=epoll`, `uring`,
-    /// `kqueue` or `network` overrides.
+    /// `kqueue` or `network` overrides. On Windows, `VEGA_DRIVER=overlapped`
+    /// makes TCP accepts and socket reads overlapped requests (`AcceptEx`,
+    /// `WSARecv`) rather than readiness waits; docs/PLAN.md has why that
+    /// isn't the default.
     case automatic
     /// One edge-triggered epoll (kqueue on Darwin) per runtime.
     case readiness

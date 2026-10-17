@@ -112,8 +112,23 @@ public struct Framed<C: Codec>: ~Copyable { /* AsyncSequence of C.Item + send(_:
 | `uring` | Linux 6.1 or later (picked by a start-up probe) | one ring per worker (`SINGLE_ISSUER`, `DEFER_TASKRUN`); registered files; multishot accept and recv with provided-buffer rings; `SEND_ZC`; linked timeouts; `ASYNC_CANCEL`; `MSG_RING`. liburing is vendored as `CAvianUring` |
 | `epoll` | Linux fallback (seccomp, old kernels, `AVIAN_NO_URING`) | `EPOLLET`; `ScheduledIO` per fd (atomic readiness + tick + intrusive waiters) |
 | `kqueue` | macOS and BSD servers | `EV_CLEAR`, `EVFILT_USER` |
-| `iocp` | Windows | AFD poll for readiness-style sockets plus native overlapped I/O (`AcceptEx`, `WSARecv`, `TransmitFile`); this is what Tokio's mio uses. Needs a Winsock layer in CAvian; BoringSSL already has Windows defines |
+| `iocp` | Windows | one completion port per runtime; AFD poll for readiness-style sockets, as Tokio's mio does; overlapped `TransmitFile` for `sendFile`; overlapped pipe reads and writes for processes. Overlapped `AcceptEx` and `WSARecv` are built but off by default (below) |
 | `network` | iOS, tvOS, watchOS, visionOS, and optionally macOS clients | `NWConnection` and `NWListener`, with TLS handled by Network.framework; current-thread or multi-thread runtime, no shards |
+
+**The `iocp` driver, as built.** Sockets are readiness-driven: a task that gets `WSAEWOULDBLOCK` arms a one-shot `IOCTL_AFD_POLL` on the socket's base handle through the runtime's own `\Device\Afd` handle, and the completion resumes it as an epoll event would. Overlapped requests go on the same port: the socket is associated with it on its first one (with `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` unless a layered provider sits on it), and the completion resumes the task with the request's result. `sendFile` is `TransmitFile` from the offset given; cancellation is `CancelIoEx`, which for a send aborts the connection (Winsock can't say how much went), so a cancelled or timed-out `sendFile` leaves the stream unusable on Windows only. `VEGA_DRIVER=overlapped` also turns accepts into `AcceptEx` (with `SO_UPDATE_ACCEPT_CONTEXT`) and reads into `WSARecv`, each tried as a plain non-blocking call first and made overlapped only where it would wait, in place of the AFD poll and the retried call. The full suite passes either way.
+
+It stays off because it measured no better. Loopback on the development machine (24 threads, Windows 11, release build), client and server runtimes of 4 workers each in one process, only the server's runtime switched; 7 alternating runs of 3 s each, medians with min–max:
+
+| | AFD readiness | overlapped `AcceptEx` + `WSARecv` |
+|---|---|---|
+| 32-byte ping-pong, 1 connection (round trips/s) | 19,333 (18,753–19,876) | 19,411 (19,251–20,805) |
+| 32-byte ping-pong, 32 connections | 96,774 (94,794–104,941) | 96,160 (95,197–104,419) |
+| connect, 1 byte each way, close; 8 clients (connections/s) | 7,284 (6,967–9,070) | 7,598 (6,957–9,068) |
+| the same, 32 clients | 8,490 (7,371–9,059) | 8,682 (7,258–9,201) |
+
+Every difference is inside the run-to-run spread (6–29%). With no gain to show, readiness keeps what it has over pending requests: no buffer pinned per idle connection, and one code path with Linux and macOS.
+
+Not on Windows: `Runtime.sharded` (it needs `fork`); brotli and zstd (gzip and deflate are on zlib 1.3.1, vendored as `CVegaZlib` because the Windows SDK has none); Unix datagram sockets (Windows' Unix sockets are streams only); arrival timestamps on reads.
 
 **The `network` driver, as built (v0.3).** TCP only. In a runtime with `IOBackend.network`, `TCPStream` and `TCPListener` run over `NWConnection` and `NWListener`, and kqueue stays for UDP, Unix sockets, pipes and processes. Measured costs are in [BENCHMARKS.md](BENCHMARKS.md). The gaps:
 

@@ -168,8 +168,13 @@ public struct TCPStream: ~Copyable, Sendable {
 
     /// Send up to `count` bytes of the open file `file` (a descriptor) from
     /// `offset`, without copying them through this process where the system
-    /// allows (sendfile(2) on Linux and Darwin). Returns the bytes sent:
-    /// `count`, or fewer when the file ends first. The file is not closed.
+    /// allows (sendfile(2) on Linux and Darwin, TransmitFile on Windows,
+    /// where `file` is the file's handle). Returns the bytes sent: `count`,
+    /// or fewer when the file ends first. The file is not closed.
+    ///
+    /// On Windows a send cancelled (by the task's cancellation or its I/O
+    /// deadline) aborts the connection: Winsock can't say how much of it
+    /// went.
     public func sendFile(_ file: Int32, offset: Int64 = 0, count: Int) async throws(IOError) -> Int {
         try await reg.sendFile(file, offset: offset, count: count)
     }
