@@ -57,11 +57,14 @@ public struct QUICTransportParameters {
     public var retrySourceCID = QUICConnectionID()
     public var hasInitialSourceCID = false
     public var hasOriginalDestinationCID = false
+    /// Sent by a server that answered the client's first Initial with a
+    /// Retry, and only then (RFC 9000 section 7.3).
+    public var hasRetrySourceCID = false
     public var statelessResetToken: [UInt8] = []
 
     public init() {}
 
-    /// Writes the server's parameters. Only what differs from a default is
+    /// Writes a server's or a client's parameters. Only what differs from a default is
     /// omitted where the default is what we want; the connection identifiers
     /// are always sent, because a client that does not see its own view of
     /// them reflected back is required to abort.
@@ -99,6 +102,7 @@ public struct QUICTransportParameters {
         if isServer && hasOriginalDestinationCID {
             writeCID(Self.originalDestinationConnectionID, originalDestinationCID)
         }
+        if isServer && hasRetrySourceCID { writeCID(Self.retrySourceConnectionID, retrySourceCID) }
         if isServer && !statelessResetToken.isEmpty {
             buffer.writeVarint(Self.statelessResetToken)
             buffer.writeVarint(UInt64(statelessResetToken.count))
@@ -179,6 +183,7 @@ public struct QUICTransportParameters {
                 if !fromServer { return nil }
                 guard let cid = QUICConnectionID(body, length) else { return nil }
                 out.retrySourceCID = cid
+                out.hasRetrySourceCID = true
             case statelessResetToken:
                 if !fromServer || length != 16 { return nil }
                 out.statelessResetToken = [UInt8](UnsafeBufferPointer(start: body, count: 16))

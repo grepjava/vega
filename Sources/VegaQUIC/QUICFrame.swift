@@ -118,6 +118,9 @@ public enum QUICError: UInt64 {
     case keyUpdateError = 0x0e
     case aeadLimitReached = 0x0f
     case noViablePath = 0x10
+    /// RFC 9368: what a client's connection ends with when the server
+    /// speaks none of its versions.
+    case versionNegotiationError = 0x11
 }
 
 /// A TLS alert reported as a transport error: 0x0100 plus the alert code.

@@ -20,6 +20,10 @@
 // endpoint early from its wait on the socket.
 //
 // The same loop as Garuda's HTTP/3 endpoint, without the HTTP.
+//
+// A client endpoint (`client`, then `connect`) is the same loop on a socket
+// of its own: its connections are the ones it began, found by the connection
+// ID they chose for themselves, and it accepts none.
 //===----------------------------------------------------------------------===//
 
 import CVega
@@ -29,7 +33,8 @@ import VegaIO
 import VegaQUIC
 import VegaWire
 
-/// A UDP socket speaking QUIC: the server side for now.
+/// A UDP socket speaking QUIC: a server (`listen`, then `accept`) or a
+/// client (`client`, then `connect`).
 ///
 /// ```swift
 /// let endpoint = try QUICEndpoint.listen(port: 4433, configuration: QUICServerConfig(certKey: key, alpn: [Array("echo".utf8)]),
@@ -45,6 +50,14 @@ import VegaWire
 ///         }
 ///     }
 /// }
+/// ```
+///
+/// ```swift
+/// let endpoint = try QUICEndpoint.client(runtime: rt)
+/// let connection = try await endpoint.connect(host: "example.com", port: 443,
+///                                             configuration: QUICClientConfig(serverName: "example.com",
+///                                                                             alpn: [Array("h3".utf8)]))
+/// let stream = try await connection.openStream()
 /// ```
 public final class QUICEndpoint: @unchecked Sendable {
     /// Datagrams taken from the socket per system call.
@@ -63,6 +76,8 @@ public final class QUICEndpoint: @unchecked Sendable {
         case stream(QUICStreamHandle)
         case open(QUICConnectionHandle)
         case close(QUICConnectionHandle, UInt64, [UInt8])
+        /// A client connection, made by `connect`, to start.
+        case connect(QUICConnectionHandle)
     }
 
     struct Shared {
@@ -81,6 +96,9 @@ public final class QUICEndpoint: @unchecked Sendable {
     let wake = IODeadlineTrigger()
     /// The port the socket is bound to.
     public let localPort: Int
+    /// Whether the socket is IPv6, which decides which of a name's
+    /// addresses a client connects to.
+    let localIsIPv6: Bool
 
     // MARK: The endpoint task's own
 
@@ -98,10 +116,11 @@ public final class QUICEndpoint: @unchecked Sendable {
     var stopping = false
     var stopDeadlineMs = UInt64.max
 
-    private init(runtime: Runtime, serverConfig: QUICServerConfig?, localPort: Int) {
+    private init(runtime: Runtime, serverConfig: QUICServerConfig?, localPort: Int, localIsIPv6: Bool) {
         self.runtime = runtime
         self.serverConfig = serverConfig
         self.localPort = localPort
+        self.localIsIPv6 = localIsIPv6
         sendBuffer = .allocate(capacity: QUICEndpoint.datagramSize * QUICEndpoint.maxSegments)
     }
 
@@ -116,10 +135,60 @@ public final class QUICEndpoint: @unchecked Sendable {
                               runtime: Runtime) throws(IOError) -> QUICEndpoint {
         let socket = try UDPSocket.bind(host: host, port: port)
         configure(socket)
+        let local = try socket.localAddress
         let endpoint = QUICEndpoint(runtime: runtime, serverConfig: configuration,
-                                    localPort: try socket.localAddress.port ?? port)
+                                    localPort: local.port ?? port, localIsIPv6: local.isIPv6)
         runtime.spawn(with: socket) { socket in await endpoint.run(socket) }
         return endpoint
+    }
+
+    /// Bind a UDP socket for client connections (`connect`): `host` is the
+    /// local address, an IPv4 one for all interfaces when empty -- pass
+    /// "::" to reach IPv6 servers -- and port 0 picks one. One endpoint
+    /// carries any number of connections, to any servers.
+    public static func client(runtime: Runtime, host: String = "", port: Int = 0) throws(IOError) -> QUICEndpoint {
+        let socket = try UDPSocket.bind(host: host.isEmpty ? "0.0.0.0" : host, port: port)
+        configure(socket)
+        let local = try socket.localAddress
+        let endpoint = QUICEndpoint(runtime: runtime, serverConfig: nil, localPort: local.port ?? port,
+                                    localIsIPv6: local.isIPv6)
+        runtime.spawn(with: socket) { socket in await endpoint.run(socket) }
+        return endpoint
+    }
+
+    /// Connect to a QUIC server and return once the handshake is done: the
+    /// server's certificate checked as `configuration` says, an application
+    /// protocol agreed (`alpn`). `host` is a name, looked up off the
+    /// workers, or an address; the first of its addresses in the socket's
+    /// family is used. Open streams with `openStream`; the server's arrive
+    /// at `acceptStream`.
+    ///
+    /// A server that never answers is given up on after the configuration's
+    /// idle timeout. A refused handshake throws `.connectionClosed` with the
+    /// code QUIC closed it with: 0x100 plus the TLS alert, 0x12a when the
+    /// certificate was refused.
+    public func connect(host: String, port: Int,
+                        configuration: QUICClientConfig) async throws(QUICConnectionError) -> QUICConnectionHandle {
+        let addresses: [SocketAddress]
+        do throws(IOError) {
+            addresses = try await SocketAddress.lookup(host: host, port: port)
+        } catch {
+            throw .io(error)
+        }
+        guard let peer = addresses.first(where: { $0.isIPv6 == localIsIPv6 }) else {
+            throw .io(IOError(code: -3, message: "\(host) has no \(localIsIPv6 ? "IPv6" : "IPv4") address for this endpoint"))
+        }
+        guard let quic = QUICConnection(client: configuration, nowMs: Self.nowMs()) else {
+            throw .connectionClosed(code: QUICError.internalError.rawValue, application: false)
+        }
+        let connection = EndpointConnection(endpoint: self, quic: quic, isServer: false, peer: peer, local: nil,
+                                            localCID: quic.localCID, originalDCID: quic.originalDCID)
+        // Held strongly here until the handshake is done, so the endpoint's
+        // weak reference outlives the wait.
+        let handle = connection.handle!
+        post(.connect(handle))
+        try await handle.handshake()
+        return handle
     }
 
     static func configure(_ socket: borrowing UDPSocket) {
@@ -295,6 +364,18 @@ public final class QUICEndpoint: @unchecked Sendable {
             case .close(let handle, let code, let reason):
                 if !handle.core.quic.isClosed { handle.core.quic.close(code, application: true, reason: reason) }
                 touch(handle.core)
+            case .connect(let handle):
+                let connection = handle.core
+                if stopping {
+                    connection.abandon(.endpointClosed)
+                    continue
+                }
+                // The server's datagrams come to the connection ID it chose
+                // for itself; nothing comes to the one it invented for the
+                // server.
+                connections[connection.localCID] = connection
+                live.append(connection)
+                touch(connection)
             }
         }
     }
@@ -347,7 +428,17 @@ public final class QUICEndpoint: @unchecked Sendable {
         if p[0] & 0x80 != 0 {
             guard n >= 5 else { return }
             let version = UInt32(p[1]) << 24 | UInt32(p[2]) << 16 | UInt32(p[3]) << 8 | UInt32(p[4])
-            if version == QUICVersion.negotiation { return }
+            if version == QUICVersion.negotiation {
+                // An answer to a client's first Initial (RFC 9000 section 6):
+                // its connection decides what it means. A server ignores them.
+                let header = QUICPacket.parseHeader(p, n, localCIDLength: quicLocalCIDLength)
+                if header.isValid, let connection = connections[header.dcid], !connection.isServer,
+                   peer == connection.peer {
+                    connection.quic.receive(p, n, ecn: ecn, nowMs: now)
+                    touch(connection)
+                }
+                return
+            }
             if !QUICVersion.isSupported(version) {
                 if serverConfig != nil { negotiateVersion(p, n, from: peer, to: local) }
                 return
@@ -360,6 +451,11 @@ public final class QUICEndpoint: @unchecked Sendable {
             if peer == connection.peer {
                 quic.receive(p, n, ecn: ecn, nowMs: now)
                 if quic.acceptedNewPacket { connection.local = local }
+            } else if !connection.isServer {
+                // A server does not move (RFC 9000 section 9): a datagram for
+                // a client's connection from anywhere but the address it
+                // connected to is not the server's.
+                return
             } else {
                 // A connection ID is in clear on the wire: a datagram from
                 // elsewhere is another path, which the connection moves to
@@ -417,8 +513,9 @@ public final class QUICEndpoint: @unchecked Sendable {
 
     /// A connection finished its handshake.
     func established(_ connection: EndpointConnection, _ handle: QUICConnectionHandle) {
-        guard connection.isServer else { return }
         connection.handedOver()
+        // A client's goes back to the `connect` that waits on it.
+        guard connection.isServer else { return }
         let waiter = shared.withLock { s -> UnsafeContinuation<QUICConnectionHandle?, Never>? in
             if let w = s.acceptWaiter {
                 s.acceptWaiter = nil

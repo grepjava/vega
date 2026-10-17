@@ -72,7 +72,8 @@ public final class QUICConnectionHandle: Sendable {
     /// The application protocol the handshake agreed on (ALPN).
     public var alpn: [UInt8] { state.withLock { $0.alpn } }
 
-    /// The server name the client asked for (SNI), on a server.
+    /// The server name the client asked for (SNI): on a client, the one in
+    /// its configuration.
     public var serverName: String { state.withLock { $0.serverName } }
 
     /// Why the connection ended, once it has.

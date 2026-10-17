@@ -169,7 +169,24 @@ extension QUICConnection {
             }
         }
         bytesSent += total
+        // RFC 9001 section 4.9.1: a client is done with the Initial keys once
+        // it first sends a Handshake packet -- the server has proved it got
+        // the ClientHello, and nothing more will be said at that level.
+        if !isServer && keys[QUICLevel.initial.rawValue].send.isValid
+            && planned.contains(where: { $0.level == .handshake }) {
+            discardSpace(.initial)
+        }
         return total
+    }
+
+    /// An Initial packet's token field: a server's is empty, since it issues
+    /// none; a client's carries what a Retry gave it, if one did. Its
+    /// length.
+    private func writeInitialToken(_ out: UnsafeMutablePointer<UInt8>) -> Int {
+        let n = quicWriteVarint(UInt64(initialToken.count), out)
+        if initialToken.isEmpty { return n }
+        initialToken.withUnsafeBufferPointer { (out + n).update(from: $0.baseAddress!, count: $0.count) }
+        return n + initialToken.count
     }
 
     struct PlannedPacket {
@@ -237,10 +254,7 @@ extension QUICConnection {
                 if n > 0 { (out + offset).update(from: p, count: n) }
                 offset += n
             }
-            if level == .initial {
-                out[offset] = 0      // an empty token: this server issues none
-                offset += 1
-            }
+            if level == .initial { offset += writeInitialToken(out + offset) }
             // Two bytes of length, filled in once the padding is known.
             lengthOffset = offset
             out[offset] = 0x40
@@ -646,7 +660,7 @@ extension QUICConnection {
                 if n > 0 { (out + offset).update(from: p, count: n) }
                 offset += n
             }
-            if level == .initial { out[offset] = 0; offset += 1 }
+            if level == .initial { offset += writeInitialToken(out + offset) }
             lengthOffset = offset
             out[offset] = 0x40
             out[offset + 1] = 0
@@ -679,6 +693,17 @@ extension QUICConnection {
             out[writer.offset] = 0
             writer.offset += 1
             payloadLength += 1
+        }
+        // A client's datagram with an Initial in it is 1200 bytes, even one
+        // carrying only a close (RFC 9000 section 14.1): a server drops a
+        // smaller one unread.
+        if !isServer && level == .initial {
+            let target = min(QUICPacket.minimumInitialSize, limit) - quicAEADTagLength
+            if writer.offset < target {
+                (out + writer.offset).update(repeating: 0, count: target - writer.offset)
+                payloadLength += target - writer.offset
+                writer.offset = target
+            }
         }
         return PlannedPacket(level: level, start: 0, lengthOffset: lengthOffset,
                              pnOffset: pnOffset, pnLength: pnLength,

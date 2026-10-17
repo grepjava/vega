@@ -31,6 +31,7 @@ public enum TLSAlert {
     public static let unexpectedMessage: UInt8 = 10
     public static let handshakeFailure: UInt8 = 40
     public static let illegalParameter: UInt8 = 47
+    public static let badCertificate: UInt8 = 42
     public static let decodeError: UInt8 = 50
     public static let decryptError: UInt8 = 51
     public static let protocolVersion: UInt8 = 70
@@ -40,17 +41,18 @@ public enum TLSAlert {
     public static let noApplicationProtocol: UInt8 = 120
 }
 
-private enum HandshakeType {
+enum HandshakeType {
     static let clientHello: UInt8 = 1
     static let serverHello: UInt8 = 2
     static let newSessionTicket: UInt8 = 4
     static let encryptedExtensions: UInt8 = 8
     static let certificate: UInt8 = 11
+    static let certificateRequest: UInt8 = 13
     static let certificateVerify: UInt8 = 15
     static let finished: UInt8 = 20
 }
 
-private enum ExtensionType {
+enum ExtensionType {
     static let serverName: UInt16 = 0
     static let supportedGroups: UInt16 = 10
     static let signatureAlgorithms: UInt16 = 13
@@ -60,7 +62,7 @@ private enum ExtensionType {
     static let quicTransportParameters: UInt16 = 57
 }
 
-private enum NamedGroup {
+enum NamedGroup {
     static let x25519: UInt16 = 0x001d
     static let secp256r1: UInt16 = 0x0017
 }

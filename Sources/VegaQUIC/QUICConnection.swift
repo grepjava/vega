@@ -89,6 +89,10 @@ public final class QUICConnection {
     // MARK: Identity
 
     public let version: UInt32
+    /// Which side of the connection this is. Stream IDs, which keys send
+    /// and which receive, who may send HANDSHAKE_DONE, who is held to the
+    /// amplification limit: all follow from it.
+    public let isServer: Bool
     /// What the peer puts in the packets it sends us.
     public private(set) var localCID: QUICConnectionID
     /// What we put in the packets we send.
@@ -96,6 +100,21 @@ public final class QUICConnection {
     /// The connection ID the client invented for its first packet, which the
     /// transport parameters have to reflect back.
     public let originalDCID: QUICConnectionID
+    /// A client's: the token a Retry gave it, which every Initial it sends
+    /// afterwards carries (RFC 9000 section 17.2.5.2). Empty at a server,
+    /// which issues none.
+    var initialToken: [UInt8] = []
+    /// A client's: the server's connection IDs as the transport parameters
+    /// must confirm them (RFC 9000 section 7.3) -- the Source Connection ID of
+    /// its first Initial, and of the Retry if there was one.
+    var serverInitialSCID: QUICConnectionID?
+    var retrySourceCID: QUICConnectionID?
+    /// A client's: whether a packet from the server has authenticated, after
+    /// which a Retry or a Version Negotiation packet is a forgery.
+    var heardFromServer = false
+    /// A client's: the versions a Version Negotiation packet said the server
+    /// supports, when the connection ended for want of a common one.
+    public internal(set) var peerVersions: [UInt32] = []
     /// Where the peer is and which of our addresses it wrote to, encoded by
     /// the caller (see QUICAddress): the transport keeps them and never
     /// looks.
@@ -116,10 +135,15 @@ public final class QUICConnection {
     /// phase is flipped and whose number is below this one is a straggler from
     /// the phase before, not the start of a new one.
     var currentPhaseFirstPacket: UInt64 = 0
-    var tls: TLSServerHandshake?
+    var tls: QUICHandshake?
     /// The TLS alert the handshake failed with, if it did. (Aviancore logged
     /// it at debug level; VegaQUIC has no logger, so it is kept here.)
     public var tlsAlert: UInt8? { tls?.alert }
+    /// A client's: why the server's certificate was refused, when it was
+    /// (the alert is then bad_certificate).
+    public var certificateError: String? { (tls as? TLSClientHandshake)?.certificateError }
+    /// A client's: the server's certificate chain, DER, leaf first.
+    public var peerCertificates: [[UInt8]] { (tls as? TLSClientHandshake)?.peerCertificates ?? [] }
 
     public private(set) var handshakeComplete = false
     public private(set) var handshakeConfirmed = false
@@ -195,7 +219,9 @@ public final class QUICConnection {
 
     /// Anti-amplification: before the client's address is validated, a server
     /// may send no more than three times what it has received. Without this a
-    /// spoofed Initial packet turns the server into an amplifier.
+    /// spoofed Initial packet turns the server into an amplifier. A client is
+    /// never limited (RFC 9000 section 8): its peer's address is the one it
+    /// chose to send to.
     var bytesReceived = 0
     var bytesSent = 0
     var addressValidated = false
@@ -221,16 +247,27 @@ public final class QUICConnection {
     /// Streams already announced as writable in the current batch.
     var writableAnnounced: Set<UInt64> = []
 
-    let config: QUICServerConfig
+    /// How far a reader's consumption moves the windows granted to the peer,
+    /// per stream and for the connection: the configured initial windows.
+    let streamWindow: UInt64
+    let connectionWindow: UInt64
 
     // MARK: - Life cycle
 
+    /// `retry`: the client's first Initial was answered with a Retry
+    /// (QUICRetry), and this is the Initial that came back with its token,
+    /// which the caller has checked: the connection ID that first Initial
+    /// was sent to, and the Retry's Source Connection ID, both of which the
+    /// transport parameters must confirm (RFC 9000 section 7.3).
     public init?(config: QUICServerConfig, version: UInt32,
                  clientDCID: QUICConnectionID, clientSCID: QUICConnectionID,
-                 localCID: QUICConnectionID, nowMs: UInt64) {
-        self.config = config
+                 localCID: QUICConnectionID, nowMs: UInt64,
+                 retry: (originalDCID: QUICConnectionID, retrySCID: QUICConnectionID)? = nil) {
+        self.isServer = true
+        self.streamWindow = config.initialMaxStreamData
+        self.connectionWindow = config.initialMaxData
         self.version = version
-        self.originalDCID = clientDCID
+        self.originalDCID = retry?.originalDCID ?? clientDCID
         self.peerCID = clientSCID
         self.localCID = localCID
         self.lastActivityMs = nowMs
@@ -253,8 +290,12 @@ public final class QUICConnection {
         parameters.activeConnectionIDLimit = 4
         parameters.initialSourceCID = localCID
         parameters.hasInitialSourceCID = true
-        parameters.originalDestinationCID = clientDCID
+        parameters.originalDestinationCID = retry?.originalDCID ?? clientDCID
         parameters.hasOriginalDestinationCID = true
+        if let retry {
+            parameters.retrySourceCID = retry.retrySCID
+            parameters.hasRetrySourceCID = true
+        }
         parameters.maxUDPPayloadSize = 1452
         localParameters = parameters
 
@@ -268,6 +309,63 @@ public final class QUICConnection {
 
         tls = TLSServerHandshake(certKeys: config.certKeys, alpn: config.alpn,
                                  parameters: parameters, version: version)
+    }
+
+    /// A client connection to `config.serverName`. Its first datagram --
+    /// `nextDatagram` -- is the ClientHello, in an Initial padded to 1200
+    /// bytes. The caller routes datagrams to it by `localCID`, which is
+    /// `quicLocalCIDLength` bytes, as a server's are. Nil when the keys
+    /// cannot be made.
+    public init?(client config: QUICClientConfig, version: UInt32 = QUICVersion.v1, nowMs: UInt64) {
+        self.isServer = false
+        self.streamWindow = config.initialMaxStreamData
+        self.connectionWindow = config.initialMaxData
+        self.version = version
+        // RFC 9000 section 7.2: the client's first Destination Connection ID
+        // is at least eight unpredictable bytes, and it is what the Initial
+        // keys come from.
+        let dcid = QUICConnectionID.random(length: 8)
+        let scid = QUICConnectionID.random()
+        self.originalDCID = dcid
+        self.peerCID = dcid
+        self.localCID = scid
+        self.lastActivityMs = nowMs
+        self.idleTimeoutMs = config.maxIdleTimeoutMs
+        self.serverName = Array(config.serverName.utf8)
+        // Only a server is held to three times what it received.
+        self.addressValidated = true
+
+        guard let initial = quicInitialKeys(destinationCID: dcid, version: version, isServer: false)
+        else { return nil }
+        keys[QUICLevel.initial.rawValue] = initial
+
+        var parameters = QUICTransportParameters()
+        parameters.maxIdleTimeoutMs = config.maxIdleTimeoutMs
+        parameters.initialMaxData = config.initialMaxData
+        parameters.initialMaxStreamDataBidiLocal = config.initialMaxStreamData
+        parameters.initialMaxStreamDataBidiRemote = config.initialMaxStreamData
+        parameters.initialMaxStreamDataUni = config.initialMaxStreamData
+        parameters.initialMaxStreamsBidi = config.initialMaxStreamsBidi
+        parameters.initialMaxStreamsUni = config.initialMaxStreamsUni
+        parameters.maxDatagramFrameSize = config.maxDatagramFrameSize
+        parameters.activeConnectionIDLimit = 4
+        parameters.initialSourceCID = scid
+        parameters.hasInitialSourceCID = true
+        parameters.maxUDPPayloadSize = 1452
+        localParameters = parameters
+
+        receiveLimit = parameters.initialMaxData
+        localMaxStreamsBidi = parameters.initialMaxStreamsBidi
+        localMaxStreamsUni = parameters.initialMaxStreamsUni
+        for i in 0..<3 { cryptoReceive[i].limit = 256 * 1024 }
+
+        let handshake = TLSClientHandshake(serverName: config.serverName, alpn: config.alpn,
+                                           parameters: parameters,
+                                           verify: config.certificateVerification.check())
+        tls = handshake
+        handshake.start()
+        if handshake.alert != nil { return nil }
+        _ = applyTLSProgress()
     }
 
     deinit {
@@ -361,6 +459,17 @@ public final class QUICConnection {
             default: level = nil        // 0-RTT, Retry, version negotiation
             }
 
+            if level == nil && !isServer {
+                // Both run to the end of the datagram, and neither is
+                // protected by any key the client has: each is checked for
+                // what it can be checked for, and acted on at most once.
+                if header.type == .retry {
+                    receiveRetry(p, remaining, header: header, nowMs: nowMs)
+                } else if header.type == .versionNegotiation {
+                    receiveVersionNegotiation(p, remaining, header: header, nowMs: nowMs)
+                }
+                return
+            }
             if let level, receivePacket(p, header: header, level: level, nowMs: nowMs) {
                 lastActivityMs = nowMs
             }
@@ -389,6 +498,16 @@ public final class QUICConnection {
         guard let packet = opened else { return false }
         pathAuthenticated()
 
+        if !isServer && !heardFromServer {
+            // RFC 9000 section 7.2: the client sends to the connection ID the
+            // server chose, from the first Initial that authenticates. A
+            // server's Initial carries no token (section 17.2.2).
+            guard level == .initial, header.token.count == 0 else { return false }
+            peerCID = header.scid
+            serverInitialSCID = header.scid
+            heardFromServer = true
+        }
+
         // Receiving a Handshake packet that decrypts proves the peer is at the
         // address it claims: only somebody who saw our Initial could have
         // produced it.
@@ -414,7 +533,9 @@ public final class QUICConnection {
             spaces[space].largestReceived = Int64(packet.packetNumber)
             spaces[space].largestReceivedAtMs = nowMs
             acceptedNewPacket = true
-            if receivingPath != 0 && !packetProbesOnly { pathMoved(nowMs: nowMs) }
+            // Only a client moves (RFC 9000 section 9): a server's packet
+            // from elsewhere is not followed.
+            if receivingPath != 0 && !packetProbesOnly && isServer { pathMoved(nowMs: nowMs) }
         }
         spaces[space].acks.add(packet.packetNumber)
         spaces[space].ackPending = true
@@ -529,8 +650,15 @@ public final class QUICConnection {
             case QUICFrameType.newToken:
                 // A server has no use for a token it issued being handed back
                 // outside an Initial packet, and a client must not send one.
-                close(QUICError.protocolViolation.rawValue)
-                return nil
+                if isServer {
+                    close(QUICError.protocolViolation.rawValue)
+                    return nil
+                }
+                // A client is given one for its next connection, which it
+                // has no use for: there is no resumption here.
+                guard let length = r.varintAsInt(), length > 0, r.skip(length) else {
+                    close(QUICError.frameEncodingError.rawValue); return nil
+                }
 
             case QUICFrameType.streamFirst...QUICFrameType.streamLast:
                 if !handleStream(&r, type: type) { return nil }
@@ -634,8 +762,13 @@ public final class QUICConnection {
 
             case QUICFrameType.handshakeDone:
                 // Only a server sends this.
-                close(QUICError.protocolViolation.rawValue)
-                return nil
+                if isServer {
+                    close(QUICError.protocolViolation.rawValue)
+                    return nil
+                }
+                // At a client it is what confirms the handshake (RFC 9001
+                // section 4.1.2).
+                confirmHandshake()
 
             case QUICFrameType.datagram, QUICFrameType.datagramWithLength:
                 if !handleDatagram(&r, hasLength: type == QUICFrameType.datagramWithLength) {
@@ -680,11 +813,18 @@ public final class QUICConnection {
         for packet in result.acked { onPacketAcked(packet, level: level) }
         for packet in result.lost { onPacketLost(packet, level: level) }
         if !result.acked.isEmpty && level == .application && handshakeComplete {
-            // Belt and braces: a server confirms the handshake when it
-            // completes, so both of these are already set by the time any
-            // 1-RTT packet can be acknowledged.
-            handshakeConfirmed = true
-            keyUpdatePermitted = true
+            if isServer {
+                // Belt and braces: a server confirms the handshake when it
+                // completes, so both of these are already set by the time any
+                // 1-RTT packet can be acknowledged.
+                handshakeConfirmed = true
+                keyUpdatePermitted = true
+            } else {
+                // A client may take an acknowledgement of a 1-RTT packet as
+                // confirmation too: HANDSHAKE_DONE may have been lost (RFC
+                // 9001 section 4.1.2).
+                confirmHandshake()
+            }
         }
         return true
     }
@@ -748,7 +888,7 @@ public final class QUICConnection {
 
         if !checkStreamID(id, isSend: false) { return false }
         // Sending to a stream we opened for sending only is nonsense.
-        if QUICStreamKind.isServerInitiated(id) && QUICStreamKind.isUnidirectional(id) {
+        if isLocal(id) && QUICStreamKind.isUnidirectional(id) {
             close(QUICError.streamStateError.rawValue)
             return false
         }
@@ -796,7 +936,7 @@ public final class QUICConnection {
             return false
         }
         if !checkStreamID(id, isSend: false) { return false }
-        if QUICStreamKind.isServerInitiated(id) && QUICStreamKind.isUnidirectional(id) {
+        if isLocal(id) && QUICStreamKind.isUnidirectional(id) {
             close(QUICError.streamStateError.rawValue)
             return false
         }
@@ -834,7 +974,7 @@ public final class QUICConnection {
         if !checkStreamID(id, isSend: true) { return false }
         // A peer cannot ask us to stop sending on a stream it opened for
         // sending only.
-        if QUICStreamKind.isClientInitiated(id) && QUICStreamKind.isUnidirectional(id) {
+        if !isLocal(id) && QUICStreamKind.isUnidirectional(id) {
             close(QUICError.streamStateError.rawValue)
             return false
         }
@@ -895,6 +1035,11 @@ public final class QUICConnection {
 
     // MARK: - Streams
 
+    /// Whether this side opened (or would open) a stream: the low bit of its
+    /// ID says which side did (RFC 9000 section 2.1).
+    @inline(__always)
+    func isLocal(_ id: UInt64) -> Bool { QUICStreamKind.isServerInitiated(id) == isServer }
+
     /// Checks that a stream identifier is one the peer is allowed to name, and
     /// that it is within the limits we granted.
     private func checkStreamID(_ id: UInt64, isSend: Bool) -> Bool {
@@ -902,9 +1047,9 @@ public final class QUICConnection {
             close(QUICError.frameEncodingError.rawValue)
             return false
         }
-        // A frame about a server-initiated stream we have not opened is a
-        // reference to something that does not exist.
-        if QUICStreamKind.isServerInitiated(id) {
+        // A frame about a stream of ours we have not opened is a reference
+        // to something that does not exist.
+        if isLocal(id) {
             let next = QUICStreamKind.isUnidirectional(id) ? nextLocalStreamUni : nextLocalStreamBidi
             if QUICStreamKind.index(id) >= next {
                 close(QUICError.streamStateError.rawValue)
@@ -927,7 +1072,7 @@ public final class QUICConnection {
     /// as well, so a peer cannot skip ahead to avoid a limit.
     private func openOrFind(_ id: UInt64) -> QUICStream? {
         if let existing = streams[id] { return existing }
-        if QUICStreamKind.isServerInitiated(id) { return nil }
+        if isLocal(id) { return nil }
 
         let unidirectional = QUICStreamKind.isUnidirectional(id)
         let index = Int64(QUICStreamKind.index(id))
@@ -937,7 +1082,7 @@ public final class QUICConnection {
         var created: QUICStream?
         var i = highest + 1
         while i <= index {
-            let newID = QUICStreamKind.id(index: UInt64(i), serverInitiated: false,
+            let newID = QUICStreamKind.id(index: UInt64(i), serverInitiated: !isServer,
                                           unidirectional: unidirectional)
             let stream = QUICStream(id: newID)
             stream.receive.limit = unidirectional
@@ -958,12 +1103,14 @@ public final class QUICConnection {
         return streams[id] ?? created
     }
 
-    /// Opens a stream this server initiates.
+    /// Opens a stream this side initiates: 0, 4, 8... (bidirectional) and
+    /// 2, 6, 10... (unidirectional) at a client, 1, 5... and 3, 7... at a
+    /// server.
     public func openStream(unidirectional: Bool) -> UInt64? {
         let limit = unidirectional ? peerMaxStreamsUni : peerMaxStreamsBidi
         let next = unidirectional ? nextLocalStreamUni : nextLocalStreamBidi
         if next >= limit { return nil }
-        let id = QUICStreamKind.id(index: next, serverInitiated: true,
+        let id = QUICStreamKind.id(index: next, serverInitiated: isServer,
                                    unidirectional: unidirectional)
         let stream = QUICStream(id: id)
         stream.send.limit = unidirectional
@@ -1055,14 +1202,14 @@ public final class QUICConnection {
         let limit = stream.receive.limit
         // Only bother when the window has fallen below half, so that a slow
         // reader does not generate a MAX_STREAM_DATA frame per packet.
-        let granted = consumed + config.initialMaxStreamData
-        if granted > limit && granted - limit > config.initialMaxStreamData / 2 {
+        let granted = consumed + streamWindow
+        if granted > limit && granted - limit > streamWindow / 2 {
             stream.receive.limit = granted
             markWritable(id)
         }
-        let connectionGranted = receivedBytes + config.initialMaxData
+        let connectionGranted = receivedBytes + connectionWindow
         if connectionGranted > receiveLimit
-            && connectionGranted - receiveLimit > config.initialMaxData / 2 {
+            && connectionGranted - receiveLimit > connectionWindow / 2 {
             receiveLimit = connectionGranted
             maxDataPending = true
         }
@@ -1096,37 +1243,74 @@ public final class QUICConnection {
                 return false
             }
         }
-        if tls.state == .complete && !handshakeComplete {
+        if tls.isComplete && !handshakeComplete {
             handshakeComplete = true
-            handshakeDonePending = true
-            // At a server the handshake is confirmed the moment it completes
-            // (RFC 9001 section 4.1.2), and that is what makes a key update
-            // legal. Waiting for the peer to acknowledge 1-RTT data instead
-            // would refuse the update that arrives *carrying* that
-            // acknowledgement -- which is where a client puts it, since the
-            // update is the next packet it sends.
-            handshakeConfirmed = true
-            keyUpdatePermitted = true
+            if isServer {
+                handshakeDonePending = true
+                // At a server the handshake is confirmed the moment it
+                // completes (RFC 9001 section 4.1.2), and that is what makes
+                // a key update legal. Waiting for the peer to acknowledge
+                // 1-RTT data instead would refuse the update that arrives
+                // *carrying* that acknowledgement -- which is where a client
+                // puts it, since the update is the next packet it sends.
+                handshakeConfirmed = true
+                keyUpdatePermitted = true
+            }
+            // A client's waits for HANDSHAKE_DONE, or an acknowledgement of
+            // 1-RTT data: until then its Finished may still need sending.
             selectedALPN = tls.selectedALPN
             serverName = tls.serverName
             peerParameters = tls.peerParameters
+            if !isServer && !checkServerConnectionIDs() {
+                close(QUICError.transportParameterError.rawValue)
+                return false
+            }
             adoptPeerParameters()
             status = .connected
             events.append(QUICEvent(.handshakeComplete))
             // The Handshake keys have done their job the moment the client's
             // Finished has been read.
-            discardSpace(.handshake)
+            if isServer { discardSpace(.handshake) }
         }
         return true
     }
 
-    private func installKeys(_ secrets: TLSServerHandshake.Secrets) -> Bool {
+    /// RFC 9000 section 7.3: the server's transport parameters must name the
+    /// connection IDs the client saw -- the one it first sent to, the one
+    /// the server's Initial came from, and the Retry's, if there was one and
+    /// only then. Otherwise someone in the path rewrote them.
+    private func checkServerConnectionIDs() -> Bool {
+        guard peerParameters.hasOriginalDestinationCID,
+              peerParameters.originalDestinationCID == originalDCID,
+              peerParameters.hasInitialSourceCID,
+              let serverInitialSCID, peerParameters.initialSourceCID == serverInitialSCID
+        else { return false }
+        if let retrySourceCID {
+            return peerParameters.hasRetrySourceCID && peerParameters.retrySourceCID == retrySourceCID
+        }
+        return !peerParameters.hasRetrySourceCID
+    }
+
+    /// A client's handshake is confirmed: HANDSHAKE_DONE arrived, or 1-RTT
+    /// data was acknowledged. A key update is legal from here, and the
+    /// Handshake keys go (RFC 9001 sections 4.9.2 and 6).
+    func confirmHandshake() {
+        guard !handshakeConfirmed else { return }
+        handshakeConfirmed = true
+        keyUpdatePermitted = true
+        discardSpace(.handshake)
+    }
+
+    private func installKeys(_ secrets: TLSSecrets) -> Bool {
         let level = secrets.level.rawValue
-        guard let send = secrets.server.withUnsafeBufferPointer({
+        // Each side sends with its own secret and opens with the other's.
+        let mine = isServer ? secrets.server : secrets.client
+        let theirs = isServer ? secrets.client : secrets.server
+        guard let send = mine.withUnsafeBufferPointer({
                   quicDirection(secret: $0.baseAddress!, secretLen: $0.count,
                                 cipher: secrets.cipher, version: version)
               }),
-              let receive = secrets.client.withUnsafeBufferPointer({
+              let receive = theirs.withUnsafeBufferPointer({
                   quicDirection(secret: $0.baseAddress!, secretLen: $0.count,
                                 cipher: secrets.cipher, version: version)
               })
@@ -1158,7 +1342,7 @@ public final class QUICConnection {
         }
         // Streams opened before the parameters arrived were given a limit of
         // zero; they get the real one now.
-        for (id, stream) in streams where QUICStreamKind.isClientInitiated(id) {
+        for (id, stream) in streams where !isLocal(id) {
             if QUICStreamKind.isBidirectional(id) {
                 stream.send.limit = max(stream.send.limit,
                                         peerParameters.initialMaxStreamDataBidiLocal)
@@ -1166,7 +1350,7 @@ public final class QUICConnection {
         }
     }
 
-    private func discardSpace(_ level: QUICLevel) {
+    func discardSpace(_ level: QUICLevel) {
         let index = level.rawValue
         if !keys[index].send.isValid && !keys[index].receive.isValid { return }
         let lost = QUICLossDetection.abandon(space: &spaces[index], recovery: &recovery)
@@ -1266,7 +1450,7 @@ public final class QUICConnection {
         streams.removeValue(forKey: id)
         writableSet.remove(id)
         // The peer may open another in its place.
-        if QUICStreamKind.isClientInitiated(id) {
+        if !isLocal(id) {
             if QUICStreamKind.isUnidirectional(id) {
                 localMaxStreamsUni += 1
                 maxStreamsUniPending = true
@@ -1298,6 +1482,136 @@ public final class QUICConnection {
         // so a connection is never dropped while a probe could still land.
         let floor = 3 * recovery.ptoMs(includeMaxAckDelay: true)
         return nowMs > lastActivityMs + max(idleTimeoutMs, floor)
+    }
+}
+
+// MARK: - A client's answers to its first flight
+
+extension QUICConnection {
+    /// A Retry (RFC 9000 section 17.2.5.2): the server wants proof of the
+    /// client's address before it does any work, and sends a token to come
+    /// back with and a connection ID to come back to. The ClientHello goes
+    /// again, the same bytes, under Initial keys from the new connection ID,
+    /// in packets numbered on from the first.
+    ///
+    /// A Retry has no keys behind it, only an integrity tag anyone who saw
+    /// the client's Initial could compute, so it is taken at most once and
+    /// only before anything from the server has authenticated -- and is
+    /// otherwise dropped without a word, as the RFC says.
+    func receiveRetry(_ p: UnsafeMutablePointer<UInt8>, _ n: Int, header: QUICPacketHeader, nowMs: UInt64) {
+        guard !isServer, !heardFromServer, retrySourceCID == nil, status == .handshaking,
+              header.version == version, header.dcid == localCID,
+              // A Retry naming the connection ID it answers is not one.
+              header.scid != originalDCID
+        else { return }
+        let tokenStart = 1 + 4 + 1 + Int(header.dcid.length) + 1 + Int(header.scid.length)
+        let tokenLength = n - tokenStart - quicAEADTagLength
+        guard tokenLength > 0,
+              QUICRetry.isValid(UnsafeRawBufferPointer(start: p, count: n), originalDCID: originalDCID,
+                                version: version),
+              let initial = quicInitialKeys(destinationCID: header.scid, version: version, isServer: false)
+        else { return }
+
+        initialToken = [UInt8](UnsafeBufferPointer(start: p + tokenStart, count: tokenLength))
+        retrySourceCID = header.scid
+        peerCID = header.scid
+        let index = QUICLevel.initial.rawValue
+        keys[index].destroy()
+        keys[index] = initial
+        // What the first Initials carried is owed again; nothing they held
+        // will be acknowledged now, so none of it is in flight.
+        _ = QUICLossDetection.abandon(space: &spaces[index], recovery: &recovery)
+        spaces[index].lossTimeMs = 0
+        if cryptoSend[index].sent > cryptoSend[index].base {
+            cryptoSend[index].declareLost(cryptoSend[index].base, cryptoSend[index].sent)
+        }
+        lastActivityMs = nowMs
+    }
+
+    /// A Version Negotiation packet (RFC 9000 section 6.2): the server speaks
+    /// none of the client's versions. Without anything to authenticate it,
+    /// it is believed only if it answers our first Initial, arrives before
+    /// anything else from the server, and does not list the version we
+    /// used -- a list that does is a forgery or a stray, and is ignored. A
+    /// believed one ends the connection at once, with nothing sent, since
+    /// there is no version to send it in: VERSION_NEGOTIATION_ERROR (RFC
+    /// 9368), the versions offered in `peerVersions`.
+    func receiveVersionNegotiation(_ p: UnsafeMutablePointer<UInt8>, _ n: Int, header: QUICPacketHeader,
+                                   nowMs: UInt64) {
+        guard !isServer, !heardFromServer, retrySourceCID == nil, status == .handshaking,
+              header.dcid == localCID, header.scid == originalDCID
+        else { return }
+        let start = 1 + 4 + 1 + Int(header.dcid.length) + 1 + Int(header.scid.length)
+        guard n > start, (n - start) % 4 == 0 else { return }
+        var offered: [UInt32] = []
+        var r = QUICReader(UnsafePointer(p + start), n - start)
+        while let v = r.uint32() { offered.append(v) }
+        if offered.contains(version) { return }
+        peerVersions = offered
+        closeError = QUICError.versionNegotiationError.rawValue
+        closeIsApplication = false
+        status = .drained
+        lastActivityMs = nowMs
+        events.append(QUICEvent(.closed, code: closeError))
+    }
+}
+
+/// Retry packets' integrity (RFC 9001 section 5.8, RFC 9369 section 3.3.3):
+/// a tag a client checks and a server writes, and a Retry for a server that
+/// sends one.
+public enum QUICRetry {
+    /// Fixed, and public: the tag proves only that whoever sent the Retry
+    /// saw the Initial it answers.
+    static let keyV1: [UInt8] = [0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a,
+                                 0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8, 0x4e]
+    static let nonceV1: [UInt8] = [0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2, 0x23, 0x98, 0x25, 0xbb]
+    static let keyV2: [UInt8] = [0x8f, 0xb4, 0xb0, 0x1b, 0x56, 0xac, 0x48, 0xe2,
+                                 0x60, 0xfb, 0xcb, 0xce, 0xad, 0x7c, 0xcc, 0x92]
+    static let nonceV2: [UInt8] = [0xd8, 0x69, 0x69, 0xbc, 0x2d, 0x7c, 0x6d, 0x99, 0x90, 0xef, 0xb0, 0x4a]
+
+    /// The tag for a Retry packet without one, answering an Initial sent to
+    /// `originalDCID`: an AEAD of nothing over the pseudo-packet that puts
+    /// that connection ID in front.
+    public static func integrityTag(_ packet: UnsafeRawBufferPointer, originalDCID: QUICConnectionID,
+                                    version: UInt32) -> [UInt8]? {
+        var pseudo: [UInt8] = [originalDCID.length]
+        originalDCID.withBytes { pseudo += UnsafeBufferPointer(start: $0, count: $1) }
+        pseudo += packet
+        let v2 = version == QUICVersion.v2
+        guard let aead = try? AEAD(.aes128GCM, key: v2 ? keyV2 : keyV1),
+              let tag = try? aead.seal(nonce: v2 ? nonceV2 : nonceV1, aad: pseudo, plaintext: []),
+              tag.count == quicAEADTagLength
+        else { return nil }
+        return tag
+    }
+
+    /// Whether a whole Retry packet's tag is right.
+    public static func isValid(_ packet: UnsafeRawBufferPointer, originalDCID: QUICConnectionID,
+                               version: UInt32) -> Bool {
+        guard packet.count > quicAEADTagLength,
+              let tag = integrityTag(UnsafeRawBufferPointer(rebasing: packet[..<(packet.count - quicAEADTagLength)]),
+                                     originalDCID: originalDCID, version: version)
+        else { return false }
+        return ConstantTime.equals(tag, Array(packet[(packet.count - quicAEADTagLength)...]))
+    }
+
+    /// A Retry to a client whose Initial came from `clientSCID` and was sent
+    /// to `originalDCID`: come back to `retrySCID`, with `token`.
+    public static func packet(version: UInt32, clientSCID: QUICConnectionID, retrySCID: QUICConnectionID,
+                              originalDCID: QUICConnectionID, token: [UInt8]) -> [UInt8]? {
+        // The type is 3 in version 1 and 0 in version 2; the low four bits
+        // are unused, and set.
+        var out: [UInt8] = [version == QUICVersion.v2 ? 0xCF : 0xFF]
+        out += [UInt8(truncatingIfNeeded: version >> 24), UInt8(truncatingIfNeeded: version >> 16),
+                UInt8(truncatingIfNeeded: version >> 8), UInt8(truncatingIfNeeded: version)]
+        out.append(clientSCID.length)
+        clientSCID.withBytes { out += UnsafeBufferPointer(start: $0, count: $1) }
+        out.append(retrySCID.length)
+        retrySCID.withBytes { out += UnsafeBufferPointer(start: $0, count: $1) }
+        out += token
+        guard let tag = out.withUnsafeBytes({ integrityTag($0, originalDCID: originalDCID, version: version) })
+        else { return nil }
+        return out + tag
     }
 }
 #endif
