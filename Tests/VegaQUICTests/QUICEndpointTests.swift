@@ -16,7 +16,7 @@ import VegaQUICNet
 @testable import VegaQUIC
 
 /// The test peer's datagrams over a socket.
-private final class Wire {
+final class Wire {
     let socket: UDPSocket
     let server: SocketAddress
 
@@ -49,15 +49,15 @@ private final class Wire {
     }
 }
 
-private func serverConfig() throws -> QUICServerConfig {
+func serverConfig() throws -> QUICServerConfig {
     let identity = try TLSIdentity.selfSigned(names: ["localhost"])
     let certificate = try CertificateKey(chainPEM: identity.certificateChain, keyPEM: identity.privateKey)
     return QUICServerConfig(certKey: certificate, alpn: [Array("echo".utf8)])
 }
 
 /// A handshake, from the client's side, up to its Finished.
-private func handshake(_ client: QUICTestPeer, _ wire: Wire) async throws {
-    let hello = client.clientHello(serverName: "localhost", alpn: ["echo"])
+func handshake(_ client: QUICTestPeer, _ wire: Wire, alpn: String = "echo") async throws {
+    let hello = client.clientHello(serverName: "localhost", alpn: [alpn])
     try await wire.send(try client.packet(.initial, cryptoFrame(offset: 0, hello)))
     try await wire.pump(into: client) { client.handshakeReceived }
     #expect(client.serverFinishedVerified)

@@ -70,6 +70,19 @@ public struct FramedRead<Reader: AsyncReader & ~Copyable, Decoding: Decoder>: ~C
         }
     }
 
+    /// Put `bytes` ahead of what is still to be decoded: bytes already read
+    /// from the stream for something else, such as a sniffed preface or a
+    /// stream type.
+    public mutating func prepend(_ bytes: [UInt8]) {
+        guard !bytes.isEmpty else { return }
+        let s = start
+        var merged = IOBuffer(capacity: max(buffer.capacity, bytes.count + buffer.count - s))
+        _ = bytes.withUnsafeBytes { merged.append($0) }
+        _ = buffer.withUnsafeBytes { merged.append(UnsafeRawBufferPointer(rebasing: $0[s...])) }
+        buffer = merged
+        start = 0
+    }
+
     /// Give back the reader, with any bytes read but not decoded lost.
     public consuming func intoReader() -> Reader {
         reader

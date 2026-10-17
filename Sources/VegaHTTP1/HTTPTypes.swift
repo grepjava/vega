@@ -35,6 +35,7 @@ public struct HTTPVersion: Hashable, Sendable, CustomStringConvertible {
     public static let http1_0 = HTTPVersion(major: 1, minor: 0)
     public static let http1_1 = HTTPVersion(major: 1, minor: 1)
     public static let http2 = HTTPVersion(major: 2, minor: 0)
+    public static let http3 = HTTPVersion(major: 3, minor: 0)
 
     public var description: String { "HTTP/\(major).\(minor)" }
 }

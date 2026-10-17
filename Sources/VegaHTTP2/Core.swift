@@ -302,7 +302,7 @@ struct H2Core {
             }
             if !isServer && s.response == nil {
                 // The response head, or an interim one before it.
-                guard let head = fields.responseHead() else { return streamError(id, into: &out) }
+                guard let head = fields.responseHead(version: .http2) else { return streamError(id, into: &out) }
                 if head.status < 200 {
                     if endStream { return streamError(id, into: &out) }
                     return []
@@ -337,7 +337,7 @@ struct H2Core {
             reset(id, .refusedStream, into: &out)
             return []
         }
-        guard let head = fields.requestHead() else {
+        guard let head = fields.requestHead(version: .http2) else {
             reset(id, .protocolError, into: &out)
             return []
         }
@@ -581,91 +581,5 @@ struct H2Core {
             block.add(name: lower, value: value)
         }
         return block.bytes
-    }
-}
-
-/// Fields that describe a connection, which HTTP/2 has no use for
-/// (RFC 9113 section 8.2.2).
-let connectionSpecific: Set<String> = ["connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "host"]
-
-/// A lowercase token (RFC 9113 section 8.2.1).
-func isValidName(_ n: [UInt8]) -> Bool {
-    !n.isEmpty && n.allSatisfy { c in
-        switch c {
-        case 0x30...0x39, 0x61...0x7A, 0x21, 0x23...0x27, 0x2A, 0x2B, 0x2D, 0x2E, 0x5E, 0x5F, 0x60, 0x7C, 0x7E: true
-        default: false
-        }
-    }
-}
-
-/// No NUL, CR or LF, and no whitespace at either end.
-func isValidValue(_ v: [UInt8]) -> Bool {
-    if let f = v.first, f == 0x20 || f == 0x09 { return false }
-    if let l = v.last, l == 0x20 || l == 0x09 { return false }
-    return !v.contains { $0 == 0 || $0 == 0x0A || $0 == 0x0D }
-}
-
-/// A decoded header block, checked as it arrives.
-struct DecodedFields {
-    var pseudo: [(String, String)] = []
-    var fields = HTTPFields()
-    var malformed = false
-
-    mutating func add(_ name: UnsafeRawBufferPointer, _ value: UnsafeRawBufferPointer) {
-        let n = Array(name), v = Array(value)
-        if n.first == UInt8(ascii: ":") {
-            // Pseudo-fields come first.
-            if !fields.isEmpty { malformed = true }
-            pseudo.append((String(decoding: n, as: UTF8.self), String(decoding: v, as: UTF8.self)))
-            return
-        }
-        guard isValidName(n), isValidValue(v) else {
-            malformed = true
-            return
-        }
-        let nameString = String(decoding: n, as: UTF8.self)
-        if connectionSpecific.contains(nameString) && nameString != "host" { malformed = true }
-        if nameString == "te" && v != Array("trailers".utf8) { malformed = true }
-        fields.append(name: name, value: value)
-    }
-
-    /// Each pseudo-field once, and only those in `allowed`.
-    private func pseudoFields(_ allowed: Set<String>) -> [String: String]? {
-        var seen: [String: String] = [:]
-        for (name, value) in pseudo {
-            guard allowed.contains(name), seen[name] == nil else { return nil }
-            seen[name] = value
-        }
-        return seen
-    }
-
-    func requestHead() -> HTTPRequestHead? {
-        guard !malformed, let p = pseudoFields([":method", ":scheme", ":authority", ":path"]),
-              let method = p[":method"], !method.isEmpty
-        else { return nil }
-        var fields = fields
-        let target: String
-        if method == "CONNECT" {
-            guard let authority = p[":authority"], p[":scheme"] == nil, p[":path"] == nil else { return nil }
-            target = authority
-        } else {
-            guard p[":scheme"] != nil, let path = p[":path"], !path.isEmpty else { return nil }
-            target = path
-        }
-        if let authority = p[":authority"], !fields.contains("host") {
-            fields.append(name: "host", value: authority)
-        }
-        return HTTPRequestHead(method: HTTPMethod(rawValue: method), target: target, version: .http2, fields: fields)
-    }
-
-    func responseHead() -> HTTPResponseHead? {
-        guard !malformed, let p = pseudoFields([":status"]), let status = p[":status"],
-              status.utf8.count == 3, let code = Int(status), code >= 100
-        else { return nil }
-        return HTTPResponseHead(status: code, version: .http2, fields: fields)
-    }
-
-    func trailers() -> HTTPFields? {
-        malformed || !pseudo.isEmpty ? nil : fields
     }
 }
