@@ -493,8 +493,12 @@ intptr_t cv_recv_stamped(int fd, void *buf, intptr_t len, cv_arrival *arrival);
 void cv_arrival_settle(cv_arrival *arrival);
 intptr_t cv_send(int fd, const void *buf, intptr_t len);
 
-/// A UDP socket bound to host:port (port 0: any free one).
-int cv_udp_bind(const char *host, int port, int reuse_port, int *err);
+#define CV_UDP_REUSEPORT 1
+#define CV_UDP_REUSEADDR 2
+/// A UDP socket bound to host:port (port 0: any free one). `reuse` is a mask
+/// of CV_UDP_REUSEPORT and CV_UDP_REUSEADDR, set before binding (Windows
+/// ignores both: its SO_REUSEADDR lets another socket take the port).
+int cv_udp_bind(const char *host, int port, int reuse, int *err);
 /// Set the default peer of a datagram socket. 0 or an errno value.
 int cv_connect_address(int fd, const cv_sockaddr *a);
 /// sendto / recvfrom: bytes moved, or -errno. A datagram longer than len is

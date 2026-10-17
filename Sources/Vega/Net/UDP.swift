@@ -27,11 +27,15 @@ public struct UDPSocket: ~Copyable, Sendable {
 
     /// Bind to `host` (an address or name; empty for all interfaces) and
     /// `port` (0 picks a free one). Call from a task on a Vega runtime.
+    /// `reuseAddress` sets SO_REUSEADDR before binding, as a socket joining a
+    /// multicast group usually wants (not on Windows, where it would let
+    /// another socket take the port).
     public static func bind(host: String = "", port: Int,
-                            reusePort: Bool = false) throws(IOError) -> UDPSocket {
+                            reusePort: Bool = false, reuseAddress: Bool = false) throws(IOError) -> UDPSocket {
         let driver = try IODriver.current()
         var err: Int32 = 0
-        let fd = cv_udp_bind(host, Int32(port), reusePort ? 1 : 0, &err)
+        let reuse = (reusePort ? CV_UDP_REUSEPORT : 0) | (reuseAddress ? CV_UDP_REUSEADDR : 0)
+        let fd = cv_udp_bind(host, Int32(port), Int32(reuse), &err)
         guard fd >= 0 else { throw IOError(code: err) }
         return UDPSocket(reg: try IORegistration(fd: fd, driver: driver))
     }

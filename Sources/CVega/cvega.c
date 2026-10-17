@@ -2493,7 +2493,7 @@ intptr_t cv_send(int fd, const void *buf, intptr_t len) {
     return n >= 0 ? (long)n : -(long)errno;
 }
 
-int cv_udp_bind(const char *host, int port, int reuse_port, int *err) {
+int cv_udp_bind(const char *host, int port, int reuse, int *err) {
     struct addrinfo *res = resolve(host, port, 1, SOCK_DGRAM, err);
     if (!res) return -1;
     int fd = -1;
@@ -2504,10 +2504,11 @@ int cv_udp_bind(const char *host, int port, int reuse_port, int *err) {
             *err = errno;
             continue;
         }
-#ifdef SO_REUSEPORT
         int one = 1;
-        if (reuse_port) setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+#ifdef SO_REUSEPORT
+        if (reuse & CV_UDP_REUSEPORT) setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
 #endif
+        if (reuse & CV_UDP_REUSEADDR) setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
         if (bind(fd, a->ai_addr, a->ai_addrlen) == 0) {
             *err = 0;
             break;

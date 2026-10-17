@@ -358,8 +358,8 @@ intptr_t cv_send(int fd, const void *buf, intptr_t len) {
     return n >= 0 ? (intptr_t)n : -(intptr_t)last_error();
 }
 
-int cv_udp_bind(const char *host, int port, int reuse_port, int *err) {
-    (void)reuse_port;
+int cv_udp_bind(const char *host, int port, int reuse, int *err) {
+    (void)reuse;
     struct addrinfo *res = resolve(host, port, 1, SOCK_DGRAM, err);
     if (!res) return -1;
     SOCKET s = INVALID_SOCKET;
