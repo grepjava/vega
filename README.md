@@ -4,8 +4,6 @@
 
 # Vega
 
-[![CI](https://github.com/grepjava/vega/actions/workflows/ci.yml/badge.svg)](https://github.com/grepjava/vega/actions/workflows/ci.yml)
-
 A high-speed I/O engine for Swift, and an alternative to SwiftNIO for code
 written with Swift concurrency. It provides a Tokio-style work-stealing
 scheduler, completion-based I/O on io_uring and IOCP, and readiness-based I/O on
