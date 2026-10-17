@@ -75,7 +75,9 @@ public final class TaskPool: @unchecked Sendable {
         if let idle {
             idle.resume(returning: work)
         } else if grow {
-            runtime.scheduler.task { await IOTaskHook.run { await self.loop() } }
+            // Detached: a pooled task runs many spawners' closures, and must
+            // not carry the task-locals of the one that happened to start it.
+            runtime.scheduler.detachedTask { await IOTaskHook.run { await self.loop() } }
         }
     }
 

@@ -204,6 +204,23 @@ extension Runtime {
         return try result.get()
     }
 
+    /// Run blocking `body` here, on this thread, as Tokio's
+    /// `block_in_place`: for blocking work that borrows from the caller or
+    /// isn't `Sendable`, which `blocking` can't take.
+    ///
+    /// On a Vega worker, the jobs queued on it first go to the other
+    /// workers, and what `body` makes runnable goes to them too, so nothing
+    /// waits behind it. The worker itself is busy until `body` returns: its
+    /// timers and, with io_uring, its ring's completions wait, and a
+    /// runtime of one worker runs nothing else meanwhile. Off a runtime it
+    /// just calls `body`.
+    public static func blockInPlace<T, E: Error>(_ body: () throws(E) -> T) throws(E) -> T {
+        guard let worker = Worker.current?.takeUnretainedValue(), let s = worker.scheduler else {
+            return try body()
+        }
+        return try worker.blockInPlace(s, body)
+    }
+
     /// A `blocking` job is over, run or refused: one fewer in flight.
     private static func blockingDone(_ scheduler: Scheduler?) {
         if let scheduler,

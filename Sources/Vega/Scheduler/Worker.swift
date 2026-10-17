@@ -86,6 +86,9 @@ final class Worker: @unchecked Sendable {
     /// While set, jobs scheduled here go to the inject queue: a busy worker's
     /// I/O poll, so its batch doesn't push older queued jobs out of turn.
     private var toInject = false
+    /// In `Runtime.blockInPlace`: jobs scheduled here go to the inject
+    /// queue at once, not batched, as no batch ends until the body returns.
+    private var blockingInPlace = false
     /// The jobs scheduled while `toInject`, pushed in one locked batch.
     private let injectBuffer = UnsafeMutablePointer<UnownedJob>.allocate(capacity: Worker.injectBufferCapacity)
     private var injectCount = 0
@@ -202,6 +205,11 @@ final class Worker: @unchecked Sendable {
         if let p = lifo { JobAudit.note(p, "displaced->queue") }
         #endif
         if toInject {
+            if blockingInPlace {
+                s.inject.push(job)
+                s.notifyParked()
+                return
+            }
             if injectCount == Self.injectBufferCapacity { flushInject(s) }
             (injectBuffer + injectCount).initialize(to: job)
             injectCount += 1
@@ -258,6 +266,30 @@ final class Worker: @unchecked Sendable {
         let buf = injectBuffer
         s.inject.pushBatch(UInt32(injectCount - 1)) { buf[Int($0)] }
         injectCount = 0
+    }
+
+    /// `Runtime.blockInPlace`: hand the jobs queued here (the LIFO slot's
+    /// too, which no one can steal) to the shared queue, and run `body` with
+    /// what it makes runnable going there as well.
+    func blockInPlace<R, E: Error>(_ s: Scheduler, _ body: () throws(E) -> R) throws(E) -> R {
+        var moved = false
+        if let job = lifo {
+            lifo = nil
+            s.inject.push(job)
+            moved = true
+        }
+        while let job = queue.pop() {
+            s.inject.push(job)
+            moved = true
+        }
+        // Batched while an I/O poll ran: those go now.
+        flushInject(s)
+        if moved { s.notifyParked() }
+        let was = (toInject, blockingInPlace)
+        toInject = true
+        blockingInPlace = true
+        defer { (toInject, blockingInPlace) = was }
+        return try body()
     }
 
     /// Keep `action` for when the running job returns; false when as many
