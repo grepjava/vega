@@ -6,8 +6,9 @@ param([string]$Source = (Split-Path $PSScriptRoot -Parent), [string]$Filter = ""
 $ErrorActionPreference = "Continue"
 
 # Visual Studio's developer environment.
-$vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
-$vs = & $vswhere -latest -property installationPath
+$installer = "C:\Program Files (x86)\Microsoft Visual Studio\Installer"
+$env:Path = "$installer;" + $env:Path    # vcvars64.bat runs vswhere too
+$vs = & "$installer\vswhere.exe" -latest -property installationPath
 cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object {
     if ($_ -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process') }
 }
