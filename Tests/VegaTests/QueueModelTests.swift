@@ -17,7 +17,7 @@ import Testing
     @Test func everyJobComesOutOnce() {
         let workers = 8
         // VEGA_MODEL_N shrinks it for slow builds (TSan).
-        let perWorker = getenv("VEGA_MODEL_N").flatMap { Int(String(cString: $0)) } ?? 2_000_000
+        let perWorker = getenv("VEGA_MODEL_N").flatMap { Int(String(cString: $0)) } ?? (cv_tsan_enabled() == 1 ? 20_000 : 2_000_000) // TSan runs it ~100x slower
         let total = workers * perWorker
         final class World: @unchecked Sendable {
             let queues: [LocalQueue]

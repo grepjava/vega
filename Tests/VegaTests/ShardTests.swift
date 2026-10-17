@@ -46,7 +46,9 @@ import Testing
     /// to the CPUs it allows. Checked in a child, on a thread pinned to the
     /// last allowed CPU (any one but the first): the mask is per thread, and
     /// a forked child's only thread is the one `taskset` would have set.
-    @Test func keepsToTheAffinityMask() {
+    /// Not under ThreadSanitizer, which a fork of a threaded process
+    /// upsets: the child exits with TSan's code, 66.
+    @Test(.enabled(if: cv_tsan_enabled() == 0)) func keepsToTheAffinityMask() {
         guard let mask = Topology.affinity(), mask.count > 1 else { return }
         let only = mask.last!
         let pid = fork()

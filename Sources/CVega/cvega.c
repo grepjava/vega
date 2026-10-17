@@ -3705,6 +3705,8 @@ void cv_signal_wait(void) {
 #ifdef CV_TSAN
 void __tsan_acquire(void *addr);
 void cv_tsan_acquire(const void *addr) { __tsan_acquire((void *)addr); }
+int cv_tsan_enabled(void) { return 1; }
 #else
 void cv_tsan_acquire(const void *addr) { (void)addr; }
+int cv_tsan_enabled(void) { return 0; }
 #endif

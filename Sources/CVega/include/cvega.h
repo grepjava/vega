@@ -733,6 +733,8 @@ int cv_signal_raise(int signo);
 /// resumed before the task got there; the resumer released the task pointer,
 /// so acquiring `cv_task_current()` after the await restores the edge.
 void cv_tsan_acquire(const void *addr);
+/// 1 in a build with ThreadSanitizer, for tests that must do less under it.
+int cv_tsan_enabled(void);
 
 #ifdef __cplusplus
 }
