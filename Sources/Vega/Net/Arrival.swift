@@ -33,7 +33,7 @@ public struct ReadArrival: @unchecked Sendable {
     /// Microseconds since the epoch at which the last read's bytes arrived,
     /// or nil when they were not stamped: the socket had no
     /// `receiveTimestamps`, or the stream cannot say (TLS, Unix sockets,
-    /// Windows).
+    /// Windows, and Apple platforms, whose kernel stamps datagrams only).
     public var microseconds: UInt64? { raw.micros == 0 ? nil : raw.micros }
 
     /// Forgets the last read's stamp.

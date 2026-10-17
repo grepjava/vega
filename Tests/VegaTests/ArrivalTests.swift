@@ -18,7 +18,13 @@ private func wallMicros() -> UInt64 {
 struct ArrivalTests {
     /// Bytes read late say when they arrived, not when they were read; and
     /// without stamps on the socket a read says nothing.
+    /// On iOS `.automatic` is Network.framework, which has no listener
+    /// options to set.
+    #if os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+    @Test(arguments: [IOBackend.readiness])
+    #else
     @Test(arguments: [IOBackend.readiness, .automatic])
+    #endif
     func aLateReadSaysWhenItsBytesArrived(_ io: IOBackend) throws {
         let rt = Runtime(workers: 2, io: io)
         defer { rt.shutdown() }
@@ -51,10 +57,16 @@ struct ArrivalTests {
             return (sent, stamped, n, arrival.pointee.microseconds)
         }
         #expect(n == 4)
+        #if canImport(Darwin)
+        // Darwin stamps datagrams only: a TCP read cannot say.
+        #expect(stamped == nil && unstamped == nil)
+        _ = sent
+        #else
         let stamp = try #require(stamped)
         #expect(stamp + 2_000 >= sent && stamp < sent + 100_000,
                 "stamped \(Int64(stamp) - Int64(sent)) µs after it was sent")
         #expect(unstamped == nil)
+        #endif
     }
 }
 #endif

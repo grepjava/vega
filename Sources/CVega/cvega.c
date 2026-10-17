@@ -2586,6 +2586,20 @@ int cv_unix_connect(const char *path, int *err) {
 
 int cv_unix_accept(int fd, int *err) { return accept_nb(fd, err); }
 
+/// Darwin sends no datagram longer than SO_SNDBUF, 2 KiB by default on a
+/// Unix socket (net.local.dgram.maxdgram): room for 64 KiB, as Linux allows
+/// about that much.
+static void unix_dgram_room(int fd) {
+#if defined(__APPLE__)
+    int size = 65536;
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof size);
+    size = 4 * 65536;
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof size);
+#else
+    (void)fd;
+#endif
+}
+
 int cv_unix_dgram_bind(const char *path, int *err) {
     struct sockaddr_un un;
     socklen_t len;
@@ -2595,6 +2609,7 @@ int cv_unix_dgram_bind(const char *path, int *err) {
         *err = errno;
         return -1;
     }
+    unix_dgram_room(fd);
     if (path && bind(fd, (struct sockaddr *)&un, len) != 0) {
         *err = errno;
         close(fd);
@@ -2614,6 +2629,8 @@ int cv_unix_dgram_pair(int fds[2]) {
         close(fds[1]);
         return e;
     }
+    unix_dgram_room(fds[0]);
+    unix_dgram_room(fds[1]);
 #endif
     return 0;
 }

@@ -544,7 +544,18 @@ extension IORegistration {
         var data = Data()
         for i in 0..<count { data.append(contentsOf: part(i)) }
         guard !data.isEmpty else { return }
-        try await (NetworkIO.handle(nw) as! NetworkStream).write(data)
+        let stream = NetworkIO.handle(nw) as! NetworkStream
+        // There is no readiness to wait for here: under
+        // `Runtime.withWriteStallTimeout`, and no deadline of its own, the
+        // send gives up once Network.framework has taken none of it for the
+        // limit, as `wait(CV_IO_WRITE)` does on a socket.
+        if let stall = WriteStall.active, IODeadline.active == nil {
+            try await Runtime.withIODeadline(.nanoseconds(Int64(clamping: stall))) { () async throws(IOError) in
+                try await stream.write(data)
+            }
+            return
+        }
+        try await stream.write(data)
     }
 
     func nwAccept(_ nw: UnsafeRawPointer) async throws(IOError) -> IORegistration {
