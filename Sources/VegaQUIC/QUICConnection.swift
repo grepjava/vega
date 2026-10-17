@@ -1199,6 +1199,9 @@ public final class QUICConnection {
     /// Grants the peer more room on a stream the application has read from.
     public func extendStreamWindow(_ id: UInt64, consumed: UInt64) {
         guard let stream = streams[id] else { return }
+        // A unidirectional stream we opened only sends: MAX_STREAM_DATA for
+        // it is a STREAM_STATE_ERROR at the peer (RFC 9000 section 19.10).
+        if QUICStreamKind.isUnidirectional(id) && QUICStreamKind.isServerInitiated(id) == isServer { return }
         let limit = stream.receive.limit
         // Only bother when the window has fallen below half, so that a slow
         // reader does not generate a MAX_STREAM_DATA frame per packet.

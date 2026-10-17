@@ -293,7 +293,14 @@ public final class QUICTestPeer {
                 _ = try need(r.varint(), "a one-varint frame")
             case 0x12:
                 maxStreamsBidi = max(maxStreamsBidi, try need(r.varint(), "MAX_STREAMS"))
-            case 0x11, 0x15:
+            case 0x11:
+                let id = try need(r.varint(), "MAX_STREAM_DATA")
+                _ = try need(r.varint(), "MAX_STREAM_DATA")
+                // RFC 9000 section 19.10: not for a stream the server only
+                // sends on, as aioquic, for one, enforces.
+                try needTrue(!(QUICStreamKind.isUnidirectional(id) && QUICStreamKind.isServerInitiated(id)),
+                             "MAX_STREAM_DATA for the server's own unidirectional stream \(id)")
+            case 0x15:
                 _ = try need(r.varint(), "a two-varint frame")
                 _ = try need(r.varint(), "a two-varint frame")
             case 0x18:
