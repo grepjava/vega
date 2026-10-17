@@ -216,6 +216,22 @@ int cv_certkey_name(const cv_certkey *ck, int index, char *out, size_t cap);
 /// label in front. Both NUL-terminated.
 int cv_host_matches(const char *pattern, const char *host);
 
+// MARK: Certificate verification
+
+/// A trust store for checking a server's chain: the system's roots
+/// (system_roots 1: OpenSSL's default store, plus Windows' certificate
+/// store), PEM certificates, or both. Immutable once made, so threads may
+/// share one. NULL with a message in err on failure.
+typedef struct cv_verifier cv_verifier;
+cv_verifier *cv_verifier_new(int system_roots, const char *pem, size_t pem_len, char *err, size_t err_len);
+void cv_verifier_free(cv_verifier *v);
+/// Whether a chain (count DER certificates, leaf first, lens their lengths)
+/// leads to a trusted root now, for a TLS server, and the leaf is for host:
+/// a DNS name or an IP address, not NUL-terminated; empty checks no name.
+/// 1, or 0 with the reason in err.
+int cv_verifier_verify(cv_verifier *v, const uint8_t *const *certs, const size_t *lens, int count, const char *host,
+                       size_t host_len, char *err, size_t err_len);
+
 #ifdef __cplusplus
 }
 #endif
