@@ -157,13 +157,19 @@ public enum HTTP3Server {
                              _ configuration: HTTP3Configuration,
                              _ handler: @escaping @Sendable (HTTPRequest) async throws -> HTTPResponse) async {
         var frames = FramedRead(reading: stream,
-                                decoder: HTTP3FrameDecoder(maxPayload: max(configuration.maxFieldSectionSize, 64 * 1024)))
+                                decoder: HTTP3FrameDecoder(maxPayload: max(configuration.maxFieldSectionSize, 64 * 1024),
+                                                           maxData: configuration.maxBodySize))
         var head: HTTPRequestHead?
         var body: [UInt8] = []
         var tooLarge = false
         while true {
             let frame: HTTP3RawFrame?
             do throws(FramedError) { frame = try await frames.next() } catch {
+                // One DATA frame longer than the body may be: 413, below.
+                if case .codec(.frameTooLong) = error, head != nil {
+                    tooLarge = true
+                    break
+                }
                 if stream.error == nil { stream.reset(code: HTTP3Error.frameError) }
                 return
             }
@@ -203,7 +209,9 @@ public enum HTTP3Server {
         }
         guard let head else { return messageError(stream) }
         if tooLarge {
-            stream.stopSending(code: HTTP3Error.requestRejected)
+            // Answered before the request is whole: the client is told to
+            // stop sending, which isn't an error (RFC 9114 section 4.1.1).
+            stream.stopSending(code: HTTP3Error.noError)
             await respond(stream, HTTPResponse(status: 413), head: false)
             return
         }

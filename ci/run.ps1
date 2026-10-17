@@ -31,7 +31,7 @@ if ($Linux -or $Conformance) {
     scp -q $tar "${Box}:vega-ci.tar"
     $remote = "mkdir -p ~/vega-ci/src && cd ~/vega-ci/src && " +
               "find . -mindepth 1 -maxdepth 1 ! -name .build-ci -exec rm -rf {} + && " +
-              "tar -xf ~/vega-ci.tar && echo $label > .ci-commit && bash ci/$script $($Jobs -join ' ')"
+              "tar -xf ~/vega-ci.tar && echo $label > .ci-commit && bash ci/$script $(($Jobs -join ',') -split ',' -join ' ')"
     ssh $Box $remote
     if ($LASTEXITCODE -ne 0) { $failed = $true }
 }

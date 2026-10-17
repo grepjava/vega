@@ -11,6 +11,37 @@ import VegaHTTP3Net
 
 @Suite("HTTP3Client")
 struct HTTP3ClientTests {
+    /// A body sent as one DATA frame far bigger than any other frame (as
+    /// aioquic sends one), and one past the server's body limit: 413.
+    @Test func bigBodiesInOneFrame() throws {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let identity = try TLSIdentity.selfSigned(names: ["localhost"])
+        let certificate = try CertificateKey(chainPEM: identity.certificateChain, keyPEM: identity.privateKey)
+        let (big, tooBig) = try rt.block { () async throws -> (HTTPResponse, HTTPResponse) in
+            let server = try QUICEndpoint.listen(host: "127.0.0.1", port: 0,
+                                                 configuration: HTTP3Server.quicConfiguration(certificate: certificate),
+                                                 runtime: rt)
+            let serving = rt.spawn {
+                await HTTP3Server.serve(server, configuration: HTTP3Configuration(maxBodySize: 2 << 20)) { request in
+                    HTTPResponse(status: 200, body: Array("\(request.body.count)".utf8))
+                }
+            }
+            let endpoint = try QUICEndpoint.client(runtime: rt)
+            let responses = try await HTTP3Client.withConnection(endpoint, host: "localhost", port: server.localPort,
+                                                                certificateVerification: .insecureNoVerification) { client in
+                (try await client.send(HTTPRequest(method: .post, target: "/", body: [UInt8](repeating: 1, count: 1 << 20))),
+                 try await client.send(HTTPRequest(method: .post, target: "/", body: [UInt8](repeating: 2, count: 3 << 20))))
+            }
+            await endpoint.close(grace: .zero)
+            await server.close(grace: .milliseconds(100))
+            await serving.value
+            return responses
+        }
+        #expect(big.status == 200 && big.text == "\(1 << 20)")
+        #expect(tooBig.status == 413)
+    }
+
     /// Vega's client against Vega's server, many requests at once, the
     /// server's certificate checked against its own root.
     @Test func againstHTTP3Server() throws {

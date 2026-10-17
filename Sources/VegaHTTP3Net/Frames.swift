@@ -15,15 +15,26 @@ struct HTTP3RawFrame {
 
 /// HTTP/3 frames from a QUIC stream, for `FramedRead`.
 struct HTTP3FrameDecoder: Decoder {
-    /// A longer frame is a connection error (H3_EXCESSIVE_LOAD) before it
-    /// is buffered.
+    /// A longer frame, but DATA, is refused before it's buffered.
     var maxPayload: Int
+    /// A longer DATA frame is `.frameTooLong`: what the body limit allows,
+    /// since a peer may send a whole body as one frame (aioquic does).
+    var maxData: Int
+
+    init(maxPayload: Int, maxData: Int? = nil) {
+        self.maxPayload = maxPayload
+        self.maxData = maxData ?? maxPayload
+    }
 
     mutating func decode(_ bytes: UnsafeRawBufferPointer) throws(CodecError) -> (item: HTTP3RawFrame, consumed: Int)? {
         guard let base = bytes.baseAddress, bytes.count >= 2 else { return nil }
         var r = QUICReader(base.assumingMemoryBound(to: UInt8.self), bytes.count)
         guard let type = r.varint(), let length = r.varint() else { return nil }
-        guard length <= UInt64(maxPayload) else { throw .malformed("HTTP/3 frame of \(length) bytes") }
+        if type == HTTP3FrameType.data {
+            guard length <= UInt64(maxData) else { throw .frameTooLong(Int(clamping: length)) }
+        } else {
+            guard length <= UInt64(maxPayload) else { throw .malformed("HTTP/3 frame of \(length) bytes") }
+        }
         let n = Int(length)
         guard r.remaining >= n else { return nil }
         let payload = Array(UnsafeRawBufferPointer(rebasing: bytes[r.offset..<(r.offset + n)]))

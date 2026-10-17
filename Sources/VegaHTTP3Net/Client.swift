@@ -124,16 +124,19 @@ public final class HTTP3Client: Sendable {
         if !request.body.isEmpty { out += h3Frame(HTTP3FrameType.data, request.body) }
         do throws(IOError) {
             try await stream.write(out)
+            if !isConnect { stream.finish() }
         } catch {
-            throw .stream(error)
+            // A server may answer before the request is whole and ask us to
+            // stop sending (RFC 9114 section 4.1.1): the answer still comes.
+            guard case .stopSending? = stream.error else { throw .stream(error) }
         }
-        if !isConnect { stream.finish() }
         return try await readResponse(stream, head: request.head.method == .head)
     }
 
     private func readResponse(_ stream: QUICStreamHandle, head: Bool) async throws(HTTP3ClientError) -> HTTPResponse {
         var frames = FramedRead(reading: stream,
-                                decoder: HTTP3FrameDecoder(maxPayload: max(configuration.maxFieldSectionSize, 64 * 1024)))
+                                decoder: HTTP3FrameDecoder(maxPayload: max(configuration.maxFieldSectionSize, 64 * 1024),
+                                                           maxData: configuration.maxBodySize))
         var response: HTTPResponseHead?
         var body: [UInt8] = []
         while true {
@@ -141,6 +144,9 @@ public final class HTTP3Client: Sendable {
             do throws(FramedError) { frame = try await frames.next() } catch {
                 switch error {
                 case .io(let e): throw .stream(e)
+                case .codec(.frameTooLong):
+                    stream.stopSending(code: HTTP3Error.requestCancelled)
+                    throw .bodyTooLarge
                 case .codec: throw .malformedResponse
                 }
             }
