@@ -28,6 +28,7 @@ let package = Package(
         .library(name: "VegaWire", targets: ["VegaWire"]),
         .library(name: "VegaQUIC", targets: ["VegaQUIC"]),
         .library(name: "VegaHTTP3", targets: ["VegaHTTP3"]),
+        .library(name: "VegaQUICNet", targets: ["VegaQUICNet"]),
         .library(name: "VegaExtras", targets: ["VegaExtras"]),
         .library(name: "VegaTest", targets: ["VegaTest"]),
     ],
@@ -111,13 +112,18 @@ let package = Package(
         // HTTP/3 (RFC 9114) framing, QPACK (RFC 9204), capsules (RFC 9297),
         // and the WebSocket (RFC 9220) and WebTransport identifiers. Sans I/O.
         .target(name: "VegaHTTP3", dependencies: ["VegaWire"], swiftSettings: swiftSettings),
+        // VegaQUIC's connections on Vega's UDP sockets: an endpoint task per
+        // socket, and connections and streams for the application's tasks.
+        .target(name: "VegaQUICNet", dependencies: ["Vega", "VegaIO", "VegaQUIC", "VegaWire", "VegaCrypto", "CVega"],
+                swiftSettings: swiftSettings),
         .target(name: "VegaExtras", dependencies: ["Vega", "VegaIO", "VegaHTTP1", "CVegaCompress"], swiftSettings: swiftSettings),
         .testTarget(name: "VegaTests", dependencies: ["Vega", "VegaIO", "VegaFS", "VegaProcess", "VegaMetrics", "VegaTest", "VegaTLS", "VegaCrypto", "VegaHTTP1", "VegaHTTP2", "VegaWebSocket", "VegaExtras", "VegaWire", "CVega"], swiftSettings: swiftSettings),
         .testTarget(name: "VegaWireTests", dependencies: ["VegaWire", "VegaHTTP3"], swiftSettings: swiftSettings),
         // A QUIC client for the tests: a handshake and streams against a VegaQUIC server.
         .target(name: "QUICTestPeer", dependencies: ["VegaQUIC", "VegaWire", "VegaCrypto", "VegaTLS"],
                 path: "Tests/QUICTestPeer", swiftSettings: swiftSettings),
-        .testTarget(name: "VegaQUICTests", dependencies: ["VegaQUIC", "VegaWire", "QUICTestPeer", "VegaCrypto", "VegaTLS"],
+        .testTarget(name: "VegaQUICTests", dependencies: ["VegaQUIC", "VegaWire", "QUICTestPeer", "VegaCrypto", "VegaTLS",
+                                                         "VegaQUICNet", "Vega", "VegaIO"],
                     swiftSettings: swiftSettings),
     ],
     cLanguageStandard: .gnu11,
