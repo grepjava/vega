@@ -1,7 +1,12 @@
 import NIOCore
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 
-/// NIO's `ServerBootstrap`, for a `VegaEventLoopGroup`: listens on TCP and
-/// sets up each accepted connection's channel.
+/// NIO's `ServerBootstrap`, for a `VegaEventLoopGroup`: listens on TCP, or
+/// on a Unix domain socket, and sets up each accepted connection's channel.
 ///
 /// ```swift
 /// let channel = try await VegaServerBootstrap(group: group)
@@ -70,9 +75,25 @@ public final class VegaServerBootstrap {
         return bind(to: address)
     }
 
-    /// Not yet: fails with `ChannelError.operationUnsupported`.
+    /// Listen on a Unix domain socket at `unixDomainSocketPath`, which must
+    /// not exist yet. The socket file stays behind when the channel closes,
+    /// as on NIO.
     public func bind(unixDomainSocketPath: String) -> EventLoopFuture<Channel> {
-        group.next().makeFailedFuture(ChannelError.operationUnsupported)
+        bind(unixDomainSocketPath: unixDomainSocketPath, cleanupExistingSocketFile: false)
+    }
+
+    /// Listen on a Unix domain socket, first removing a socket file left at
+    /// `unixDomainSocketPath` if `cleanupExistingSocketFile` (a file there
+    /// that isn't a socket fails the bind instead).
+    public func bind(unixDomainSocketPath: String, cleanupExistingSocketFile: Bool) -> EventLoopFuture<Channel> {
+        let address: SocketAddress
+        do {
+            if cleanupExistingSocketFile { try removeUnixSocketFile(unixDomainSocketPath) }
+            address = try SocketAddress(unixDomainSocketPath: unixDomainSocketPath)
+        } catch {
+            return group.next().makeFailedFuture(error)
+        }
+        return bind(to: address)
     }
 
     public func bind(to address: SocketAddress) -> EventLoopFuture<Channel> {
@@ -123,6 +144,18 @@ public final class VegaServerBootstrap {
         childChannelInitializer: @escaping @Sendable (Channel) -> EventLoopFuture<Output>
     ) async throws -> NIOAsyncChannel<Output, Never> {
         let address = try SocketAddress.makeAddressResolvingHost(host, port: port)
+        return try await bind(to: address, serverBackPressureStrategy: serverBackPressureStrategy,
+                              childChannelInitializer: childChannelInitializer)
+    }
+
+    public func bind<Output: Sendable>(
+        unixDomainSocketPath: String,
+        cleanupExistingSocketFile: Bool = false,
+        serverBackPressureStrategy: NIOAsyncSequenceProducerBackPressureStrategies.HighLowWatermark? = nil,
+        childChannelInitializer: @escaping @Sendable (Channel) -> EventLoopFuture<Output>
+    ) async throws -> NIOAsyncChannel<Output, Never> {
+        if cleanupExistingSocketFile { try removeUnixSocketFile(unixDomainSocketPath) }
+        let address = try SocketAddress(unixDomainSocketPath: unixDomainSocketPath)
         return try await bind(to: address, serverBackPressureStrategy: serverBackPressureStrategy,
                               childChannelInitializer: childChannelInitializer)
     }
@@ -220,8 +253,15 @@ public final class VegaClientBootstrap: NIOClientTCPBootstrapProtocol {
         connect0 { channel, promise in channel.connect(to: address, promise: promise) }
     }
 
+    /// Connect to the Unix domain socket at `unixDomainSocketPath`.
     public func connect(unixDomainSocketPath: String) -> EventLoopFuture<Channel> {
-        group.next().makeFailedFuture(ChannelError.operationUnsupported)
+        let address: SocketAddress
+        do {
+            address = try SocketAddress(unixDomainSocketPath: unixDomainSocketPath)
+        } catch {
+            return group.next().makeFailedFuture(error)
+        }
+        return connect(to: address)
     }
 
     /// Connect, then wrap the channel as `channelInitializer` says (in an
@@ -240,6 +280,14 @@ public final class VegaClientBootstrap: NIOClientTCPBootstrapProtocol {
         channelInitializer: @escaping @Sendable (Channel) -> EventLoopFuture<Output>
     ) async throws -> Output {
         let channel = try await connect(to: address).get()
+        return try await channel.eventLoop.flatSubmit { channelInitializer(channel) }.get()
+    }
+
+    public func connect<Output: Sendable>(
+        unixDomainSocketPath: String,
+        channelInitializer: @escaping @Sendable (Channel) -> EventLoopFuture<Output>
+    ) async throws -> Output {
+        let channel = try await connect(unixDomainSocketPath: unixDomainSocketPath).get()
         return try await channel.eventLoop.flatSubmit { channelInitializer(channel) }.get()
     }
 
@@ -325,3 +373,18 @@ final class AcceptHandler: ChannelInboundHandler {
 
 @available(*, unavailable)
 extension AcceptHandler: Sendable {}
+
+/// Remove the socket file at `path`, if there is one, as NIO's
+/// `cleanupExistingSocketFile` does: anything else there is an error
+/// (ENOTSOCK), and nothing there is fine.
+func removeUnixSocketFile(_ path: String) throws {
+    var info = stat()
+    guard stat(path, &info) == 0 else {
+        if errno == ENOENT { return }
+        throw NIOCore.IOError(errnoCode: errno, reason: "stat")
+    }
+    guard info.st_mode & S_IFMT == S_IFSOCK else {
+        throw NIOCore.IOError(errnoCode: ENOTSOCK, reason: "not a socket: \(path)")
+    }
+    guard unlink(path) == 0 else { throw NIOCore.IOError(errnoCode: errno, reason: "unlink") }
+}

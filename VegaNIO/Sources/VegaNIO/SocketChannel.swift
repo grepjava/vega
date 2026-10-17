@@ -3,16 +3,22 @@ import NIOCore
 import Synchronization
 import class Vega.Runtime
 import struct Vega.TCPStream
+import struct Vega.UnixStream
 import struct Vega.IOBuffer
 import struct Vega.SplitStream
+import struct Vega.ReadHalf
 import struct Vega.WriteHalf
+import struct Vega.PipeReader
+import struct Vega.PipeWriter
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
 import Darwin
 #endif
 
-/// A TCP connection as a NIO `Channel`, over a Vega `TCPStream`.
+/// A TCP connection as a NIO `Channel`, over a Vega `TCPStream`; or a Unix
+/// socket connection (`UnixStream`), or a pipe pair (`PipeReader` and
+/// `PipeWriter`, for `VegaPipeBootstrap`), whose bytes move the same way.
 ///
 /// Handlers run on the channel's loop, as NIO promises. The socket is read
 /// and written by two Vega tasks, a reader and a writer, which are not tied
@@ -54,18 +60,22 @@ final class VegaSocketChannel: Channel, ChannelCore, @unchecked Sendable {
     private var connectTimeout: Scheduled<Void>?
     /// The accepted stream, until the channel goes active.
     private var accepted: StreamBox?
-    private var io: StreamIO?
+    private var io: ChannelIO?
+    /// The socket, for its options: -1 for a pipe.
     private var fd: Int32 = -1
+    /// Over pipes, closing both directions closes the channel: there is
+    /// nothing left to it.
+    private var isPipe = false
 
     private let active = Atomic<Bool>(false)
     private let writable = Atomic<Bool>(true)
     private let addresses = NIOLockedValueBox<(local: SocketAddress?, remote: SocketAddress?)>((nil, nil))
 
-    init(loop: VegaEventLoop, parent: Channel? = nil, accepted stream: consuming TCPStream? = nil) {
+    init(loop: VegaEventLoop, parent: Channel? = nil, accepted: StreamBox? = nil) {
         self.loop = loop
         self.parent = parent
         closePromise = loop.makePromise()
-        if let stream = stream.take() { accepted = StreamBox(stream) }
+        self.accepted = accepted
         _pipeline = ChannelPipeline(channel: self)
     }
 
@@ -196,6 +206,12 @@ final class VegaSocketChannel: Channel, ChannelCore, @unchecked Sendable {
     }
 
     func connect0(to address: SocketAddress, promise: EventLoopPromise<Void>?) {
+        if let path = address.pathname {
+            connect(promise: promise) { () async throws(VegaIOError) in
+                StreamBox(try await UnixStream.connect(path: path), local: nil, remote: address)
+            }
+            return
+        }
         let target: VegaAddress
         do {
             target = try VegaAddress(address)
@@ -203,17 +219,19 @@ final class VegaSocketChannel: Channel, ChannelCore, @unchecked Sendable {
             promise?.fail(error)
             return
         }
-        connect(promise: promise) { () async throws(VegaIOError) in try await TCPStream.connect(to: target) }
+        connect(promise: promise) { () async throws(VegaIOError) in StreamBox(try await TCPStream.connect(to: target)) }
     }
 
     /// Connect to `host`, resolving it and racing its addresses (Happy
     /// Eyeballs). On the loop.
     func connect0(host: String, port: Int, promise: EventLoopPromise<Void>?) {
-        connect(promise: promise) { () async throws(VegaIOError) in try await TCPStream.connect(host: host, port: port) }
+        connect(promise: promise) { () async throws(VegaIOError) in
+            StreamBox(try await TCPStream.connect(host: host, port: port))
+        }
     }
 
     private func connect(promise: EventLoopPromise<Void>?,
-                         _ open: @escaping @Sendable () async throws(VegaIOError) -> TCPStream) {
+                         _ open: @escaping @Sendable () async throws(VegaIOError) -> StreamBox) {
         guard lifecycle == .registered else {
             promise?.fail(lifecycle == .closed ? ChannelError.ioOnClosedChannel : ChannelError.inappropriateOperationForState)
             return
@@ -228,7 +246,7 @@ final class VegaSocketChannel: Channel, ChannelCore, @unchecked Sendable {
         }
         connectTask = loop.runtime.spawn { [self, loop] in
             do throws(VegaIOError) {
-                let box = StreamBox(try await open())
+                let box = try await open()
                 await loop.run { self.connected(box) }
             } catch {
                 await loop.run { self.connectFailed(nioError(error)) }
@@ -252,18 +270,56 @@ final class VegaSocketChannel: Channel, ChannelCore, @unchecked Sendable {
     }
 
     private func becomeActive(_ box: StreamBox, promise: EventLoopPromise<Void>?) {
-        let stream = box.stream.take()!
-        fd = stream.fileDescriptor
+        let halves = box.halves.take()!
+        fd = box.fd
+        // An option the socket lacks is skipped: TCP_NODELAY, which the
+        // bootstraps set, on a Unix socket.
         for (option, value) in options.socket where fd >= 0 {
             try? setSocketOption(fd, option, value)
         }
-        let local = try? stream.localAddress, remote = try? stream.peerAddress
-        addresses.withLockedValue {
-            $0 = (local.flatMap { try? SocketAddress($0) }, remote.flatMap { try? SocketAddress($0) })
-        }
+        addresses.withLockedValue { $0 = (box.local, box.remote) }
         lifecycle = .active
         active.store(true, ordering: .relaxed)
-        io = StreamIO(stream.split(), channel: self)
+        io = .socket(StreamIO(reader: halves.reader, writer: halves.writer, channel: self))
+        promise?.succeed(())
+        pipeline.fireChannelActive()
+        readIfNeeded()
+    }
+
+    /// Go active over a pipe's descriptors, which the channel now owns. One
+    /// may be missing, for a channel that only reads or only writes. On the
+    /// loop, once registered.
+    func activatePipe(input: Int32?, output: Int32?, promise: EventLoopPromise<Void>?) {
+        guard lifecycle == .registered else {
+            if let input { closeDescriptor(input) }
+            if let output { closeDescriptor(output) }
+            promise?.fail(lifecycle == .closed ? ChannelError.ioOnClosedChannel : ChannelError.inappropriateOperationForState)
+            return
+        }
+        var reader: PipeReader?
+        var writer: PipeWriter?
+        do throws(VegaIOError) {
+            // Each closes its descriptor if it fails.
+            if let input {
+                do throws(VegaIOError) {
+                    reader = try PipeReader(adopting: input)
+                } catch {
+                    if let output { closeDescriptor(output) }
+                    throw error
+                }
+            }
+            if let output { writer = try PipeWriter(adopting: output) }
+        } catch {
+            promise?.fail(nioError(error))
+            close0(error: nioError(error), mode: .all, promise: nil)
+            return
+        }
+        isPipe = true
+        inputClosed = input == nil
+        outputClosed = output == nil
+        lifecycle = .active
+        active.store(true, ordering: .relaxed)
+        io = .pipe(StreamIO(reader: reader.take(), writer: writer.take(), channel: self))
         promise?.succeed(())
         pipeline.fireChannelActive()
         readIfNeeded()
@@ -322,7 +378,31 @@ final class VegaSocketChannel: Channel, ChannelCore, @unchecked Sendable {
             outputClosePromise = promise
             io.shutdownOutput()
         case .input:
-            promise?.fail(ChannelError.operationUnsupported)
+            // A pipe's read end can go on its own; a socket's can't (yet).
+            guard isPipe else {
+                promise?.fail(ChannelError.operationUnsupported)
+                return
+            }
+            guard lifecycle == .active, let io else {
+                promise?.fail(ChannelError.ioOnClosedChannel)
+                return
+            }
+            guard !inputClosed else {
+                promise?.fail(ChannelError.inputClosed)
+                return
+            }
+            inputClosed = true
+            io.shutdownInput()
+            promise?.succeed(())
+            pipeline.fireUserInboundEventTriggered(ChannelEvent.inputClosed)
+            closeIfPipeDone()
+        }
+    }
+
+    /// A pipe channel with neither direction left closes.
+    private func closeIfPipeDone() {
+        if isPipe && inputClosed && outputClosed && lifecycle == .active {
+            close0(error: ChannelError.eof, mode: .all, promise: nil)
         }
     }
 
@@ -392,6 +472,7 @@ final class VegaSocketChannel: Channel, ChannelCore, @unchecked Sendable {
             if options.allowRemoteHalfClosure {
                 inputClosed = true
                 pipeline.fireUserInboundEventTriggered(ChannelEvent.inputClosed)
+                closeIfPipeDone()
             } else {
                 close0(error: ChannelError.eof, mode: .all, promise: nil)
             }
@@ -439,6 +520,7 @@ final class VegaSocketChannel: Channel, ChannelCore, @unchecked Sendable {
         outputClosePromise = nil
         guard lifecycle == .active else { return }
         pipeline.fireUserInboundEventTriggered(ChannelEvent.outputClosed)
+        closeIfPipeDone()
     }
 
     private func updateWritability() {
@@ -469,21 +551,117 @@ struct Options {
     var backlog: Int32 = 256
 }
 
-/// A stream on its way between tasks.
+/// A connected stream on its way to its channel, split into halves, with
+/// what the channel needs to know about it.
 final class StreamBox: @unchecked Sendable {
-    var stream: TCPStream?
-    init(_ stream: consuming TCPStream) { self.stream = .some(stream) }
+    var halves: SplitStream?
+    /// The socket, for options: -1 without one (Network.framework).
+    let fd: Int32
+    let local: SocketAddress?
+    let remote: SocketAddress?
+
+    init(_ stream: consuming TCPStream) {
+        fd = stream.fileDescriptor
+        local = (try? stream.localAddress).flatMap { try? SocketAddress($0) }
+        remote = (try? stream.peerAddress).flatMap { try? SocketAddress($0) }
+        halves = .some(stream.split())
+    }
+
+    /// A Unix connection. Its ends have no address but the path the
+    /// listener is bound to: `local` on the accepting side, `remote` on the
+    /// connecting one.
+    init(_ stream: consuming UnixStream, local: SocketAddress?, remote: SocketAddress?) {
+        fd = stream.fileDescriptor
+        self.local = local
+        self.remote = remote
+        halves = .some(stream.split())
+    }
+}
+
+/// What a stream channel reads: a socket's read half, or a pipe.
+protocol ByteSource: ~Copyable, Sendable {
+    func read(into buffer: inout IOBuffer) async throws(VegaIOError) -> Int
+}
+
+/// What a stream channel writes: a socket's write half, or a pipe.
+protocol ByteSink: ~Copyable, Sendable {
+    func write(vectored parts: UnsafeBufferPointer<UnsafeRawBufferPointer>) async throws(VegaIOError)
+    /// Send what goes at once, without waiting: the bytes sent.
+    func tryWrite(vectored parts: UnsafeBufferPointer<UnsafeRawBufferPointer>) throws(VegaIOError) -> Int
+    func shutdownWrite() throws(VegaIOError)
+}
+
+extension ReadHalf: ByteSource {}
+extension WriteHalf: ByteSink {}
+extension PipeReader: ByteSource {}
+
+extension PipeWriter: ByteSink {
+    func write(vectored parts: UnsafeBufferPointer<UnsafeRawBufferPointer>) async throws(VegaIOError) {
+        for part in parts { try await write(part) }
+    }
+
+    /// A PipeWriter has no write that never waits, so the writer task
+    /// sends all of a pipe channel's output.
+    func tryWrite(vectored parts: UnsafeBufferPointer<UnsafeRawBufferPointer>) throws(VegaIOError) -> Int { 0 }
+
+    /// Dropping the writer, which follows, closes the pipe: that is how its
+    /// sending side shuts down.
+    func shutdownWrite() throws(VegaIOError) {}
+}
+
+/// How a stream channel's bytes move. An enum rather than an existential,
+/// so the calls on the hot path are direct.
+enum ChannelIO {
+    case socket(StreamIO<ReadHalf, WriteHalf>)
+    case pipe(StreamIO<PipeReader, PipeWriter>)
+
+    func wantRead() {
+        switch self {
+        case .socket(let io): io.wantRead()
+        case .pipe(let io): io.wantRead()
+        }
+    }
+
+    func send(_ buffers: [ByteBuffer]) -> Int {
+        switch self {
+        case .socket(let io): io.send(buffers)
+        case .pipe(let io): io.send(buffers)
+        }
+    }
+
+    func shutdownOutput() {
+        switch self {
+        case .socket(let io): io.shutdownOutput()
+        case .pipe(let io): io.shutdownOutput()
+        }
+    }
+
+    func shutdownInput() {
+        switch self {
+        case .socket(let io): io.shutdownInput()
+        case .pipe(let io): io.shutdownInput()
+        }
+    }
+
+    func close(linger: Duration, runtime: Runtime) {
+        switch self {
+        case .socket(let io): io.close(linger: linger, runtime: runtime)
+        case .pipe(let io): io.close(linger: linger, runtime: runtime)
+        }
+    }
 }
 
 /// The write half, shared by the loop (sending at flush) and the writer
 /// task: whoever set `writing` uses it, one at a time.
-final class WriterBox: @unchecked Sendable {
-    var half: WriteHalf?
-    init(_ half: consuming WriteHalf) { self.half = .some(half) }
+final class WriterBox<Sink: ByteSink & ~Copyable>: @unchecked Sendable {
+    var half: Sink?
+    init(_ half: consuming Sink?) { self.half = half }
 }
 
-/// What a connection's loop and its reader and writer share.
-final class StreamIO: Sendable {
+/// What a connection's loop and its reader and writer share. A pipe
+/// channel that only reads has no writer task, and one that only writes
+/// no reader.
+final class StreamIO<Source: ByteSource & ~Copyable, Sink: ByteSink & ~Copyable>: Sendable {
     private struct Shared {
         var wantRead = false
         var reader: UnsafeContinuation<Bool, Never>?
@@ -494,6 +672,8 @@ final class StreamIO: Sendable {
         var shutdownOutput = false
         var writer: UnsafeContinuation<Void, Never>?
         var closed = false
+        /// The input alone is closed (a pipe's): the reader stops.
+        var inputShut = false
 
         /// The writer has something to do and the half is free.
         var writerReady: Bool { !writing && (closed || shutdownOutput || !writes.isEmpty) }
@@ -507,17 +687,23 @@ final class StreamIO: Sendable {
     private let shared = NIOLockedValueBox(Shared())
     private let readerTask = NIOLockedValueBox<Task<Void, Never>?>(nil)
     private let writerTask = NIOLockedValueBox<Task<Void, Never>?>(nil)
-    private let out: WriterBox
+    private let out: WriterBox<Sink>
     private let loop: VegaEventLoop
     /// The channel owns this; a back reference that costs no count.
     private unowned(unsafe) let channel: VegaSocketChannel
 
-    init(_ halves: consuming SplitStream, channel: VegaSocketChannel) {
-        let loop = channel.loop
-        self.loop = loop
+    init(reader input: consuming Source?, writer output: consuming Sink?, channel: VegaSocketChannel) {
+        loop = channel.loop
         self.channel = channel
-        out = WriterBox(halves.writer)
-        let reader = loop.runtime.spawn(with: halves.reader) { [self] half in
+        let hasOutput = output != nil
+        out = WriterBox(output)
+        if let input = input.take() { startReader(input, channel: channel) }
+        if hasOutput { startWriter(channel: channel) }
+    }
+
+    private func startReader(_ input: consuming Source, channel: VegaSocketChannel) {
+        let loop = self.loop
+        let reader = loop.runtime.spawn(with: input) { [self] half in
             var buffer = IOBuffer(capacity: 64 * 1024)
             while await waitToRead() {
                 buffer.clear()
@@ -538,7 +724,11 @@ final class StreamIO: Sendable {
                 await loop.run { [bytes] in channel.didRead(bytes) }
             }
         }
-        let out = self.out
+        readerTask.withLockedValue { $0 = reader }
+    }
+
+    private func startWriter(channel: VegaSocketChannel) {
+        let loop = self.loop, out = self.out
         let writer = loop.runtime.spawn { [self] in
             var parts = UnsafeMutableBufferPointer<UnsafeRawBufferPointer>.allocate(capacity: 16)
             defer { parts.deallocate() }
@@ -585,7 +775,6 @@ final class StreamIO: Sendable {
                 doneWriting()
             }
         }
-        readerTask.withLockedValue { $0 = reader }
         writerTask.withLockedValue { $0 = writer }
     }
 
@@ -597,7 +786,7 @@ final class StreamIO: Sendable {
     private func waitToRead() async -> Bool {
         await withUnsafeContinuation { (c: UnsafeContinuation<Bool, Never>) in
             let now: Bool? = shared.withLockedValue { s in
-                if s.closed { return false }
+                if s.closed || s.inputShut { return false }
                 if s.wantRead {
                     s.wantRead = false
                     return true
@@ -713,6 +902,18 @@ final class StreamIO: Sendable {
         }?.resume()
     }
 
+    /// Stop reading for good: the reader task ends, and drops a pipe's read
+    /// end as it goes.
+    func shutdownInput() {
+        let r = shared.withLockedValue { s -> UnsafeContinuation<Bool, Never>? in
+            s.inputShut = true
+            defer { s.reader = nil }
+            return s.reader
+        }
+        r?.resume(returning: false)
+        readerTask.withLockedValue { $0?.cancel() }
+    }
+
     /// Stop reading now; let the writer send what it has, for up to `linger`.
     func close(linger: Duration, runtime: Runtime) {
         let (r, w, pending) = shared.withLockedValue {
@@ -753,6 +954,11 @@ func getSocketOption(_ fd: Int32, _ option: ChannelOptions.Types.SocketOption) t
 /// A Vega I/O error as NIO reports one: system errors as NIO's `IOError`.
 func nioError(_ error: VegaIOError) -> Error {
     error.code > 0 ? NIOCore.IOError(errnoCode: error.code, reason: error.description) : error
+}
+
+/// Close a descriptor we own that never made it into a Vega type.
+func closeDescriptor(_ descriptor: Int32) {
+    _ = close(descriptor)
 }
 
 extension VegaAddress {

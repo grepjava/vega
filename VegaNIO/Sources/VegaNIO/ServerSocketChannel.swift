@@ -3,12 +3,12 @@ import NIOCore
 import Synchronization
 import class Vega.Runtime
 import struct Vega.TCPListener
-import struct Vega.TCPStream
+import struct Vega.UnixListener
 
 /// A listening TCP socket as a NIO server `Channel`, over a Vega
-/// `TCPListener`. Each accepted connection comes down the pipeline as a
-/// `Channel` on a loop of the child group, and registers there once it has
-/// passed through.
+/// `TCPListener`, or a Unix one over a `UnixListener`. Each accepted
+/// connection comes down the pipeline as a `Channel` on a loop of the child
+/// group, and registers there once it has passed through.
 final class VegaServerSocketChannel: Channel, ChannelCore, @unchecked Sendable {
     let loop: VegaEventLoop
     let childGroup: EventLoopGroup
@@ -124,6 +124,10 @@ final class VegaServerSocketChannel: Channel, ChannelCore, @unchecked Sendable {
             promise?.fail(lifecycle == .closed ? ChannelError.ioOnClosedChannel : ChannelError.inappropriateOperationForState)
             return
         }
+        if let path = address.pathname {
+            bindUnix(path: path, address: address, promise: promise)
+            return
+        }
         guard let host = address.ipAddress, let port = address.port else {
             promise?.fail(ChannelError.operationUnsupported)
             return
@@ -143,10 +147,32 @@ final class VegaServerSocketChannel: Channel, ChannelCore, @unchecked Sendable {
             try? setSocketOption(fd, option, value)
         }
         let bound = (try? listener.localAddress).flatMap { try? SocketAddress($0) }
+        becomeActive(Acceptor(listener, channel: self), address: bound, promise: promise)
+    }
+
+    /// Listen on a Unix socket at `path`, which must not exist yet. It is
+    /// left behind when the channel closes, as on NIO.
+    private func bindUnix(path: String, address: SocketAddress, promise: EventLoopPromise<Void>?) {
+        let listener: UnixListener
+        do throws(VegaIOError) {
+            listener = try UnixListener.bind(path: path, backlog: Int(options.backlog))
+        } catch {
+            promise?.fail(nioError(error))
+            return
+        }
+        fd = listener.fileDescriptor
+        for (option, value) in options.socket where fd >= 0 {
+            try? setSocketOption(fd, option, value)
+        }
+        becomeActive(Acceptor(UnixPathListener(listener: listener, address: address), channel: self),
+                     address: address, promise: promise)
+    }
+
+    private func becomeActive(_ acceptor: Acceptor, address bound: SocketAddress?, promise: EventLoopPromise<Void>?) {
         self.address.withLockedValue { $0 = bound }
         lifecycle = .active
         active.store(true, ordering: .relaxed)
-        acceptor = Acceptor(listener, channel: self)
+        self.acceptor = acceptor
         promise?.succeed(())
         pipeline.fireChannelActive()
         readIfNeeded()
@@ -233,6 +259,27 @@ final class VegaServerSocketChannel: Channel, ChannelCore, @unchecked Sendable {
     }
 }
 
+/// A listener an `Acceptor` takes connections from.
+protocol StreamListener: ~Copyable, Sendable {
+    func acceptStream() async throws(VegaIOError) -> StreamBox
+}
+
+extension TCPListener: StreamListener {
+    func acceptStream() async throws(VegaIOError) -> StreamBox {
+        StreamBox(try await accept())
+    }
+}
+
+/// A Unix listener, with the address its connections are accepted at.
+struct UnixPathListener: StreamListener, ~Copyable {
+    let listener: UnixListener
+    let address: SocketAddress
+
+    func acceptStream() async throws(VegaIOError) -> StreamBox {
+        StreamBox(try await listener.accept(), local: address, remote: nil)
+    }
+}
+
 /// The task accepting a listener's connections, when its channel wants them.
 final class Acceptor: Sendable {
     private struct Shared {
@@ -244,13 +291,13 @@ final class Acceptor: Sendable {
     private let shared = NIOLockedValueBox(Shared())
     private let task = NIOLockedValueBox<Task<Void, Never>?>(nil)
 
-    init(_ listener: consuming TCPListener, channel: VegaServerSocketChannel) {
+    init<Listener: StreamListener & ~Copyable>(_ listener: consuming Listener, channel: VegaServerSocketChannel) {
         let loop = channel.loop, childGroup = channel.childGroup
         let task = loop.runtime.spawn(with: listener) { [self] listener in
             while await waitToAccept() {
-                let stream: TCPStream
+                let stream: StreamBox
                 do throws(VegaIOError) {
-                    stream = try await listener.accept()
+                    stream = try await listener.acceptStream()
                 } catch {
                     if error == .cancelled { return }
                     await loop.run { channel.acceptFailed(nioError(error)) }
