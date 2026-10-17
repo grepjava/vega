@@ -547,11 +547,20 @@ extension IORegistration {
         let stream = NetworkIO.handle(nw) as! NetworkStream
         // There is no readiness to wait for here: under
         // `Runtime.withWriteStallTimeout`, and no deadline of its own, the
-        // send gives up once Network.framework has taken none of it for the
-        // limit, as `wait(CV_IO_WRITE)` does on a socket.
+        // send goes in slices, each given the limit, so a peer that keeps
+        // taking bytes keeps the write going and one that takes none for
+        // the limit stops it, as `wait(CV_IO_WRITE)` does on a socket.
+        // Network.framework finishes a send only once all of it is taken.
         if let stall = WriteStall.active, IODeadline.active == nil {
-            try await Runtime.withIODeadline(.nanoseconds(Int64(clamping: stall))) { () async throws(IOError) in
-                try await stream.write(data)
+            let slice = 64 * 1024
+            var start = data.startIndex
+            while start < data.endIndex {
+                let end = min(start + slice, data.endIndex)
+                let part = data[start..<end]
+                try await Runtime.withIODeadline(.nanoseconds(Int64(clamping: stall))) { () async throws(IOError) in
+                    try await stream.write(part)
+                }
+                start = end
             }
             return
         }
