@@ -93,8 +93,8 @@ import Testing
 /// itself is checked end to end by Garuda's reload tests.
 @Suite(.serialized) struct SupervisorRestartTests {
     @Test func aTrialRunMustExitZero() {
-        #expect(SupervisorRestart.probe("/bin/true") == nil)
-        #expect(SupervisorRestart.probe("/bin/false")?.contains("exited 1") == true)
+        #expect(SupervisorRestart.probe("/usr/bin/true") == nil)
+        #expect(SupervisorRestart.probe("/usr/bin/false")?.contains("exited 1") == true)
         #expect(SupervisorRestart.probe("/nonexistent/vega")?.contains("cannot run") == true)
     }
 
