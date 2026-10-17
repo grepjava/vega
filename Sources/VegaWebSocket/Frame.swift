@@ -1,5 +1,5 @@
-// RFC 6455 framing, ported from aviancore. Strict wherever leniency would
-// let a peer desynchronise the stream:
+// RFC 6455 framing, on VegaWire's frame-header parser. Strict wherever
+// leniency would let a peer desynchronise the stream:
 //   * a client's frames must be masked and a server's must not be
 //   * a control frame is at most 125 bytes and never fragmented
 //   * RSV bits must be clear, but RSV1 on a message's first frame once
@@ -9,6 +9,7 @@
 
 import Vega
 import VegaIO
+import VegaWire
 
 public enum WebSocketOpcode: UInt8, Sendable {
     case continuation = 0x0
@@ -91,54 +92,36 @@ public struct WebSocketFrameCodec: Decoder, Encoder, Sendable {
         self.acceptsCompressed = acceptsCompressed
     }
 
-    /// The next frame, or nil if `b` doesn't hold all of it.
+    /// The next frame, or nil if `b` doesn't hold all of it. The header is
+    /// VegaWire's `WebSocketCodec.parseHeader`; this adds the role's masking
+    /// rule and copies the payload out, unmasked.
     public func decodeFrame(_ b: UnsafeRawBufferPointer) throws(WebSocketError) -> (item: WebSocketFrame, consumed: Int)? {
         guard b.count >= 2 else { return nil }
-        let b0 = b[0], b1 = b[1]
-        // RSV2 and RSV3 are no extension's; RSV1 is permessage-deflate's,
-        // on the first frame of a data message.
-        guard b0 & 0x30 == 0, let opcode = WebSocketOpcode(rawValue: b0 & 0x0F) else {
-            throw .protocolViolation(.protocolError)
+        let base = b.baseAddress!.assumingMemoryBound(to: UInt8.self)
+        let head: WSFrameHeader
+        switch WebSocketCodec.parseHeader(base, b.count, maxPayload: maxFrameSize, allowRSV1: acceptsCompressed) {
+        case .needMore: return nil
+        case .failure(.messageTooBig): throw .protocolViolation(.messageTooBig)
+        case .failure: throw .protocolViolation(.protocolError)
+        case .header(let h): head = h
         }
-        let compressed = b0 & 0x40 != 0
-        if compressed && (!acceptsCompressed || opcode.isControl || opcode == .continuation) {
-            throw .protocolViolation(.protocolError)
-        }
-        let fin = b0 & 0x80 != 0
-        let masked = b1 & 0x80 != 0
         // The server needs masked frames; the client gets unmasked ones.
-        guard masked == (role == .server) else { throw .protocolViolation(.protocolError) }
-        var length = Int(b1 & 0x7F)
-        var offset = 2
-        if length == 126 {
-            guard b.count >= 4 else { return nil }
-            length = Int(b[2]) << 8 | Int(b[3])
-            // Only the shortest encoding is valid (RFC 6455 section 5.2).
-            guard length >= 126 else { throw .protocolViolation(.protocolError) }
-            offset = 4
-        } else if length == 127 {
-            guard b.count >= 10 else { return nil }
-            guard b[2] & 0x80 == 0 else { throw .protocolViolation(.protocolError) }
-            length = (2..<10).reduce(0) { $0 << 8 | Int(b[$1]) }
-            guard length > 0xFFFF else { throw .protocolViolation(.protocolError) }
-            offset = 10
+        guard head.masked == (role == .server) else { throw .protocolViolation(.protocolError) }
+        guard b.count >= head.totalLength else { return nil }
+        let length = head.payloadLength
+        let payload = [UInt8](unsafeUninitializedCapacity: length) { dst, n in
+            if length > 0 {
+                let src = base + head.headerLength
+                if head.masked {
+                    WebSocketCodec.unmask(dst.baseAddress!, src, length, head.mask)
+                } else {
+                    dst.baseAddress!.update(from: src, count: length)
+                }
+            }
+            n = length
         }
-        if opcode.isControl {
-            // Short and whole, so no payload slips past the message limit.
-            guard length <= 125, fin else { throw .protocolViolation(.protocolError) }
-        } else if length > maxFrameSize {
-            throw .protocolViolation(.messageTooBig)
-        }
-        var mask: (UInt8, UInt8, UInt8, UInt8) = (0, 0, 0, 0)
-        if masked {
-            guard b.count >= offset + 4 else { return nil }
-            mask = (b[offset], b[offset + 1], b[offset + 2], b[offset + 3])
-            offset += 4
-        }
-        guard b.count - offset >= length else { return nil }
-        var payload = Array(b[offset..<offset + length])
-        if masked { applyMask(mask, to: &payload) }
-        return (WebSocketFrame(fin: fin, opcode: opcode, payload: payload, compressed: compressed), offset + length)
+        let opcode = WebSocketOpcode(rawValue: head.opcode.rawValue)!
+        return (WebSocketFrame(fin: head.fin, opcode: opcode, payload: payload, compressed: head.rsv1), head.totalLength)
     }
 
     public mutating func decode(_ bytes: UnsafeRawBufferPointer) throws(CodecError) -> (item: WebSocketFrame, consumed: Int)? {
@@ -181,44 +164,18 @@ public struct WebSocketFrameCodec: Decoder, Encoder, Sendable {
 
 /// XOR with the four-byte key, which masking and unmasking both are.
 func applyMask(_ mask: (UInt8, UInt8, UInt8, UInt8), to bytes: inout [UInt8]) {
-    let key = [mask.0, mask.1, mask.2, mask.3]
     bytes.withUnsafeMutableBufferPointer { p in
-        for i in p.indices { p[i] ^= key[i & 3] }
+        guard let base = p.baseAddress else { return }
+        WebSocketCodec.unmask(base, base, p.count, mask)
     }
 }
 
-/// UTF-8 checked a piece at a time, as a text message arrives in frames.
-/// Overlong forms, surrogates and values past U+10FFFF all fail.
-struct UTF8Validator {
-    private var remaining = 0
-    private var codepoint: UInt32 = 0
-    private var minimum: UInt32 = 0
-
-    /// Whether no sequence is left open.
-    var isComplete: Bool { remaining == 0 }
-
-    /// false as soon as the bytes can't be valid.
+extension UTF8Validator {
+    /// VegaWire's validator over a frame's payload.
     mutating func feed(_ bytes: [UInt8]) -> Bool {
-        for c in bytes {
-            if remaining == 0 {
-                switch c {
-                case 0..<0x80: continue
-                case 0xC2...0xDF: (remaining, minimum, codepoint) = (1, 0x80, UInt32(c & 0x1F))
-                case 0xE0...0xEF: (remaining, minimum, codepoint) = (2, 0x800, UInt32(c & 0x0F))
-                case 0xF0...0xF4: (remaining, minimum, codepoint) = (3, 0x10000, UInt32(c & 0x07))
-                default: return false
-                }
-                continue
-            }
-            guard c & 0xC0 == 0x80 else { return false }
-            codepoint = codepoint << 6 | UInt32(c & 0x3F)
-            remaining -= 1
-            // Fail as early as the prefix allows: a surrogate or an
-            // out-of-range value is plain from its first two bytes.
-            let bound = codepoint << (6 * UInt32(remaining))
-            if bound > 0x10FFFF || (bound >= 0xD800 && bound <= 0xDFFF) { return false }
-            if remaining == 0 && codepoint < minimum { return false }
+        bytes.withUnsafeBufferPointer { b in
+            guard let base = b.baseAddress else { return true }
+            return feed(base, b.count)
         }
-        return true
     }
 }

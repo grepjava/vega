@@ -25,6 +25,9 @@ let package = Package(
         .library(name: "VegaHTTP1", targets: ["VegaHTTP1"]),
         .library(name: "VegaHTTP2", targets: ["VegaHTTP2"]),
         .library(name: "VegaWebSocket", targets: ["VegaWebSocket"]),
+        .library(name: "VegaWire", targets: ["VegaWire"]),
+        .library(name: "VegaQUIC", targets: ["VegaQUIC"]),
+        .library(name: "VegaHTTP3", targets: ["VegaHTTP3"]),
         .library(name: "VegaExtras", targets: ["VegaExtras"]),
         .library(name: "VegaTest", targets: ["VegaTest"]),
     ],
@@ -95,11 +98,27 @@ let package = Package(
         .target(name: "CVegaCompress",
                 linkerSettings: [.linkedLibrary("z", .when(platforms: [.linux, .macOS, .iOS])),
                                  .linkedLibrary("dl", .when(platforms: [.linux]))]),
+        // The wire formats, sans I/O: ByteBuffer and ByteSpan, HPACK, HTTP/2
+        // and WebSocket frames, permessage-deflate negotiation. Pure Swift.
+        // Vendored from aviancore through Garuda; see its VENDORED.md.
+        .target(name: "VegaWire", exclude: ["VENDORED.md"], swiftSettings: swiftSettings),
         .target(name: "VegaHTTP1", dependencies: ["Vega", "VegaIO"], swiftSettings: swiftSettings),
-        .target(name: "VegaHTTP2", dependencies: ["Vega", "VegaIO", "VegaHTTP1"], swiftSettings: swiftSettings),
-        .target(name: "VegaWebSocket", dependencies: ["Vega", "VegaIO", "VegaHTTP1", "CVegaCompress"], swiftSettings: swiftSettings),
+        .target(name: "VegaHTTP2", dependencies: ["Vega", "VegaIO", "VegaHTTP1", "VegaWire"], swiftSettings: swiftSettings),
+        .target(name: "VegaWebSocket", dependencies: ["Vega", "VegaIO", "VegaHTTP1", "VegaWire", "CVegaCompress"], swiftSettings: swiftSettings),
+        // QUIC (RFC 9000, 9001, 9002) sans I/O: a connection is handed
+        // datagrams and asked for them. TLS 1.3 is its own, over VegaCrypto.
+        .target(name: "VegaQUIC", dependencies: ["VegaWire", "VegaCrypto"], swiftSettings: swiftSettings),
+        // HTTP/3 (RFC 9114) framing, QPACK (RFC 9204), capsules (RFC 9297),
+        // and the WebSocket (RFC 9220) and WebTransport identifiers. Sans I/O.
+        .target(name: "VegaHTTP3", dependencies: ["VegaWire"], swiftSettings: swiftSettings),
         .target(name: "VegaExtras", dependencies: ["Vega", "VegaIO", "VegaHTTP1", "CVegaCompress"], swiftSettings: swiftSettings),
-        .testTarget(name: "VegaTests", dependencies: ["Vega", "VegaIO", "VegaFS", "VegaProcess", "VegaMetrics", "VegaTest", "VegaTLS", "VegaCrypto", "VegaHTTP1", "VegaHTTP2", "VegaWebSocket", "VegaExtras", "CVega"], swiftSettings: swiftSettings),
+        .testTarget(name: "VegaTests", dependencies: ["Vega", "VegaIO", "VegaFS", "VegaProcess", "VegaMetrics", "VegaTest", "VegaTLS", "VegaCrypto", "VegaHTTP1", "VegaHTTP2", "VegaWebSocket", "VegaExtras", "VegaWire", "CVega"], swiftSettings: swiftSettings),
+        .testTarget(name: "VegaWireTests", dependencies: ["VegaWire", "VegaHTTP3"], swiftSettings: swiftSettings),
+        // A QUIC client for the tests: a handshake and streams against a VegaQUIC server.
+        .target(name: "QUICTestPeer", dependencies: ["VegaQUIC", "VegaWire", "VegaCrypto", "VegaTLS"],
+                path: "Tests/QUICTestPeer", swiftSettings: swiftSettings),
+        .testTarget(name: "VegaQUICTests", dependencies: ["VegaQUIC", "VegaWire", "QUICTestPeer", "VegaCrypto", "VegaTLS"],
+                    swiftSettings: swiftSettings),
     ],
     cLanguageStandard: .gnu11,
     cxxLanguageStandard: .gnucxx17

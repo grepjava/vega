@@ -4,6 +4,7 @@ import VegaIO
 import VegaHTTP1
 @testable import VegaHTTP2
 import VegaTest
+import VegaWire
 
 /// Bytes from hex, spaces and newlines ignored: RFC examples as printed.
 private func hex(_ s: String) -> [UInt8] {
@@ -28,12 +29,20 @@ private func hex(_ s: String) -> [UInt8] {
 
 private func decodeAll(_ decoder: inout HPACKDecoder, _ bytes: [UInt8]) throws -> [String] {
     var fields: [String] = []
-    try bytes.withUnsafeBytes { b in
-        try decoder.decode(b) { n, v in
-            fields.append(String(decoding: n, as: UTF8.self) + ": " + String(decoding: v, as: UTF8.self))
+    try bytes.withUnsafeBufferPointer { b in
+        try decoder.decode(b.baseAddress!, b.count) { f in
+            fields.append(String(decoding: UnsafeBufferPointer(start: f.name, count: f.nameLength), as: UTF8.self) + ": "
+                          + String(decoding: UnsafeBufferPointer(start: f.value, count: f.valueLength), as: UTF8.self))
         }
     }
     return fields
+}
+
+/// The header block VegaHTTP2 sends for `fields`.
+private func encodeBlock(_ fields: [(String, String)]) -> [UInt8] {
+    var block = HeaderBlockEncoder()
+    for (n, v) in fields { block.add(name: n, value: v) }
+    return block.bytes
 }
 
 @Suite struct HPACKTests {
@@ -43,19 +52,21 @@ private func decodeAll(_ decoder: inout HPACKDecoder, _ bytes: [UInt8]) throws -
 
     @Test func rfc7541C3Requests() throws {
         var d = HPACKDecoder()
+        defer { d.destroy() }
         #expect(try decodeAll(&d, hex("8286 8441 0f77 7777 2e65 7861 6d70 6c65 2e63 6f6d"))
                 == [":method: GET", ":scheme: http", ":path: /", ":authority: www.example.com"])
-        #expect(d.tableSize == 57)
+        #expect(d.dynamicTableSize == 57)
         #expect(try decodeAll(&d, hex("8286 84be 5808 6e6f 2d63 6163 6865"))
                 == [":method: GET", ":scheme: http", ":path: /", ":authority: www.example.com", "cache-control: no-cache"])
-        #expect(d.tableSize == 110)
+        #expect(d.dynamicTableSize == 110)
         #expect(try decodeAll(&d, hex("8287 85bf 400a 6375 7374 6f6d 2d6b 6579 0c63 7573 746f 6d2d 7661 6c75 65"))
                 == [":method: GET", ":scheme: https", ":path: /index.html", ":authority: www.example.com", "custom-key: custom-value"])
-        #expect(d.tableSize == 164)
+        #expect(d.dynamicTableSize == 164)
     }
 
     @Test func rfc7541C4HuffmanRequests() throws {
         var d = HPACKDecoder()
+        defer { d.destroy() }
         #expect(try decodeAll(&d, hex("8286 8441 8cf1 e3c2 e5f2 3a6b a0ab 90f4 ff"))
                 == [":method: GET", ":scheme: http", ":path: /", ":authority: www.example.com"])
         #expect(try decodeAll(&d, hex("8286 84be 5886 a8eb 1064 9cbf")).last == "cache-control: no-cache")
@@ -65,12 +76,13 @@ private func decodeAll(_ decoder: inout HPACKDecoder, _ bytes: [UInt8]) throws -
 
     @Test func rfc7541C5Eviction() throws {
         var d = HPACKDecoder(maxTableSize: 256)
+        defer { d.destroy() }
         _ = try decodeAll(&d, hex("""
             4803 3330 3258 0770 7269 7661 7465 611d 4d6f 6e2c 2032 3120 4f63 7420 3230 3133
             2032 303a 3133 3a32 3120 474d 546e 1768 7474 7073 3a2f 2f77 7777 2e65 7861 6d70
             6c65 2e63 6f6d
             """))
-        #expect(d.tableSize == 222)
+        #expect(d.dynamicTableSize == 222)
         #expect(try decodeAll(&d, hex("4803 3330 37c1 c0bf"))
                 == [":status: 307", "cache-control: private", "date: Mon, 21 Oct 2013 20:13:21 GMT",
                     "location: https://www.example.com"])
@@ -85,19 +97,19 @@ private func decodeAll(_ decoder: inout HPACKDecoder, _ bytes: [UInt8]) throws -
     }
 
     @Test func roundTrip() throws {
-        var block: [UInt8] = []
         let all = String(decoding: (0...255).map { UInt8($0) }.filter { $0 != 0x0A && $0 != 0x0D }, as: UTF8.self)
         let fields = [(":method", "GET"), (":path", "/"), (":status", "404"), (":method", "PATCH"),
                       ("content-type", "text/html; charset=utf-8"), ("x-custom", "aaaaaaaaaaaaaaaaaaaa"), ("x-all", all)]
-        for (n, v) in fields { HPACKEncoder.encode(name: n, value: v, into: &block) }
         var d = HPACKDecoder()
-        #expect(try decodeAll(&d, block) == fields.map { "\($0.0): \($0.1)" })
+        defer { d.destroy() }
+        #expect(try decodeAll(&d, encodeBlock(fields)) == fields.map { "\($0.0): \($0.1)" })
         #expect(d.dynamicEntryCount == 0) // nothing indexed
     }
 
     @Test func refusals() {
         func error(_ bytes: [UInt8]) -> HPACKError? {
             var d = HPACKDecoder()
+            defer { d.destroy() }
             do {
                 _ = try decodeAll(&d, bytes)
                 return nil
@@ -443,9 +455,7 @@ private struct RawPeer: ~Copyable {
 }
 
 private func headerBlock(_ fields: [(String, String)]) -> [UInt8] {
-    var block: [UInt8] = []
-    for (n, v) in fields { HPACKEncoder.encode(name: n, value: v, into: &block) }
-    return block
+    encodeBlock(fields)
 }
 
 private let validRequest = [(":method", "GET"), (":scheme", "http"), (":path", "/"), (":authority", "x")]

@@ -1,6 +1,7 @@
 import Vega
 import VegaIO
 import VegaHTTP1
+import VegaWire
 
 /// Limits and windows for one HTTP/2 connection.
 public struct HTTP2Configuration: Sendable {
@@ -88,6 +89,7 @@ struct H2Core {
     private(set) var peerMaxFrameSize = HTTP2Frame.defaultMaxFrameSize
     private(set) var peerMaxConcurrentStreams = Int.max
 
+    /// VegaWire's, which owns its memory: `destroy()` frees it.
     private var hpack = HPACKDecoder()
     private var streams: [UInt32: Stream] = [:]
     /// Streams in the order their sends began, for fair flushing.
@@ -287,9 +289,7 @@ struct H2Core {
         // Decoded whatever becomes of the stream: HPACK state is shared.
         var fields = DecodedFields()
         do {
-            try block.withUnsafeBytes { b in
-                try hpack.decode(b, sizeLimit: config.maxHeaderListSize) { fields.add($0, $1) }
-            }
+            try hpack.decode(block, sizeLimit: config.maxHeaderListSize, into: &fields)
         } catch {
             throw ConnectionError(code: error as? HPACKError == .tooLarge ? .enhanceYourCalm : .compressionError)
         }
@@ -559,6 +559,10 @@ struct H2Core {
         if let s = streams[id], s.localClosed && s.remoteClosed { streams[id] = nil }
     }
 
+    /// Frees what the HPACK decoder holds. The connection's loop calls it
+    /// once, when it is done with the connection.
+    mutating func destroy() { hpack.destroy() }
+
     /// Reset a stream: RST_STREAM, and forget it.
     mutating func reset(_ id: UInt32, _ code: HTTP2ErrorCode, into out: inout IOBuffer) {
         streams[id] = nil
@@ -568,15 +572,15 @@ struct H2Core {
     /// The fields of a message as a header block, names lowercased and
     /// connection-specific fields left out.
     private func encodeBlock(_ pseudo: [(String, String)], _ fields: HTTPFields) throws(HTTP2Error) -> [UInt8] {
-        var block: [UInt8] = []
-        for (name, value) in pseudo { HPACKEncoder.encode(name: name, value: value, into: &block) }
+        var block = HeaderBlockEncoder()
+        for (name, value) in pseudo { block.add(name: name, value: value) }
         for (name, value) in fields {
             let lower = name.lowercased()
             if connectionSpecific.contains(lower) || (lower == "te" && value.lowercased() != "trailers") { continue }
             guard isValidName(Array(lower.utf8)), isValidValue(Array(value.utf8)) else { throw .invalidMessage }
-            HPACKEncoder.encode(name: lower, value: value, into: &block)
+            block.add(name: lower, value: value)
         }
-        return block
+        return block.bytes
     }
 }
 

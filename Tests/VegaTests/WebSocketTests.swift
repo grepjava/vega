@@ -3,6 +3,7 @@ import Vega
 import VegaIO
 import VegaHTTP1
 @testable import VegaWebSocket
+import VegaWire
 import VegaTest
 
 private func hexString(_ bytes: [UInt8]) -> String {

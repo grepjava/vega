@@ -1,6 +1,7 @@
 import CVegaCompress
 import Vega
 import VegaIO
+import VegaWire
 import VegaHTTP1
 
 /// A whole message: fragments are joined before it's handed on.

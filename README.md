@@ -13,7 +13,7 @@ epoll and kqueue. It targets Swift 6.2 and newer, and is tuned for Swift 6.3.
 and Vapor can run on it through [VegaNIO](VegaNIO/README.md), which keeps
 their SwiftNIO code as it is and hands Vega the scheduling and the socket I/O.
 
-**Status:** 0.4. Young, used in production by one framework so far, and
+**Status:** 0.5. Young, used in production by one framework so far, and
 measured more than it has been battle-tested. The API may still change between
 minor versions. See [docs/PLAN.md](docs/PLAN.md) for the design and the parity
 matrix, [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for measurements against
@@ -71,7 +71,8 @@ mature, widely deployed and far more proven than Vega.
 | Timers and tests | timer wheel; `MockClock` paused time, in-memory `duplex()` streams | `EmbeddedEventLoop`, `NIOAsyncTestingChannel` | timer wheel; `time::pause`, `tokio-test` |
 | TLS | VegaTLS on OpenSSL 3 or vendored BoringSSL | swift-nio-ssl (BoringSSL) | rustls or native-tls, separate crates |
 | HTTP | VegaHTTP1, VegaHTTP2, VegaWebSocket | NIOHTTP1, swift-nio-http2, NIOWebSocket | hyper, tungstenite, separate crates |
-| Maturity | 0.4, since 2026 | since 2018, the base of Vapor, Hummingbird, gRPC Swift and more | since 2016, the base of most async Rust |
+| QUIC and HTTP/3 | VegaQUIC (sans-I/O, server side), VegaHTTP3 (frames, QPACK) | not in SwiftNIO itself; on Apple platforms, Network.framework's QUIC | quinn, h3, separate crates |
+| Maturity | 0.5, since 2026 | since 2018, the base of Vapor, Hummingbird, gRPC Swift and more | since 2016, the base of most async Rust |
 
 **What has been measured** ([docs/BENCHMARKS.md](docs/BENCHMARKS.md), one
 i5-8250U, Linux 7.0, Swift 6.3.3):
@@ -103,15 +104,18 @@ Measure your own.
 | `Sources/VegaMetrics` | `metricsSamples(every:)` (periodic deltas of `Runtime.metrics`), Prometheus text export |
 | `Sources/VegaTLS` | `TLSStream` over any stream, `TLSConfiguration`, `TLSContext` |
 | `Sources/VegaCrypto` | over the same library: `Hash`, `HMAC`, `PBKDF2`, `HKDF`, `AEAD`, QUIC `HeaderProtection`, `KeyExchange`, JWS/TLS `SigningKey` and `PublicKey`, `CertificateKey`, `SecureRandom` |
-| `Sources/VegaHTTP1`, `Sources/VegaHTTP2` | HTTP/1.1 parsing, codecs and connections; HTTP/2 frames, HPACK and connections |
-| `Sources/VegaWebSocket` | WebSocket framing and permessage-deflate |
+| `Sources/VegaWire` | wire formats, sans I/O: `ByteBuffer`, HPACK, HTTP/2 frame headers, WebSocket frames, permessage-deflate negotiation |
+| `Sources/VegaHTTP1`, `Sources/VegaHTTP2` | HTTP/1.1 parsing, codecs and connections; HTTP/2 connections |
+| `Sources/VegaWebSocket` | WebSocket connections and permessage-deflate compression |
+| `Sources/VegaQUIC` | QUIC v1 as a sans-I/O state machine: packets and their protection, loss recovery and congestion control, streams, path validation, and the server side of the TLS 1.3 handshake. Datagrams in, datagrams out, no clock |
+| `Sources/VegaHTTP3` | HTTP/3 frames and QPACK |
 | `Sources/VegaExtras` | HTTP content codings (gzip, deflate, brotli, zstd) and SOCKS and HTTP proxy handshakes |
 | `Sources/VegaTest` | test support: `MockClock` (paused time), `duplex()` (in-memory byte streams) |
 | `Sources/CVega` | C shim: parking, threads, the epoll/kqueue/io_uring/IOCP drivers, sockets |
 | `Sources/CVegaTLS`, `Sources/CVegaCompress` | C shims for the TLS library and for compression |
 | `Sources/CVegaBoringSSL` | vendored BoringSSL, used only with the `BoringSSL` trait (see its `VENDORING.md`) |
 | `VegaNIO` | separate package: SwiftNIO's `EventLoopGroup` and bootstraps on Vega |
-| `Tests/VegaTests` | swift-testing suite |
+| `Tests/VegaTests`, `Tests/VegaWireTests`, `Tests/VegaQUICTests` | swift-testing suites; `Tests/QUICTestPeer` is the QUIC tests' own client |
 | `Benchmarks/` | separate package, so Vega itself keeps zero dependencies |
 | `Spikes/` | the Phase 0 probes: which Swift 6.3 executor hooks reach a custom executor, and which io_uring features a host has |
 
@@ -138,7 +142,7 @@ TSAN_OPTIONS=suppressions=$PWD/Tests/tsan.supp VEGA_MODEL_N=50000 \
 VegaTLS runs on the system's OpenSSL 3 by default (`libssl-dev` on Linux, Homebrew's `openssl@3` on macOS). The `BoringSSL` package trait builds it on a vendored BoringSSL instead, with no system OpenSSL needed:
 
 ```swift
-.package(url: "https://github.com/grepjava/vega.git", from: "0.4.10", traits: ["BoringSSL"])
+.package(url: "https://github.com/grepjava/vega.git", from: "0.5.0", traits: ["BoringSSL"])
 ```
 
 or, building Vega itself, `swift build --traits BoringSSL`.

@@ -45,6 +45,7 @@ public enum HTTP2Server {
             }
             let writer = writerBox.take()
             var core = H2Core(isServer: true, configuration: configuration)
+            defer { core.destroy() }
             var out = IOBuffer(capacity: 64 * 1024)
             core.start(into: &out)
             var inFlight = 0
@@ -223,6 +224,7 @@ public final class HTTP2Client: Sendable {
         scheme: String, authority: String?, configuration: HTTP2Configuration
     ) async {
         var core = H2Core(isServer: false, configuration: configuration)
+        defer { core.destroy() }
         var out = IOBuffer(capacity: 64 * 1024)
         core.start(into: &out)
         var waiting: [UInt32: ResponseSlot] = [:]
