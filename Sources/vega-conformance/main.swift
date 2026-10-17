@@ -65,6 +65,8 @@ do {
                     }
                 }
             }
+        // QUIC is built on VegaCrypto, so h3 is on its platforms and traits only.
+        #if (os(Linux) || os(macOS) || os(Windows)) && (OpenSSL || BoringSSL)
         case "h3":
             guard let port = Int(args[2]) else { usage() }
             let identity = try TLSIdentity.selfSigned(names: ["localhost"])
@@ -87,6 +89,7 @@ do {
             print("status \(response.status) length \(response.body.count) sum \(sum)")
             print(response.text.prefix(200))
             await endpoint.close(grace: .zero)
+        #endif
         default:
             usage()
         }
