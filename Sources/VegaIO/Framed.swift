@@ -84,6 +84,51 @@ public struct FramedRead<Reader: AsyncReader & ~Copyable, Decoding: Decoder>: ~C
     }
 }
 
+extension FramedRead where Reader: ~Copyable {
+    /// The items as an `AsyncSequence`, for `for try await` and the
+    /// sequence algorithms:
+    ///
+    /// ```swift
+    /// for try await line in FramedRead(reading: stream, decoder: LinesCodec()).items() { ... }
+    /// ```
+    public consuming func items() -> FramedItems<Reader, Decoding> {
+        FramedItems(self)
+    }
+}
+
+/// A `FramedRead`'s items as an `AsyncSequence` (`FramedRead.items()`). It
+/// reads one stream, so it can be iterated once: two iterators at the same
+/// time trap.
+public struct FramedItems<Reader: AsyncReader & ~Copyable, Decoding: Decoder>: AsyncSequence {
+    public typealias Element = Decoding.Item
+    public typealias Failure = FramedError
+
+    final class Box {
+        var framed: FramedRead<Reader, Decoding>
+        init(_ framed: consuming FramedRead<Reader, Decoding>) { self.framed = framed }
+    }
+
+    let box: Box
+
+    init(_ framed: consuming FramedRead<Reader, Decoding>) {
+        box = Box(framed)
+    }
+
+    public func makeAsyncIterator() -> Iterator { Iterator(box: box) }
+
+    public struct Iterator: AsyncIteratorProtocol {
+        let box: Box
+
+        public mutating func next() async throws(FramedError) -> Decoding.Item? {
+            try await box.framed.next()
+        }
+
+        public mutating func next(isolation actor: isolated (any Actor)?) async throws(FramedError) -> Decoding.Item? {
+            try await box.framed.next()
+        }
+    }
+}
+
 /// Items written to a byte stream with an `Encoder`: Tokio's `FramedWrite`.
 ///
 /// `feed` encodes into a buffer; `flush` writes it out. `send` does both.
