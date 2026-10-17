@@ -12,7 +12,7 @@ set -u
 cd "$(dirname "$0")/.."
 JOBS=("$@")
 [ ${#JOBS[@]} -eq 0 ] && JOBS=(uring epoll boringssl tsan)
-IMAGE=vega-ci
+IMAGE=vega-ci:2
 JOBS_ARG=${CI_JOBS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}
 
 docker image inspect $IMAGE >/dev/null 2>&1 || docker build -q -t $IMAGE ci >/dev/null || exit 2

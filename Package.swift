@@ -122,8 +122,9 @@ let package = Package(
                                                     "VegaWire", "VegaCrypto"],
                 swiftSettings: swiftSettings),
         .target(name: "VegaExtras", dependencies: ["Vega", "VegaIO", "VegaHTTP1", "CVegaCompress"], swiftSettings: swiftSettings),
-        // The servers h2spec and Autobahn test (ci/conformance.sh).
-        .executableTarget(name: "vega-conformance", dependencies: ["Vega", "VegaHTTP1", "VegaHTTP2", "VegaWebSocket"],
+        // The servers h2spec, Autobahn and aioquic test (ci/conformance.sh).
+        .executableTarget(name: "vega-conformance", dependencies: ["Vega", "VegaHTTP1", "VegaHTTP2", "VegaWebSocket", "VegaTLS",
+                                                                "VegaCrypto", "VegaQUIC", "VegaQUICNet", "VegaHTTP3Net"],
                           swiftSettings: swiftSettings),
         .testTarget(name: "VegaTests", dependencies: ["Vega", "VegaIO", "VegaFS", "VegaProcess", "VegaMetrics", "VegaTest", "VegaTLS", "VegaCrypto", "VegaHTTP1", "VegaHTTP2", "VegaWebSocket", "VegaExtras", "VegaWire", "CVega"], swiftSettings: swiftSettings),
         .testTarget(name: "VegaWireTests", dependencies: ["VegaWire", "VegaHTTP3"], swiftSettings: swiftSettings),

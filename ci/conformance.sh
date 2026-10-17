@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# ci/conformance.sh [h2spec] [autobahn]: the protocol conformance suites,
+# ci/conformance.sh [h2spec] [autobahn] [h3]: the protocol conformance suites,
 # on a Linux host with Docker, from the source tree (ci/run.ps1 -Conformance
 # sends it to the box). Both by default.
 #   h2spec    HTTP/2 (RFC 9113, RFC 7541) against vega-conformance h2
 #   autobahn  WebSocket (RFC 6455, RFC 7692) against vega-conformance ws,
 #             with Autobahn|Testsuite's fuzzingclient
+#   h3        HTTP/3 both ways with aioquic: its client against
+#             vega-conformance h3, and vega-conformance h3get against its
+#             server (ci/h3interop.py)
 # Reports go to .build-ci/h2spec.xml and .build-ci/autobahn/; exits
 # non-zero if either suite fails a case.
 set -u
 cd "$(dirname "$0")/.."
 SUITES=("$@")
-[ ${#SUITES[@]} -eq 0 ] && SUITES=(h2spec autobahn)
-IMAGE=vega-ci
+[ ${#SUITES[@]} -eq 0 ] && SUITES=(h2spec autobahn h3)
+IMAGE=vega-ci:2
 JOBS=${CI_JOBS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}
 H2SPEC_VERSION=2.6.0
 docker image inspect $IMAGE >/dev/null 2>&1 || docker build -q -t $IMAGE ci >/dev/null || exit 2
@@ -67,6 +70,14 @@ PY
         failed=1; echo "FAIL  autobahn: $result"
       fi
       docker rm -f vega-conformance-ws >/dev/null ;;
+    h3)
+      docker run --rm --network host -v "$PWD":/src -w /src $IMAGE python3 ci/h3interop.py $BIN         > .build-ci/h3interop.log 2>&1
+      code=$?
+      summary=$(tail -1 .build-ci/h3interop.log)
+      if [ $code -eq 0 ]; then echo "PASS  h3 interop: $summary"; else
+        failed=1; echo "FAIL  h3 interop: $summary"
+        grep -E "FAIL|Error|error" .build-ci/h3interop.log | head -20 | sed 's/^/      /'
+      fi ;;
     *) echo "unknown suite $suite"; exit 2 ;;
   esac
 done
