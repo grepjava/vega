@@ -58,17 +58,19 @@ struct WriteStallTests {
         #expect(elapsed >= 100 && elapsed < 5_000, "took \(elapsed) ms")
     }
 
-    /// A peer that keeps reading keeps the write going past the limit.
+    /// A peer that keeps reading keeps the write going past the limit. The
+    /// writer goes on for several times the limit rather than for a fixed
+    /// size: Windows' loopback buffers tens of megabytes, enough to take any
+    /// one write whole before the limit is up.
     @Test func aSlowReaderIsNotAStall() throws {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
-        let (outcome, got) = try rt.block { () async throws(IOError) -> (String, Int) in
+        let (outcome, sent, got) = try rt.block { () async throws(IOError) -> (String, Int, Int) in
             let pair = try await connectedPair()
-            let total = 32 << 20
             let reader = rt.spawn(with: pair.client) { client in
                 var buffer = IOBuffer(capacity: 1 << 20)
                 var got = 0
-                while got < total {
+                while true {
                     buffer.clear()
                     guard let n = try? await client.read(into: &buffer), n > 0 else { break }
                     got += n
@@ -78,21 +80,26 @@ struct WriteStallTests {
                 return got
             }
             let server = pair.server
-            let chunk = filled(total)
+            let chunk = filled(1 << 20)
             let started = cv_now_ns()
+            var sent = 0
             let outcome: String
             do throws(IOError) {
                 try await Runtime.withWriteStallTimeout(.milliseconds(60)) { () async throws(IOError) in
-                    try await server.write(chunk)
+                    while (cv_now_ns() - started) / 1_000_000 < 300 && sent < 1 << 30 {
+                        try await server.write(chunk)
+                        sent += chunk.count
+                    }
                 }
-                outcome = (cv_now_ns() - started) / 1_000_000 > 60 ? "sent, past the limit" : "sent too soon to tell"
+                outcome = "sent past the limit"
             } catch {
                 outcome = "\(error)"
             }
-            return (outcome, await reader.value)
+            try? server.shutdownWrite()
+            return (outcome, sent, await reader.value)
         }
-        #expect(outcome == "sent, past the limit")
-        #expect(got == 32 << 20)
+        #expect(outcome == "sent past the limit")
+        #expect(got == sent)
     }
 }
 #endif

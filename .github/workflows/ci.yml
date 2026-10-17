@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The same suite on each Linux driver. Docker's default seccomp profile
+  # blocks io_uring, so the container runs unconfined; the hosted runners'
+  # kernels are 6.8 or later.
+  linux:
+    name: Linux (${{ matrix.driver }}, ${{ matrix.tls }})
+    runs-on: ubuntu-24.04
+    container:
+      image: swift:6.3.3-noble
+      options: --security-opt seccomp=unconfined
+    strategy:
+      fail-fast: false
+      matrix:
+        driver: [uring, epoll]
+        tls: [OpenSSL]
+        include:
+          - driver: uring
+            tls: BoringSSL
+    env:
+      VEGA_DRIVER: ${{ matrix.driver }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: apt-get update && apt-get install -y --no-install-recommends libssl-dev zlib1g-dev pkg-config
+      - name: Kernel
+        run: uname -r
+      - name: Build
+        run: swift build --build-tests --traits ${{ matrix.tls }}
+      - name: Test
+        run: swift test --skip-build --traits ${{ matrix.tls }}
+
+  # ThreadSanitizer. Not yet required: a few reports predate CI.
+  linux-tsan:
+    name: Linux (ThreadSanitizer)
+    runs-on: ubuntu-24.04
+    container:
+      image: swift:6.3.3-noble
+      options: --security-opt seccomp=unconfined
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packages
+        run: apt-get update && apt-get install -y --no-install-recommends libssl-dev zlib1g-dev pkg-config
+      - name: Test
+        run: swift test --sanitize=thread
+
+  macos:
+    name: macOS (kqueue)
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - name: OpenSSL
+        run: |
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> "$GITHUB_ENV"
+      - name: Versions
+        run: sw_vers && swift --version
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: swift test --skip-build
+
+  # The Network.framework driver, on the simulator. No OpenSSL on iOS: VegaTLS
+  # is empty there unless built with BoringSSL.
+  ios:
+    name: iOS simulator (Network.framework)
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - name: Simulator
+        id: sim
+        run: |
+          name=$(xcrun simctl list devices available iOS | grep -oE 'iPhone [0-9]+( Pro)?' | sort -V | tail -1)
+          echo "Using $name"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - name: Test
+        run: |
+          xcodebuild test -scheme Vega-Package \
+            -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" \
+            -skipPackagePluginValidation | tail -200
+          exit ${PIPESTATUS[0]}
+
+  windows:
+    name: Windows
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: compnerd/gha-setup-vsdevenv@main
+      - uses: compnerd/gha-setup-swift@main
+        with:
+          branch: swift-6.3.3-release
+          tag: 6.3.3-RELEASE
+      - name: OpenSSL
+        shell: pwsh
+        run: |
+          $ssl = @("C:\Program Files\OpenSSL-Win64", "C:\Program Files\OpenSSL") |
+            Where-Object { Test-Path "$_\lib\VC\x64\MD\libssl.lib" } | Select-Object -First 1
+          if (-not $ssl) {
+            choco install openssl --no-progress -y | Out-Null
+            $ssl = "C:\Program Files\OpenSSL-Win64"
+          }
+          "Using $ssl"
+          "INCLUDE=$ssl\include;$env:INCLUDE" >> $env:GITHUB_ENV
+          "LIB=$ssl\lib\VC\x64\MD;$env:LIB" >> $env:GITHUB_ENV
+          "$ssl\bin" >> $env:GITHUB_PATH
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: swift test --skip-build

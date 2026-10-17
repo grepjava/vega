@@ -4,6 +4,13 @@ import Glibc
 import Testing
 @testable import Vega
 
+/// With `VEGA_DRIVER=uring`, as CI's uring jobs set it, the kernel must run
+/// rings: otherwise the suite would quietly test epoll a second time.
+@Test(.enabled(if: getenv("VEGA_DRIVER").map { String(cString: $0) } == "uring"))
+func uringRunsWhenAskedFor() {
+    #expect(URing.supported, "VEGA_DRIVER=uring, but this kernel or its seccomp profile can't run io_uring")
+}
+
 /// The uring driver, asked for explicitly (the rest of the suite runs on it
 /// with `VEGA_DRIVER=uring`). Skipped where the kernel can't run it.
 @Suite(.enabled(if: URing.supported)) struct URingTests {
