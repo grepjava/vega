@@ -13,8 +13,12 @@ import NIOCore
 /// ```
 ///
 /// SO_REUSEADDR and SO_REUSEPORT set here apply before the socket binds,
-/// where they matter; other socket options go on once it exists. Unix
-/// datagram sockets are not supported yet.
+/// where they matter; other socket options go on once it exists.
+///
+/// `bind(unixDomainSocketPath:)` and `connect(unixDomainSocketPath:)` make
+/// a Unix datagram socket instead (not on Windows), whose envelopes are
+/// addressed by `.unixDomainSocket`. A connected one is unbound, as on NIO:
+/// it can send, but its peer has no address to answer to.
 public final class VegaDatagramBootstrap {
     private let group: VegaEventLoopGroup
     private var channelInit: (@Sendable (Channel) -> EventLoopFuture<Void>)?
@@ -58,9 +62,25 @@ public final class VegaDatagramBootstrap {
              channelInitializer: { channel in channel.eventLoop.makeSucceededFuture(channel) })
     }
 
-    /// Not yet: fails with `ChannelError.operationUnsupported`.
+    /// A Unix datagram socket bound to `unixDomainSocketPath`, which must
+    /// not exist yet. The socket file stays behind when the channel closes,
+    /// as on NIO.
     public func bind(unixDomainSocketPath: String) -> EventLoopFuture<Channel> {
-        group.next().makeFailedFuture(ChannelError.operationUnsupported)
+        bind(unixDomainSocketPath: unixDomainSocketPath, cleanupExistingSocketFile: false)
+    }
+
+    /// A Unix datagram socket, first removing a socket file left at
+    /// `unixDomainSocketPath` if `cleanupExistingSocketFile` (a file there
+    /// that isn't a socket fails the bind instead).
+    public func bind(unixDomainSocketPath: String, cleanupExistingSocketFile: Bool) -> EventLoopFuture<Channel> {
+        let address: SocketAddress
+        do {
+            if cleanupExistingSocketFile { try removeUnixSocketFile(unixDomainSocketPath) }
+            address = try SocketAddress(unixDomainSocketPath: unixDomainSocketPath)
+        } catch {
+            return group.next().makeFailedFuture(error)
+        }
+        return bind(to: address)
     }
 
     /// A connected channel: on a free local port, sending to and hearing
@@ -81,9 +101,16 @@ public final class VegaDatagramBootstrap {
              channelInitializer: { channel in channel.eventLoop.makeSucceededFuture(channel) })
     }
 
-    /// Not yet: fails with `ChannelError.operationUnsupported`.
+    /// An unbound Unix datagram socket whose default peer is the one at
+    /// `unixDomainSocketPath`.
     public func connect(unixDomainSocketPath: String) -> EventLoopFuture<Channel> {
-        group.next().makeFailedFuture(ChannelError.operationUnsupported)
+        let address: SocketAddress
+        do {
+            address = try SocketAddress(unixDomainSocketPath: unixDomainSocketPath)
+        } catch {
+            return group.next().makeFailedFuture(error)
+        }
+        return connect(to: address)
     }
 
     /// Bind, with the channel wrapped as `channelInitializer` says (in an
@@ -115,6 +142,16 @@ public final class VegaDatagramBootstrap {
                        channelInitializer: channelInitializer).get()
     }
 
+    public func bind<Output: Sendable>(
+        unixDomainSocketPath: String,
+        cleanupExistingSocketFile: Bool = false,
+        channelInitializer: @escaping @Sendable (Channel) -> EventLoopFuture<Output>
+    ) async throws -> Output {
+        if cleanupExistingSocketFile { try removeUnixSocketFile(unixDomainSocketPath) }
+        let address = try SocketAddress(unixDomainSocketPath: unixDomainSocketPath)
+        return try await bind(to: address, channelInitializer: channelInitializer)
+    }
+
     /// Connect, with the channel wrapped as `channelInitializer` says
     /// before it goes active.
     public func connect<Output: Sendable>(
@@ -132,6 +169,14 @@ public final class VegaDatagramBootstrap {
     ) async throws -> Output {
         try await open({ channel, promise in channel.connect(to: address, promise: promise) },
                        channelInitializer: channelInitializer).get()
+    }
+
+    public func connect<Output: Sendable>(
+        unixDomainSocketPath: String,
+        channelInitializer: @escaping @Sendable (Channel) -> EventLoopFuture<Output>
+    ) async throws -> Output {
+        let address = try SocketAddress(unixDomainSocketPath: unixDomainSocketPath)
+        return try await connect(to: address, channelInitializer: channelInitializer)
     }
 
     /// Options, then both initializers, then register, then bind or connect.

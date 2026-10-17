@@ -147,6 +147,9 @@ extension TCPStream: SocketHandle { public var fileDescriptor: Int32 { reg.fd } 
 extension UDPSocket: SocketHandle { public var fileDescriptor: Int32 { reg.fd } }
 extension UnixListener: SocketHandle { public var fileDescriptor: Int32 { reg.fd } }
 extension UnixStream: SocketHandle { public var fileDescriptor: Int32 { reg.fd } }
+#if !os(Windows)
+extension UnixDatagram: SocketHandle { public var fileDescriptor: Int32 { reg.fd } }
+#endif
 extension ReadHalf: SocketHandle { public var fileDescriptor: Int32 { reg.fd } }
 extension WriteHalf: SocketHandle { public var fileDescriptor: Int32 { reg.fd } }
 

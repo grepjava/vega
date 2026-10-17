@@ -963,6 +963,14 @@ func closeDescriptor(_ descriptor: Int32) {
 
 extension VegaAddress {
     init(_ address: NIOCore.SocketAddress) throws {
+        if let path = address.pathname {
+            do throws(VegaIOError) {
+                self = try VegaAddress(unixPath: path)
+            } catch {
+                throw nioError(error)
+            }
+            return
+        }
         guard let ip = address.ipAddress, let port = address.port,
               let converted = VegaAddress(numericHost: ip, port: port) else {
             throw ChannelError.operationUnsupported
@@ -974,6 +982,11 @@ extension VegaAddress {
 extension NIOCore.SocketAddress {
     init(_ address: VegaAddress) throws {
         let host = address.host
+        // A Unix address: no port, and its host is the path.
+        guard address.port != nil else {
+            try self.init(unixDomainSocketPath: host)
+            return
+        }
         // Keep the text form as the host, as NIOPosix's addresses do.
         switch try NIOCore.SocketAddress(ipAddress: host, port: address.port ?? 0) {
         case .v4(let a): self.init(a.address, host: host)

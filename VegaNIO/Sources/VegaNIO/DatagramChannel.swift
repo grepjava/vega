@@ -4,6 +4,7 @@ import Synchronization
 import class Vega.Runtime
 import struct Vega.IOBuffer
 import struct Vega.UDPSocket
+import struct Vega.UnixDatagram
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
@@ -11,7 +12,9 @@ import Darwin
 #endif
 
 /// A UDP socket as a NIO `Channel` of `AddressedEnvelope<ByteBuffer>`, over
-/// a Vega `UDPSocket`.
+/// a Vega `UDPSocket`; or a Unix datagram socket over a `UnixDatagram`,
+/// whose envelopes are addressed by `.unixDomainSocket` (an unbound
+/// sender's path is empty).
 ///
 /// As with a TCP channel, two Vega tasks do the I/O: a reader that receives
 /// one datagram whenever the pipeline asks for a read, and a writer that
@@ -39,7 +42,7 @@ final class VegaDatagramChannel: Channel, ChannelCore, @unchecked Sendable {
     /// Flushed, not yet sent: the writer reports them in order.
     private var inFlight = CircularBuffer<(Int, EventLoopPromise<Void>?)>()
     private var queuedBytes = 0
-    private var io: DatagramIO?
+    private var io: DatagramChannelIO?
     private var fd: Int32 = -1
     /// The default peer, once connected.
     private var peer: SocketAddress?
@@ -175,7 +178,18 @@ final class VegaDatagramChannel: Channel, ChannelCore, @unchecked Sendable {
             promise?.fail(lifecycle == .closed ? ChannelError.ioOnClosedChannel : ChannelError.inappropriateOperationForState)
             return
         }
-        // Unix datagram sockets: Vega has none yet.
+        if let path = address.pathname {
+            // The path must not exist yet (the bootstrap can clean it up).
+            let socket: UnixDatagram
+            do throws(VegaIOError) {
+                socket = try UnixDatagram.bind(path: path)
+            } catch {
+                promise?.fail(nioError(error))
+                return
+            }
+            becomeActive(socket, remote: nil, promise: promise) { .unix($0) }
+            return
+        }
         guard let host = address.ipAddress, let port = address.port else {
             promise?.fail(ChannelError.operationUnsupported)
             return
@@ -188,7 +202,7 @@ final class VegaDatagramChannel: Channel, ChannelCore, @unchecked Sendable {
             promise?.fail(nioError(error))
             return
         }
-        becomeActive(socket, remote: nil, promise: promise)
+        becomeActive(socket, remote: nil, promise: promise) { .udp($0) }
     }
 
     /// Connect: on a channel not yet bound, a new socket on a free port
@@ -202,6 +216,23 @@ final class VegaDatagramChannel: Channel, ChannelCore, @unchecked Sendable {
             return
         }
         switch lifecycle {
+        case .registered where address.pathname != nil:
+            // An unbound socket, as NIO's: it can send to the peer, and the
+            // peer has no address to answer to.
+            let socket: UnixDatagram
+            do throws(VegaIOError) {
+                socket = try UnixDatagram.unbound()
+            } catch {
+                promise?.fail(nioError(error))
+                return
+            }
+            do throws(VegaIOError) {
+                try socket.connect(to: target)
+            } catch {
+                promise?.fail(nioError(error))
+                return
+            }
+            becomeActive(socket, remote: address, promise: promise) { .unix($0) }
         case .registered:
             let socket: UDPSocket
             do throws(VegaIOError) {
@@ -210,7 +241,7 @@ final class VegaDatagramChannel: Channel, ChannelCore, @unchecked Sendable {
                 promise?.fail(nioError(error))
                 return
             }
-            becomeActive(socket, remote: address, promise: promise)
+            becomeActive(socket, remote: address, promise: promise) { .udp($0) }
         case .active:
             do throws(VegaIOError) {
                 try io!.connect(to: target)
@@ -230,17 +261,24 @@ final class VegaDatagramChannel: Channel, ChannelCore, @unchecked Sendable {
         (options.value(ChannelOptions.socketOption(name)) ?? 0) != 0
     }
 
-    private func becomeActive(_ socket: consuming UDPSocket, remote: SocketAddress?, promise: EventLoopPromise<Void>?) {
+    private func becomeActive<Socket: DatagramSocket & ~Copyable>(
+        _ socket: consuming Socket,
+        remote: SocketAddress?,
+        promise: EventLoopPromise<Void>?,
+        _ wrap: (DatagramIO<Socket>) -> DatagramChannelIO
+    ) {
         fd = socket.fileDescriptor
         for (option, value) in options.socket where fd >= 0 {
             try? setSocketOption(fd, option, value)
         }
+        // An unbound Unix socket has no address to speak of.
         let local = (try? socket.localAddress).flatMap { try? SocketAddress($0) }
+            .flatMap { $0.pathname == "" ? nil : $0 }
         addresses.withLockedValue { $0 = (local, remote) }
         peer = remote
         lifecycle = .active
         active.store(true, ordering: .relaxed)
-        io = DatagramIO(socket, channel: self)
+        io = wrap(DatagramIO(socket, channel: self))
         promise?.succeed(())
         pipeline.fireChannelActive()
         readIfNeeded()
@@ -412,15 +450,70 @@ struct Datagram: Sendable {
     var to: VegaAddress?
 }
 
+/// What a datagram channel sends and receives on: a UDP socket or a Unix
+/// datagram one.
+protocol DatagramSocket: ~Copyable, Sendable {
+    var fileDescriptor: Int32 { get }
+    var localAddress: VegaAddress { get throws(VegaIOError) }
+    func send(_ bytes: UnsafeRawBufferPointer) async throws(VegaIOError) -> Int
+    func send(_ bytes: UnsafeRawBufferPointer, to address: VegaAddress) async throws(VegaIOError) -> Int
+    func receiveFrom(into buffer: inout IOBuffer) async throws(VegaIOError) -> (count: Int, from: VegaAddress)
+    func connect(to address: VegaAddress) throws(VegaIOError)
+}
+
+extension UDPSocket: DatagramSocket {}
+
+extension UnixDatagram: DatagramSocket {
+    /// A Unix address's host is its path.
+    func connect(to address: VegaAddress) throws(VegaIOError) {
+        try connect(path: address.host)
+    }
+}
+
+/// How a datagram channel's datagrams move. An enum rather than an
+/// existential, so the calls are direct.
+enum DatagramChannelIO {
+    case udp(DatagramIO<UDPSocket>)
+    case unix(DatagramIO<UnixDatagram>)
+
+    func connect(to address: VegaAddress) throws(VegaIOError) {
+        switch self {
+        case .udp(let io): try io.connect(to: address)
+        case .unix(let io): try io.connect(to: address)
+        }
+    }
+
+    func wantRead() {
+        switch self {
+        case .udp(let io): io.wantRead()
+        case .unix(let io): io.wantRead()
+        }
+    }
+
+    func send(_ batch: [Datagram]) {
+        switch self {
+        case .udp(let io): io.send(batch)
+        case .unix(let io): io.send(batch)
+        }
+    }
+
+    func close(linger: Duration, runtime: Runtime) {
+        switch self {
+        case .udp(let io): io.close(linger: linger, runtime: runtime)
+        case .unix(let io): io.close(linger: linger, runtime: runtime)
+        }
+    }
+}
+
 /// The socket, which the reader and writer tasks use at once: Vega keeps a
 /// waiter for each direction.
-final class SocketBox: Sendable {
-    let socket: UDPSocket
-    init(_ socket: consuming UDPSocket) { self.socket = socket }
+final class SocketBox<Socket: DatagramSocket & ~Copyable>: Sendable {
+    let socket: Socket
+    init(_ socket: consuming Socket) { self.socket = socket }
 }
 
 /// What a datagram channel's loop and its reader and writer share.
-final class DatagramIO: Sendable {
+final class DatagramIO<Socket: DatagramSocket & ~Copyable>: Sendable {
     private struct Shared {
         var wantRead = false
         var reader: UnsafeContinuation<Bool, Never>?
@@ -435,9 +528,9 @@ final class DatagramIO: Sendable {
     private let writerTask = NIOLockedValueBox<Task<Void, Never>?>(nil)
     /// The tasks own the socket; this is for `connect(to:)` and goes at
     /// close, so the socket closes as soon as they are done with it.
-    private let box: NIOLockedValueBox<SocketBox?>
+    private let box: NIOLockedValueBox<SocketBox<Socket>?>
 
-    init(_ socket: consuming UDPSocket, channel: VegaDatagramChannel) {
+    init(_ socket: consuming Socket, channel: VegaDatagramChannel) {
         let loop = channel.loop
         let box = SocketBox(socket)
         self.box = NIOLockedValueBox(box)

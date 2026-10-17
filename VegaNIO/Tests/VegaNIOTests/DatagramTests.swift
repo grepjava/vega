@@ -2,6 +2,11 @@ import NIOConcurrencyHelpers
 import NIOCore
 import Testing
 @testable import VegaNIO
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 
 /// Sends each datagram back where it came from.
 private final class DatagramEcho: ChannelInboundHandler, Sendable {
@@ -144,9 +149,6 @@ private final class DatagramCollector: ChannelInboundHandler, @unchecked Sendabl
         // Other options go on the socket once it exists.
         try second.setOption(.socketOption(.so_rcvbuf), value: 65_536).wait()
         #expect(try second.getOption(.socketOption(.so_rcvbuf)).wait() >= 65_536)
-        #expect(throws: ChannelError.self) {
-            try VegaDatagramBootstrap(group: group).bind(unixDomainSocketPath: "/tmp/never").wait()
-        }
         try second.close().wait()
         try first.close().wait()
     }
@@ -199,5 +201,110 @@ private final class DatagramCollector: ChannelInboundHandler, @unchecked Sendabl
             }
         }
         #expect(replies == ["echo: one", "echo: two", "echo: three"])
+    }
+}
+
+private func temporaryDatagramPath() -> String {
+    "/tmp/veganio-dgram-\(getpid())-\(UInt32.random(in: 0...UInt32.max)).sock"
+}
+
+@Suite struct UnixDatagramTests {
+    /// Envelopes addressed by path, between two bound sockets.
+    @Test func addressedEcho() throws {
+        let group = VegaEventLoopGroup(loops: 2)
+        defer { try? group.syncShutdownGracefully() }
+        let serverPath = temporaryDatagramPath(), clientPath = temporaryDatagramPath()
+        defer {
+            unlink(serverPath)
+            unlink(clientPath)
+        }
+        let server = try VegaDatagramBootstrap(group: group)
+            .channelInitializer { $0.pipeline.addHandler(DatagramEcho()) }
+            .bind(unixDomainSocketPath: serverPath).wait()
+        let serverAddress = try #require(server.localAddress)
+        #expect(serverAddress.pathname == serverPath)
+
+        let done = group.next().makePromise(of: [AddressedEnvelope<ByteBuffer>].self)
+        let collector = DatagramCollector(expected: 3, done: done)
+        let client = try VegaDatagramBootstrap(group: group)
+            .channelInitializer { $0.pipeline.addHandler(collector) }
+            .bind(unixDomainSocketPath: clientPath).wait()
+        let payloads = ["one", "two", String(repeating: "y", count: 50_000)]
+        for p in payloads {
+            client.write(AddressedEnvelope(remoteAddress: serverAddress, data: ByteBuffer(string: p)), promise: nil)
+        }
+        client.flush()
+        let replies = try done.futureResult.wait()
+        #expect(replies.map { String(buffer: $0.data) }.sorted() == payloads.sorted())
+        #expect(replies.allSatisfy { $0.remoteAddress.pathname == serverPath })
+        try client.close().wait()
+        try server.close().wait()
+    }
+
+    /// A connected client is unbound: it sends plain buffers, and the
+    /// server sees an empty path as their sender. The bound path stays
+    /// behind, and needs cleaning up to bind again.
+    @Test func connectedAndCleanup() throws {
+        let group = VegaEventLoopGroup(loops: 2)
+        defer { try? group.syncShutdownGracefully() }
+        let path = temporaryDatagramPath()
+        defer { unlink(path) }
+        let done = group.next().makePromise(of: [AddressedEnvelope<ByteBuffer>].self)
+        let collector = DatagramCollector(expected: 2, done: done)
+        let server = try VegaDatagramBootstrap(group: group)
+            .channelInitializer { $0.pipeline.addHandler(collector) }
+            .bind(unixDomainSocketPath: path).wait()
+        let client = try VegaDatagramBootstrap(group: group).connect(unixDomainSocketPath: path).wait()
+        #expect(client.remoteAddress?.pathname == path)
+        #expect(client.localAddress == nil)
+        try client.writeAndFlush(ByteBuffer(string: "plain")).wait()
+        try client.writeAndFlush(AddressedEnvelope(remoteAddress: try SocketAddress(unixDomainSocketPath: path),
+                                                   data: ByteBuffer(string: "envelope"))).wait()
+        let got = try done.futureResult.wait()
+        #expect(got.map { String(buffer: $0.data) } == ["plain", "envelope"])
+        #expect(got.allSatisfy { $0.remoteAddress.pathname == "" })
+        try client.close().wait()
+        try server.close().wait()
+
+        #expect(throws: (any Error).self) {
+            try VegaDatagramBootstrap(group: group).bind(unixDomainSocketPath: path).wait()
+        }
+        let again = try VegaDatagramBootstrap(group: group)
+            .bind(unixDomainSocketPath: path, cleanupExistingSocketFile: true).wait()
+        try again.close().wait()
+    }
+
+    /// The async forms over Unix datagram sockets.
+    @Test func asyncChannels() throws {
+        typealias Envelope = AddressedEnvelope<ByteBuffer>
+        let group = VegaEventLoopGroup(loops: 2)
+        let rt = group.runtime
+        defer { try? group.syncShutdownGracefully() }
+        let path = temporaryDatagramPath()
+        defer { unlink(path) }
+        let received = try rt.block {
+            let server = try await VegaDatagramBootstrap(group: group).bind(unixDomainSocketPath: path) { channel in
+                channel.eventLoop.makeCompletedFuture {
+                    try NIOAsyncChannel<Envelope, Envelope>(wrappingChannelSynchronously: channel)
+                }
+            }
+            let client = try await VegaDatagramBootstrap(group: group).connect(unixDomainSocketPath: path) { channel in
+                channel.eventLoop.makeCompletedFuture {
+                    try NIOAsyncChannel<Envelope, ByteBuffer>(wrappingChannelSynchronously: channel)
+                }
+            }
+            try await client.executeThenClose { _, outbound in
+                for word in ["one", "two"] { try await outbound.write(ByteBuffer(string: word)) }
+            }
+            return try await server.executeThenClose { inbound, _ in
+                var got: [String] = []
+                for try await datagram in inbound {
+                    got.append(String(buffer: datagram.data))
+                    if got.count == 2 { break }
+                }
+                return got
+            }
+        }
+        #expect(received == ["one", "two"])
     }
 }
