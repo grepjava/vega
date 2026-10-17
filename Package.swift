@@ -91,7 +91,7 @@ let package = Package(
                                  .linkedLibrary("libssl", .when(platforms: [.windows], traits: ["OpenSSL"])),
                                  .linkedLibrary("libcrypto", .when(platforms: [.windows], traits: ["OpenSSL"])),
                                  .linkedLibrary("crypt32", .when(platforms: [.windows]))]),
-        .target(name: "VegaTLS", dependencies: ["Vega", "VegaIO", "CVegaTLS"], swiftSettings: swiftSettings),
+        .target(name: "VegaTLS", dependencies: ["Vega", "VegaIO", "CVegaTLS", "CVega"], swiftSettings: swiftSettings),
         // Hashes, HMAC, HKDF, AEADs, key exchange and signatures, over the
         // same library as VegaTLS (and empty without one).
         .target(name: "VegaCrypto", dependencies: ["CVegaTLS"], swiftSettings: swiftSettings),

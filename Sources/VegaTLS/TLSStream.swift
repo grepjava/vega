@@ -258,14 +258,18 @@ final class TLSState: @unchecked Sendable {
         self.context = context
     }
 
-    private let lock = Mutex(())
+    // A RawLock, not a Mutex: ThreadSanitizer doesn't see Mutex on Linux.
+    private let lock = RawLock()
 
-    deinit { cv_tls_free(tls) }
+    deinit {
+        cv_tls_free(tls)
+        lock.destroy()
+    }
 
     /// A call into the engine: under the lock once the stream is split.
     @inline(__always)
     func engine<R>(_ body: () -> R) -> R {
-        if isSplit { return lock.withLock { _ in body() } }
+        if isSplit { return lock.withLock { body() } }
         return body()
     }
 

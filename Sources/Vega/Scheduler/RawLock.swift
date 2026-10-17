@@ -1,20 +1,21 @@
 import CVega
 
 /// A handle to a C mutex. Trivial to copy (no ARC); whoever creates it calls
-/// `destroy()`.
+/// `destroy()`. ThreadSanitizer sees it, as it doesn't `Synchronization`'s
+/// `Mutex` on Linux: the package's other modules use it where TSan runs.
 @usableFromInline
-struct RawLock: @unchecked Sendable {
+package struct RawLock: @unchecked Sendable {
     @usableFromInline let handle: UnsafeMutablePointer<cv_lock>
 
-    @inlinable init() { handle = cv_lock_new() }
+    @inlinable package init() { handle = cv_lock_new() }
 
-    @inlinable func destroy() { cv_lock_free(handle) }
+    @inlinable package func destroy() { cv_lock_free(handle) }
 
-    @inlinable @inline(__always) func lock() { cv_lock_lock(handle) }
-    @inlinable @inline(__always) func unlock() { cv_lock_unlock(handle) }
+    @inlinable @inline(__always) package func lock() { cv_lock_lock(handle) }
+    @inlinable @inline(__always) package func unlock() { cv_lock_unlock(handle) }
 
     @inlinable @inline(__always)
-    func withLock<R: ~Copyable, E: Error>(_ body: () throws(E) -> R) throws(E) -> R {
+    package func withLock<R: ~Copyable, E: Error>(_ body: () throws(E) -> R) throws(E) -> R {
         cv_lock_lock(handle)
         defer { cv_lock_unlock(handle) }
         return try body()

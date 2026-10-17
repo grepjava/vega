@@ -47,16 +47,24 @@ public final class IOEvent: Sendable {
 
 /// The waiter and the kept signal, and what an interruption does to them.
 final class IOEventTarget: IOInterruptTarget, @unchecked Sendable {
-    private let state = Mutex<(waiter: UnsafeContinuation<Bool, Never>?, signalled: Bool)>((nil, false))
+    // A RawLock, not a Mutex: ThreadSanitizer doesn't see Mutex on Linux.
+    private let lock = RawLock()
+    private let state = Guarded<(waiter: UnsafeContinuation<Bool, Never>?, signalled: Bool)>((nil, false))
+
+    deinit {
+        state.destroy()
+        lock.destroy()
+    }
 
     /// Parks `c`. False when a signal was waiting: `c` is resumed already.
     func park(_ c: UnsafeContinuation<Bool, Never>) -> Bool {
-        let parked = state.withLock { s -> Bool in
-            if s.signalled {
-                s.signalled = false
+        let s = state.pointer
+        let parked = lock.withLock { () -> Bool in
+            if s.pointee.signalled {
+                s.pointee.signalled = false
                 return false
             }
-            s.waiter = c
+            s.pointee.waiter = c
             return true
         }
         if !parked { c.resume(returning: true) }
@@ -64,21 +72,23 @@ final class IOEventTarget: IOInterruptTarget, @unchecked Sendable {
     }
 
     func signal() {
-        let waiter = state.withLock { s -> UnsafeContinuation<Bool, Never>? in
-            guard let w = s.waiter else {
-                s.signalled = true
+        let s = state.pointer
+        let waiter = lock.withLock { () -> UnsafeContinuation<Bool, Never>? in
+            guard let w = s.pointee.waiter else {
+                s.pointee.signalled = true
                 return nil
             }
-            s.waiter = nil
+            s.pointee.waiter = nil
             return w
         }
         waiter?.resume(returning: true)
     }
 
     override func interrupt() {
-        let waiter = state.withLock { s -> UnsafeContinuation<Bool, Never>? in
-            let w = s.waiter
-            s.waiter = nil
+        let s = state.pointer
+        let waiter = lock.withLock { () -> UnsafeContinuation<Bool, Never>? in
+            let w = s.pointee.waiter
+            s.pointee.waiter = nil
             return w
         }
         waiter?.resume(returning: false)
