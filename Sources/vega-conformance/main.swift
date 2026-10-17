@@ -23,9 +23,10 @@ guard args.count == 3, let port = Int(args[2]), ["h2", "ws"].contains(args[1]) e
 }
 let mode = args[1]
 let rt = Runtime()
-let listener = try TCPListener.bind(host: "0.0.0.0", port: port)
-print("vega-conformance: \(mode) on port \(listener.localPort)")
 try rt.block { () async throws(IOError) in
+    // Sockets belong to a runtime: bound on it.
+    let listener = try TCPListener.bind(host: "0.0.0.0", port: port)
+    print("vega-conformance: \(mode) on port \(listener.localPort)")
     while true {
         let conn = try await listener.accept()
         if mode == "h2" {
