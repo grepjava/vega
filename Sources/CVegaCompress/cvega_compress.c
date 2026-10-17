@@ -2,59 +2,19 @@
 
 #include "cvega_compress.h"
 
-#if defined(_WIN32)
-
-/* No zlib in the Windows SDK: nothing is available. */
-int cv_enc_available(int codec) { (void)codec; return 0; }
-void *cv_enc_new(int codec, int level) { (void)codec; (void)level; return NULL; }
-void cv_enc_free(void *enc) { (void)enc; }
-int cv_enc_run(void *enc, const uint8_t *in, size_t n, int mode,
-               uint8_t *out, size_t cap, size_t *consumed, size_t *produced) {
-    (void)enc; (void)in; (void)n; (void)mode; (void)out; (void)cap;
-    *consumed = 0;
-    *produced = 0;
-    return -1;
-}
-int cv_dec_available(int codec) { (void)codec; return 0; }
-void *cv_dec_new(int codec) { (void)codec; return NULL; }
-void cv_dec_free(void *dec) { (void)dec; }
-int cv_dec_run(void *dec, const uint8_t *in, size_t n,
-               uint8_t *out, size_t cap, size_t *consumed, size_t *produced) {
-    (void)dec; (void)in; (void)n; (void)out; (void)cap;
-    *consumed = 0;
-    *produced = 0;
-    return -1;
-}
-int cv_ws_available(void) { return 0; }
-void *cv_ws_deflate_new(int window_bits, int mem_level) { (void)window_bits; (void)mem_level; return NULL; }
-void *cv_ws_inflate_new(int window_bits) { (void)window_bits; return NULL; }
-void cv_ws_deflate_free(void *z) { (void)z; }
-void cv_ws_inflate_free(void *z) { (void)z; }
-int cv_ws_deflate_reset(void *z) { (void)z; return -1; }
-int cv_ws_inflate_reset(void *z) { (void)z; return -1; }
-int cv_ws_deflate_run(void *z, const uint8_t *in, size_t n,
-                      uint8_t *out, size_t cap, size_t *consumed, size_t *produced) {
-    (void)z; (void)in; (void)n; (void)out; (void)cap;
-    *consumed = 0;
-    *produced = 0;
-    return -1;
-}
-int cv_ws_inflate_run(void *z, const uint8_t *in, size_t n,
-                      uint8_t *out, size_t cap, size_t *consumed, size_t *produced) {
-    (void)z; (void)in; (void)n; (void)out; (void)cap;
-    *consumed = 0;
-    *produced = 0;
-    return -1;
-}
-
-#else
-
-#include <dlfcn.h>
 #include <limits.h>
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+/* The vendored zlib in CVegaZlib (the Windows SDK has none), whose names
+ * are z_-prefixed: Z_PREFIX maps them here as it does there. */
+#define Z_PREFIX
 #include <zlib.h>
+#else
+#include <dlfcn.h>
+#include <pthread.h>
+#include <zlib.h>
+#endif
 
 /* Default levels are chosen for a response compressed while a client waits,
  * not for an archive. gzip 5 is within a few percent of 9 on text at a
@@ -137,8 +97,14 @@ static struct {
     zstd_is_error_fn is_error;
 } zstd_dec;
 
-static pthread_once_t load_once = PTHREAD_ONCE_INIT;
 static int have_brotli, have_brotli_dec, have_zstd, have_zstd_dec;
+
+#if defined(_WIN32)
+/* No brotli or zstd on Windows yet: nothing to load. */
+#define LOAD_LIBRARIES() ((void)0)
+#else
+static pthread_once_t load_once = PTHREAD_ONCE_INIT;
+#define LOAD_LIBRARIES() pthread_once(&load_once, load_libraries)
 
 static void *open_first(const char *const *names) {
     for (; *names; names++) {
@@ -202,6 +168,8 @@ static void load_libraries(void) {
     }
 }
 
+#endif
+
 /* zlib counts in uInt: longer input or output is taken in pieces. */
 static uInt clamp_uint(size_t n) { return n > UINT_MAX ? UINT_MAX : (uInt)n; }
 
@@ -213,8 +181,8 @@ int cv_enc_available(int codec) {
     switch (codec) {
     case CV_CODEC_GZIP:
     case CV_CODEC_DEFLATE: return 1;
-    case CV_CODEC_BR:   pthread_once(&load_once, load_libraries); return have_brotli;
-    case CV_CODEC_ZSTD: pthread_once(&load_once, load_libraries); return have_zstd;
+    case CV_CODEC_BR:   LOAD_LIBRARIES(); return have_brotli;
+    case CV_CODEC_ZSTD: LOAD_LIBRARIES(); return have_zstd;
     default:            return 0;
     }
 }
@@ -363,8 +331,8 @@ int cv_dec_available(int codec) {
     switch (codec) {
     case CV_CODEC_GZIP:
     case CV_CODEC_DEFLATE: return 1;
-    case CV_CODEC_BR:   pthread_once(&load_once, load_libraries); return have_brotli_dec;
-    case CV_CODEC_ZSTD: pthread_once(&load_once, load_libraries); return have_zstd_dec;
+    case CV_CODEC_BR:   LOAD_LIBRARIES(); return have_brotli_dec;
+    case CV_CODEC_ZSTD: LOAD_LIBRARIES(); return have_zstd_dec;
     default:            return 0;
     }
 }
@@ -605,5 +573,3 @@ int cv_ws_inflate_run(void *zp, const uint8_t *in, size_t n,
         return -1;
     }
 }
-
-#endif

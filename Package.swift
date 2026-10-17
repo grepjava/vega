@@ -96,10 +96,19 @@ let package = Package(
         // same library as VegaTLS (and empty without one).
         .target(name: "VegaCrypto", dependencies: ["CVegaTLS"], swiftSettings: swiftSettings),
         // gzip and deflate on the system's zlib; brotli and zstd loaded with
-        // dlopen when there. None yet on Windows (no zlib in its SDK).
+        // dlopen when there. On Windows (no zlib in its SDK) gzip and
+        // deflate are on CVegaZlib, and there is no brotli or zstd yet.
         .target(name: "CVegaCompress",
+                dependencies: [.target(name: "CVegaZlib", condition: .when(platforms: [.windows]))],
                 linkerSettings: [.linkedLibrary("z", .when(platforms: [.linux, .macOS, .iOS])),
                                  .linkedLibrary("dl", .when(platforms: [.linux]))]),
+        // zlib 1.3.1, vendored for Windows: deflate and inflate only, its
+        // names z_-prefixed so that it can't collide with another zlib in
+        // the process. Its VENDORING.md says where it came from.
+        .target(name: "CVegaZlib", exclude: ["VENDORING.md", "LICENSE", "README"],
+                cSettings: [.define("Z_PREFIX"),
+                            .define("_CRT_SECURE_NO_WARNINGS", .when(platforms: [.windows])),
+                            .define("_CRT_NONSTDC_NO_DEPRECATE", .when(platforms: [.windows]))]),
         // The wire formats, sans I/O: ByteBuffer and ByteSpan, HPACK, HTTP/2
         // and WebSocket frames, permessage-deflate negotiation. Pure Swift.
         // Vendored from aviancore through Garuda; see its VENDORED.md.

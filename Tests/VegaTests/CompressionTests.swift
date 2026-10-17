@@ -19,7 +19,9 @@ private func page(_ fields: HTTPFields = ["content-type": "text/html; charset=ut
     HTTPResponse(fields: fields, body: body)
 }
 
-@Suite(.enabled(if: ContentCoding.gzip.canCompress, "no zlib here"))
+// gzip and deflate are on every platform (Windows' on the vendored zlib):
+// these run everywhere, and fail rather than skip without it.
+@Suite
 struct CompressorTests {
     @Test func everyCodingRoundTrips() throws {
         for coding in ContentCoding.allCases where coding.canCompress {
@@ -93,7 +95,9 @@ struct CompressorTests {
     }
 }
 
-@Suite(.enabled(if: ContentCoding.gzip.canCompress, "no zlib here"))
+// gzip and deflate are on every platform (Windows' on the vendored zlib):
+// these run everywhere, and fail rather than skip without it.
+@Suite
 struct HTTPCompressionTests {
     @Test func negotiation() {
         let all = HTTPCompression(codings: [.br, .zstd, .gzip, .deflate])

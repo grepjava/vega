@@ -13,7 +13,8 @@ extern "C" {
  * every Linux and Apple system); brotli and zstd through whichever shared
  * libraries the system has, loaded with dlopen the first time they are asked
  * for, so a machine without them still runs and just offers less. Windows
- * builds without any of them for now: every codec says unavailable.
+ * has gzip and deflate on a vendored zlib (CVegaZlib), and no brotli or
+ * zstd yet.
  *
  * One streaming interface over all of them. Swift drives it in a loop: feed
  * input, give it output space, call again while it says there is more.
@@ -79,7 +80,7 @@ int cv_dec_run(void *dec, const uint8_t *in, size_t n,
  * messages compress at all.
  * ------------------------------------------------------------------------- */
 
-/* 1 when zlib is there. */
+/* 1 when zlib is there (everywhere now). */
 int cv_ws_available(void);
 /* window_bits 9..15, mem_level 1..9. NULL when zlib cannot make one. */
 void *cv_ws_deflate_new(int window_bits, int mem_level);

@@ -42,8 +42,8 @@ public struct WebSocketConfiguration: Sendable {
     /// Limits on the HTTP handshake.
     public var limits: HTTP1Limits
     /// Offer (client) or accept (server) permessage-deflate (RFC 7692), so
-    /// messages of 64 bytes or more go compressed. Needs zlib: never on
-    /// Windows yet.
+    /// messages of 64 bytes or more go compressed. On zlib, which every
+    /// platform has (Windows a vendored copy).
     public var compression: Bool
 
     public init(maxMessageSize: Int = 16 << 20, maxFrameSize: Int = 16 << 20, limits: HTTP1Limits = .init(),

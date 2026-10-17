@@ -94,8 +94,13 @@ private func withPair<T: Sendable>(
     }
 }
 
-@Suite(.enabled(if: zlib, "no zlib here"))
+@Suite
 struct PerMessageDeflateTests {
+    /// Every platform has zlib now (Windows the vendored one).
+    @Test func compressionIsOffered() {
+        #expect(zlib)
+    }
+
     /// RFC 7692 section 7.2.3's examples.
     @Test func rfcExamples() throws {
         let hello = Array("Hello".utf8)

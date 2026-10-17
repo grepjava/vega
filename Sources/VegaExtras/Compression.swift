@@ -2,8 +2,9 @@ import CVegaCompress
 import VegaHTTP1
 
 /// A content coding (RFC 9110 section 8.4.1). gzip and deflate come from
-/// zlib; brotli and zstd from the system's shared libraries, when it has
-/// them. Windows has none of them yet.
+/// zlib (the system's; on Windows, a vendored copy), so they are always
+/// there; brotli and zstd from the system's shared libraries, when it has
+/// them (not on Windows yet).
 public enum ContentCoding: String, Sendable, CaseIterable {
     case gzip
     /// The zlib format. Decoding also takes raw deflate, which some servers
