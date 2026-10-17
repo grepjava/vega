@@ -112,6 +112,9 @@ extension IORegistration {
             }
             try Self.retryable(res)
         }
+        #if os(Windows)
+        if overlapped(CV_OVL_RECV) { return try await readOverlapped(into: &buffer) }
+        #endif
         if io.pointee.read_drained != 0 {
             // The last read came up short, so the socket was empty: skip the
             // recv that would say EAGAIN and wait for the next event (Tokio
@@ -144,6 +147,75 @@ extension IORegistration {
     /// `sendNow`'s status when it has sent everything but the task's budget
     /// ran out, and when the stream isn't a socket it can send on here.
     @usableFromInline static let sendYield: Int32 = -1, sendElsewhere: Int32 = -2
+
+    #if os(Windows)
+    /// `read(into:)` with VEGA_DRIVER=overlapped: a recv, and where it finds
+    /// nothing, a WSARecv into the buffer whose completion brings the bytes
+    /// (in place of an AFD poll and a second recv). After a short read the
+    /// socket is likely empty, so the WSARecv goes first.
+    private func readOverlapped(into buffer: inout IOBuffer) async throws(IOError) -> Int {
+        let want = buffer.spareCapacity, base = buffer.base + buffer.count
+        if io.pointee.read_drained == 0 {
+            let n = cv_recv(fd, base, want)
+            if n >= 0 {
+                buffer.count += n
+                if n > 0 && n < want { io.pointee.read_drained = 1 }
+                await Runtime.consumeBudget()
+                return n
+            }
+            if Int32(-n) != EAGAIN { throw IOError(code: Int32(-n)) }
+        }
+        io.pointee.read_drained = 0
+        let io = self.io
+        while true {
+            let res = await overlapped(CV_IO_READ) { waiter, res in cv_ovl_recv(io, waiter, base, want, res) }
+            if res >= 0 {
+                buffer.count += Int(res)
+                await Runtime.consumeBudget()
+                return Int(res)
+            }
+            switch Int32(-res) {
+            case EINTR, EAGAIN: continue
+            case ECANCELED: throw .cancelled
+            case ETIMEDOUT: throw .timedOut
+            default: throw IOError(code: Int32(-res))
+            }
+        }
+    }
+
+    /// `TCPListener.accept` with VEGA_DRIVER=overlapped: accept, and where
+    /// nothing waits, an AcceptEx whose completion brings the connection.
+    func acceptOverlapped() async throws(IOError) -> IORegistration {
+        let io = self.io
+        while true {
+            var err: Int32 = 0
+            let fd = cv_tcp_accept(self.fd, &err)
+            if fd >= 0 {
+                await Runtime.consumeBudget()
+                return try IORegistration(fd: fd, driver: home)
+            }
+            switch err {
+            case EAGAIN: break
+            case EINTR, ECONNABORTED, EPROTO: continue
+            default: throw IOError(code: err)
+            }
+            let res = await overlapped(CV_IO_READ) { waiter, res in cv_ovl_accept(io, waiter, res) }
+            if res >= 0 {
+                let e = cv_tcp_accept_finish(self.fd, Int32(truncatingIfNeeded: res))
+                if e != 0 { continue } // (it's closed) the peer gave up already, say
+                await Runtime.consumeBudget()
+                return try IORegistration(fd: Int32(truncatingIfNeeded: res), driver: home)
+            }
+            switch Int32(-res) {
+            // The peer gave up before we got to it: wait for the next.
+            case EINTR, EAGAIN, ECONNABORTED, ECONNRESET: continue
+            case ECANCELED: throw .cancelled
+            case ETIMEDOUT: throw .timedOut
+            default: throw IOError(code: Int32(-res))
+            }
+        }
+    }
+    #endif
 
     /// The synchronous part of a write, for the public writes to inline into
     /// their caller: send what the socket takes of `bytes` and spend a unit
@@ -343,6 +415,32 @@ extension IORegistration {
         #if canImport(Network)
         if nw != nil { return try await copyFile(file, offset: offset, count: count) }
         #endif
+        #if os(Windows)
+        // TransmitFile: the kernel sends from the file's cache, as sendfile
+        // does, and completes once all of it went (or the file ended).
+        let io = self.io
+        while sent < count {
+            let want = count - sent, at = offset + Int64(sent)
+            let res = await overlapped(CV_IO_WRITE) { waiter, res in
+                cv_ovl_transmit_file(io, waiter, file, at, want, res)
+            }
+            if res >= 0 {
+                sent += Int(res)
+                if res < Int64(min(want, 0x7fff_fffe)) { break } // the file ended
+                continue
+            }
+            switch Int32(-res) {
+            case ECANCELED: throw .cancelled
+            case ETIMEDOUT: throw .timedOut
+            case EINVAL, ENOSYS, EOPNOTSUPP, ENOTSOCK:
+                // Not a socket TransmitFile takes (a Unix one), or not a file.
+                return sent + (try await copyFile(file, offset: at, count: want))
+            default: throw IOError(code: Int32(-res))
+            }
+        }
+        await Runtime.consumeBudget()
+        return sent
+        #else
         while sent < count {
             let n = cv_sendfile(fd, file, offset + Int64(sent), count - sent)
             if n > 0 {
@@ -362,6 +460,7 @@ extension IORegistration {
         }
         await Runtime.consumeBudget()
         return sent
+        #endif
     }
 
     /// `sendFile` without the kernel's help: positioned reads, then writes.

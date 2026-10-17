@@ -737,6 +737,7 @@ void cv_driver_unwatch_exit(cv_driver *d, cv_io *io, int pid) {
 #include <winsock2.h>
 #include <mswsock.h>
 #include <timeapi.h>
+#include <limits.h>
 
 typedef LONG NTSTATUS;
 typedef struct {
@@ -833,9 +834,27 @@ typedef struct cv_pipe_op {
     DWORD err; // the last request's Win32 error, 0 if none
 } cv_pipe_op;
 
+// An overlapped request on a socket (TransmitFile, AcceptEx, WSARecv), one
+// per direction: a task has one read and one write going at a time.
+typedef struct cv_sock_op {
+    OVERLAPPED ov; // first: the completion's lpOverlapped points here
+    struct cv_io_win *io;
+    int dir;
+    int kind;         // CV_OVL_*
+    uintptr_t waiter; // the task's continuation, tagged CV_OVL_WAITER
+    SOCKET accepted;  // AcceptEx: the socket it accepts into
+    // AcceptEx: the local and remote addresses, each with 16 bytes to spare.
+    char addrs[2 * (sizeof(SOCKADDR_STORAGE) + 16)];
+} cv_sock_op;
+
+// Bits of a socket's state word: an overlapped request in flight.
+#define OVL_READ 8u
+#define OVL_WRITE 16u
+
 #define CV_PIPE_BUFFER (64 * 1024)
 #define CV_PIPE_KEY ((ULONG_PTR)2)
 #define CV_EXIT_KEY ((ULONG_PTR)3)
+#define CV_SOCK_KEY ((ULONG_PTR)4)
 
 enum { IO_SOCKET, IO_PIPE, IO_HANDLE };
 
@@ -859,6 +878,13 @@ typedef struct cv_io_win {
     cv_pipe_op pipe[2];
     HANDLE wait, target; // handles: the wait and our copy of what it waits for
     _Atomic int fired;
+    // Sockets with overlapped requests: associated with the port (on the
+    // first, under `lock`), and whether a request that finishes at once
+    // skips the port, so its result is taken there and then.
+    _Atomic int associated;
+    int skip;
+    int family; // a listener's, for the sockets AcceptEx accepts into
+    cv_sock_op sock[2];
 } cv_io_win;
 
 static void io_free(cv_io *raw) {
@@ -876,9 +902,12 @@ struct cv_driver {
     char pad1[112];
     HANDLE port;
     HANDLE afd;
+    int overlapped; // CV_OVL_* bits: what this runtime does with overlapped requests
     cv_driver_stats stats;
     OVERLAPPED_ENTRY events[CV_MAX_EVENTS];
     uintptr_t wakes[2 * CV_MAX_EVENTS];
+    // An overlapped request's result, beside its tagged waiter in `wakes`.
+    int64_t results[2 * CV_MAX_EVENTS];
 };
 
 cv_driver *cv_driver_new(void) {
@@ -911,6 +940,11 @@ cv_driver *cv_driver_new(void) {
     // Waits time out on the system tick, 15.6 ms by default: too coarse for
     // timers. 1 ms while a runtime exists (per process since Windows 10 2004).
     timeBeginPeriod(1);
+    // sendFile's TransmitFile always; accepts and reads by readiness unless
+    // VEGA_DRIVER=overlapped (see docs/PLAN.md for why).
+    d->overlapped = 1 << CV_OVL_TRANSMIT;
+    const char *mode = getenv("VEGA_DRIVER");
+    if (mode && strcmp(mode, "overlapped") == 0) d->overlapped |= (1 << CV_OVL_ACCEPT) | (1 << CV_OVL_RECV);
     return d;
 fail:
     if (d->afd) CloseHandle(d->afd);
@@ -1037,6 +1071,202 @@ void cv_driver_want(cv_io *raw, int dir) {
         }
     }
     ReleaseSRWLockExclusive(&io->lock);
+}
+
+// ---- overlapped socket requests --------------------------------------------
+// TransmitFile for sendFile, and (VEGA_DRIVER=overlapped) AcceptEx and
+// WSARecv in place of a readiness wait. A socket is associated with the port
+// on its first request; AFD's polls come through the AFD handle, so
+// readiness is untouched. The completions carry CV_SOCK_KEY and resume the
+// waiter with the request's result, not with "ready".
+
+static LPFN_ACCEPTEX accept_ex;
+static LPFN_TRANSMITFILE transmit_file;
+static _Atomic uint64_t ovl_counts[3];
+
+static BOOL CALLBACK load_extensions(PINIT_ONCE once, PVOID param, PVOID *ctx) {
+    (void)once, (void)param, (void)ctx;
+    // Looked up through a TCP socket of our own, so they are the TCP
+    // provider's whichever socket asks first. Winsock is up: a socket of
+    // ours exists already.
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return FALSE;
+    GUID accept_id = WSAID_ACCEPTEX, transmit_id = WSAID_TRANSMITFILE;
+    DWORD bytes = 0;
+    int a = WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, &accept_id, sizeof accept_id, &accept_ex,
+                     sizeof accept_ex, &bytes, NULL, NULL);
+    int t = WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, &transmit_id, sizeof transmit_id, &transmit_file,
+                     sizeof transmit_file, &bytes, NULL, NULL);
+    closesocket(s);
+    return a == 0 && t == 0;
+}
+
+// Ready the socket for overlapped requests: 0 or an errno value.
+static int sock_prepare(cv_io_win *io) {
+    static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
+    if (atomic_load_explicit(&io->associated, memory_order_acquire)) return 0;
+    if (io->kind != IO_SOCKET) return ENOTSOCK;
+    if (!InitOnceExecuteOnce(&once, load_extensions, NULL, NULL)) return ENOSYS;
+    int e = 0;
+    AcquireSRWLockExclusive(&io->lock);
+    if (!atomic_load_explicit(&io->associated, memory_order_relaxed)) {
+        HANDLE h = (HANDLE)(intptr_t)io->io.fd;
+        if (CreateIoCompletionPort(h, io->driver->port, CV_SOCK_KEY, 0)) {
+            // A request that finishes at once posts nothing, and its result is
+            // taken there and then; not through a layered provider, which may
+            // not report it right (libuv's rule too).
+            io->skip = io->base == (SOCKET)(intptr_t)io->io.fd &&
+                       SetFileCompletionNotificationModes(h, FILE_SKIP_COMPLETION_PORT_ON_SUCCESS |
+                                                                 FILE_SKIP_SET_EVENT_ON_HANDLE);
+            atomic_store_explicit(&io->associated, 1, memory_order_release);
+        } else {
+            e = cv_win_errno(GetLastError());
+        }
+    }
+    ReleaseSRWLockExclusive(&io->lock);
+    return e;
+}
+
+// A finished request's result: the bytes moved (AcceptEx: the accepted
+// socket), or -errno. The socket must still be open.
+static int64_t sock_result(cv_io_win *io, cv_sock_op *op) {
+    DWORD bytes = 0, flags = 0;
+    int64_t r = WSAGetOverlappedResult((SOCKET)(intptr_t)io->io.fd, &op->ov, &bytes, FALSE, &flags)
+                    ? (int64_t)bytes
+                    : -(int64_t)cv_win_errno((unsigned long)WSAGetLastError());
+    atomic_fetch_add_explicit(&ovl_counts[op->kind], 1, memory_order_relaxed);
+    if (op->kind == CV_OVL_ACCEPT) {
+        if (r >= 0) r = (int64_t)(intptr_t)op->accepted;
+        else closesocket(op->accepted);
+        op->accepted = INVALID_SOCKET;
+    }
+    return r;
+}
+
+static void sock_begin(cv_io_win *io, cv_sock_op *op, uintptr_t waiter, int kind) {
+    op->kind = kind;
+    op->waiter = waiter | CV_OVL_WAITER;
+    memset(&op->ov, 0, sizeof op->ov);
+    atomic_fetch_or_explicit(&io->state, op->dir == CV_IO_READ ? OVL_READ : OVL_WRITE, memory_order_acq_rel);
+}
+
+// After the request's call (`ok`: it said done): 1 if its completion is to
+// come, else 0 with the result in *res.
+static int sock_end(cv_io_win *io, cv_sock_op *op, BOOL ok, int64_t *res) {
+    uint32_t bit = op->dir == CV_IO_READ ? OVL_READ : OVL_WRITE;
+    if (ok) {
+        if (!io->skip) return 1; // done, but posted all the same
+        *res = sock_result(io, op);
+    } else {
+        int e = WSAGetLastError();
+        if (e == WSA_IO_PENDING) return 1;
+        *res = -(int64_t)cv_win_errno((unsigned long)e);
+        if (op->kind == CV_OVL_ACCEPT) {
+            closesocket(op->accepted);
+            op->accepted = INVALID_SOCKET;
+        }
+    }
+    atomic_fetch_and_explicit(&io->state, ~bit, memory_order_acq_rel);
+    return 0;
+}
+
+// A request's completion: the waiter to resume, with the result in *res.
+// Once the owner has let go, the last completion frees the registration.
+static uintptr_t sock_completed(OVERLAPPED_ENTRY *e, int64_t *res) {
+    cv_sock_op *op = (cv_sock_op *)(void *)e->lpOverlapped;
+    cv_io_win *io = op->io;
+    uint32_t bit = op->dir == CV_IO_READ ? OVL_READ : OVL_WRITE;
+    uintptr_t waiter = op->waiter;
+    if (atomic_load_explicit(&io->state, memory_order_acquire) & POLL_CLOSING) {
+        // Aborted by the close (the socket is gone, and with it the result).
+        if (op->kind == CV_OVL_ACCEPT && op->accepted != INVALID_SOCKET) closesocket(op->accepted);
+        *res = -ECANCELED;
+    } else {
+        *res = sock_result(io, op);
+    }
+    uint32_t old = atomic_fetch_and_explicit(&io->state, ~bit, memory_order_acq_rel);
+    if ((old & POLL_CLOSING) && (old & ~bit) == POLL_CLOSING) io_free(&io->io);
+    return waiter;
+}
+
+int cv_ovl_enabled(cv_io *raw, int kind) {
+    cv_io_win *io = (cv_io_win *)raw;
+    return io->kind == IO_SOCKET && (io->driver->overlapped & (1 << kind)) != 0;
+}
+
+void cv_driver_set_overlapped(cv_driver *d, int kinds) { d->overlapped = kinds; }
+
+uint64_t cv_ovl_count(int kind) { return atomic_load_explicit(&ovl_counts[kind], memory_order_relaxed); }
+
+int64_t *cv_driver_results(cv_driver *d) { return d->results; }
+
+int cv_ovl_transmit_file(cv_io *raw, uintptr_t waiter, int file, int64_t offset, intptr_t count, int64_t *res) {
+    cv_io_win *io = (cv_io_win *)raw;
+    int e = sock_prepare(io);
+    if (e || count <= 0 || offset < 0) { // (a count of 0 would send the whole file)
+        *res = e ? -(int64_t)e : count < 0 || offset < 0 ? -EINVAL : 0;
+        return 0;
+    }
+    cv_sock_op *op = &io->sock[CV_IO_WRITE];
+    // TransmitFile's most in one request: 2^31 - 2 bytes.
+    DWORD n = count > 0x7ffffffe ? 0x7ffffffe : (DWORD)count;
+    sock_begin(io, op, waiter, CV_OVL_TRANSMIT);
+    // From the offset given, whatever the handle's position.
+    op->ov.Offset = (DWORD)offset;
+    op->ov.OffsetHigh = (DWORD)((uint64_t)offset >> 32);
+    BOOL ok = transmit_file((SOCKET)(intptr_t)raw->fd, (HANDLE)(intptr_t)file, n, 0, &op->ov, NULL, 0);
+    return sock_end(io, op, ok, res);
+}
+
+int cv_ovl_recv(cv_io *raw, uintptr_t waiter, void *buf, intptr_t len, int64_t *res) {
+    cv_io_win *io = (cv_io_win *)raw;
+    int e = sock_prepare(io);
+    if (e) {
+        *res = -(int64_t)e;
+        return 0;
+    }
+    cv_sock_op *op = &io->sock[CV_IO_READ];
+    WSABUF b = {len > INT_MAX ? INT_MAX : (ULONG)len, buf}; // copied by the call
+    DWORD bytes = 0, flags = 0;
+    sock_begin(io, op, waiter, CV_OVL_RECV);
+    int rc = WSARecv((SOCKET)(intptr_t)raw->fd, &b, 1, &bytes, &flags, &op->ov, NULL);
+    return sock_end(io, op, rc == 0, res);
+}
+
+int cv_ovl_accept(cv_io *raw, uintptr_t waiter, int64_t *res) {
+    cv_io_win *io = (cv_io_win *)raw;
+    SOCKET listener = (SOCKET)(intptr_t)raw->fd;
+    int e = sock_prepare(io);
+    if (!e && !io->family) {
+        SOCKADDR_STORAGE ss;
+        int len = sizeof ss;
+        if (getsockname(listener, (struct sockaddr *)&ss, &len) == 0) io->family = ss.ss_family;
+        else e = cv_win_errno((unsigned long)WSAGetLastError());
+    }
+    SOCKET a = INVALID_SOCKET;
+    if (!e) {
+        a = WSASocketW(io->family, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+        if (a == INVALID_SOCKET) e = cv_win_errno((unsigned long)WSAGetLastError());
+    }
+    if (e) {
+        *res = -(int64_t)e;
+        return 0;
+    }
+    cv_sock_op *op = &io->sock[CV_IO_READ];
+    sock_begin(io, op, waiter, CV_OVL_ACCEPT);
+    op->accepted = a;
+    DWORD bytes = 0, alen = sizeof(SOCKADDR_STORAGE) + 16;
+    BOOL ok = accept_ex(listener, a, op->addrs, 0, alen, alen, &bytes, &op->ov);
+    return sock_end(io, op, ok, res);
+}
+
+void cv_ovl_cancel(cv_io *raw, int dir) {
+    cv_io_win *io = (cv_io_win *)raw;
+    uint32_t bit = dir == CV_IO_READ ? OVL_READ : OVL_WRITE;
+    // ERROR_NOT_FOUND if it finished first: harmless.
+    if (atomic_load_explicit(&io->state, memory_order_acquire) & bit)
+        CancelIoEx((HANDLE)(intptr_t)raw->fd, &io->sock[dir].ov);
 }
 
 static int pipe_broken(DWORD e) {
@@ -1221,6 +1451,11 @@ int cv_driver_turn(cv_driver *d, cv_parker *p, int64_t timeout_ns) {
     for (ULONG i = 0; i < n; i++) {
         OVERLAPPED_ENTRY *e = &d->events[i];
         if (e->lpCompletionKey == CV_WAKE_KEY || !e->lpOverlapped) continue; // a wake
+        if (e->lpCompletionKey == CV_SOCK_KEY) {
+            d->wakes[woken] = sock_completed(e, &d->results[woken]);
+            woken++;
+            continue;
+        }
         if (e->lpCompletionKey == CV_PIPE_KEY || e->lpCompletionKey == CV_EXIT_KEY) {
             uintptr_t w = e->lpCompletionKey == CV_PIPE_KEY ? pipe_completed(e) : handle_signalled(e);
             if (w) d->wakes[woken++] = w;
@@ -1298,6 +1533,9 @@ cv_io *cv_driver_register(cv_driver *d, int fd, int *err) {
         io->op[dir].dir = dir;
         io->pipe[dir].io = io;
         io->pipe[dir].dir = dir;
+        io->sock[dir].io = io;
+        io->sock[dir].dir = dir;
+        io->sock[dir].accepted = INVALID_SOCKET;
     }
     atomic_fetch_add_explicit(&d->registered, 1, memory_order_relaxed);
     return &io->io;
@@ -1316,10 +1554,11 @@ void cv_driver_deregister(cv_driver *d, cv_io *raw) {
         }
         ReleaseSRWLockExclusive(&io->lock);
         atomic_fetch_sub_explicit(&d->registered, 1, memory_order_relaxed);
+        // Overlapped requests in flight are aborted, and complete.
         closesocket((SOCKET)raw->fd);
         // Nothing in flight: no completion will free it, so the next turn does
         // (one may be handling this io's last completion right now).
-        if (!(old & POLL_SOCKET)) push_released(d, raw);
+        if (!(old & (POLL_SOCKET | OVL_READ | OVL_WRITE))) push_released(d, raw);
         return;
     }
     uint32_t old = atomic_fetch_or_explicit(&io->state, POLL_CLOSING, memory_order_acq_rel);

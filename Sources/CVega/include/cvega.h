@@ -203,6 +203,37 @@ void cv_driver_deregister(cv_driver *d, cv_io *io);
 void cv_driver_want(cv_io *io, int dir);
 
 #if defined(_WIN32)
+// Overlapped requests on a registered socket, completing on the driver's
+// port: TransmitFile (sendFile), and AcceptEx and WSARecv where the runtime
+// asks for them (VEGA_DRIVER=overlapped). `waiter` is the bits of the
+// task's UnsafeContinuation<Int64, Never>. Each call returns 1 when the
+// request is in flight: its completion resumes the waiter with the result
+// (the wake carries CV_OVL_WAITER, the result is in cv_driver_results at
+// the same index). 0 when it finished now, the result in *res and the
+// waiter untouched. A result is >= 0 (bytes; AcceptEx: the new socket, for
+// cv_tcp_accept_finish) or -errno, -ECANCELED once cancelled.
+#define CV_OVL_TRANSMIT 0
+#define CV_OVL_ACCEPT 1
+#define CV_OVL_RECV 2
+#define CV_OVL_WAITER ((uintptr_t)1)
+/// Whether the runtime does `kind` (CV_OVL_*) as overlapped requests.
+int cv_ovl_enabled(cv_io *io, int kind);
+/// The kinds a runtime does overlapped, as bits (1 << CV_OVL_*): for tests.
+void cv_driver_set_overlapped(cv_driver *d, int kinds);
+/// Requests of `kind` finished so far in this process (for tests).
+uint64_t cv_ovl_count(int kind);
+int64_t *cv_driver_results(cv_driver *d);
+/// From `offset`, up to `count` bytes of the file handle `file`; fewer
+/// only when the file ends first.
+int cv_ovl_transmit_file(cv_io *io, uintptr_t waiter, int file, int64_t offset, intptr_t count, int64_t *res);
+int cv_ovl_recv(cv_io *io, uintptr_t waiter, void *buf, intptr_t len, int64_t *res);
+int cv_ovl_accept(cv_io *io, uintptr_t waiter, int64_t *res);
+/// Cancel the request in flight in `dir` (CV_IO_READ: accept, recv), if any.
+void cv_ovl_cancel(cv_io *io, int dir);
+/// Make a socket AcceptEx accepted on `listener` a socket like accept's:
+/// non-blocking, TCP_NODELAY. 0, or an errno value (`fd` is closed).
+int cv_tcp_accept_finish(int listener, int fd);
+
 /// closesocket(2) and shutdown(SD_SEND): sockets aren't CRT descriptors.
 void cv_close_socket(int fd);
 /// 0 or an errno value.

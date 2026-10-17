@@ -189,6 +189,21 @@ int cv_tcp_accept(int fd, int *err) {
     return c;
 }
 
+int cv_tcp_accept_finish(int listener, int fd) {
+    SOCKET l = as_socket(listener), c = as_socket(fd);
+    // Until then the socket has none of the listener's properties, and
+    // getpeername, shutdown and the rest fail on it.
+    int e = setsockopt(c, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (const char *)&l, sizeof l) == 0 ? prepare(c)
+                                                                                                 : last_error();
+    if (e) {
+        closesocket(c);
+        return e;
+    }
+    BOOL one = TRUE;
+    setsockopt(c, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof one);
+    return 0;
+}
+
 void cv_tcp_accepted(int fd) {
     BOOL one = TRUE;
     setsockopt(as_socket(fd), IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof one);
@@ -564,7 +579,11 @@ int cv_win_errno(unsigned long e) {
     case ERROR_BROKEN_PIPE: case ERROR_NO_DATA: case ERROR_PIPE_NOT_CONNECTED: return EPIPE;
     case ERROR_BAD_EXE_FORMAT: case ERROR_EXE_MACHINE_TYPE_MISMATCH: return ENOEXEC;
     case ERROR_OPERATION_ABORTED: return ECANCELED;
-    default: return EIO;
+    // What overlapped socket requests report besides Winsock's own codes.
+    case ERROR_NETNAME_DELETED: return ECONNRESET;
+    case ERROR_CONNECTION_ABORTED: return ECONNABORTED;
+    case ERROR_CONNECTION_REFUSED: return ECONNREFUSED;
+    default: return e >= WSABASEERR ? map_error((int)e) : EIO;
     }
 }
 

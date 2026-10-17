@@ -53,7 +53,10 @@ public struct TCPListener: ~Copyable, Sendable {
 
     /// Wait for the next connection.
     public func accept() async throws(IOError) -> TCPStream {
-        TCPStream(reg: try await reg.accept(cv_tcp_accept))
+        #if os(Windows)
+        if reg.overlapped(CV_OVL_ACCEPT) { return TCPStream(reg: try await reg.acceptOverlapped()) }
+        #endif
+        return TCPStream(reg: try await reg.accept(cv_tcp_accept))
     }
 }
 

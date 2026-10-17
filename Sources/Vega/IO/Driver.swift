@@ -60,27 +60,42 @@ struct IODriver: @unchecked Sendable {
     @inline(__always) private func resume(_ n: Int32, on worker: Worker, busy: Bool) -> Int {
         guard n > 0 else { return 0 }
         let wakes = cv_driver_wakes(raw)!
+        #if os(Windows)
+        // An overlapped request's waiter is tagged, and takes its result.
+        let results = cv_driver_results(raw)!
+        @inline(__always) func wake(_ i: Int) {
+            let w = wakes[i]
+            if w & CV_OVL_WAITER != 0 {
+                unsafeBitCast(w & ~CV_OVL_WAITER, to: UnsafeContinuation<Int64, Never>.self)
+                    .resume(returning: results[i])
+            } else {
+                IOWaiter.resume(w)
+            }
+        }
+        #else
+        @inline(__always) func wake(_ i: Int) { IOWaiter.resume(wakes[i]) }
+        #endif
         if n == 1 {
             // One task: the LIFO slot, where it runs next with a hot cache.
-            IOWaiter.resume(wakes[0])
+            wake(0)
         } else if busy {
             // A busy worker has a queue already. Fill only its free room, so
             // no older job is pushed out to the inject queue; the rest go
             // there in event order (see Worker.viaInject).
             let local = min(Int(n), max(0, worker.queue.remainingSlots - 1))
             worker.inOrder {
-                for i in 0..<local { IOWaiter.resume(wakes[i]) }
+                for i in 0..<local { wake(i) }
             }
             if local < Int(n) {
                 worker.viaInject(worker.scheduler.unsafelyUnwrapped) {
-                    for i in local..<Int(n) { IOWaiter.resume(wakes[i]) }
+                    for i in local..<Int(n) { wake(i) }
                 }
             }
         } else {
             // A worker leaving park: its queue was empty. In event order, and
             // idle workers get notified to steal.
             worker.inOrder {
-                for i in 0..<Int(n) { IOWaiter.resume(wakes[i]) }
+                for i in 0..<Int(n) { wake(i) }
             }
         }
         return Int(n)
@@ -198,6 +213,42 @@ struct IORegistration: @unchecked Sendable {
         if !ready { throw .interrupted }
     }
 }
+
+#if os(Windows)
+extension IORegistration {
+    /// Whether this runtime does `kind` (`CV_OVL_*`) as overlapped requests.
+    @inline(__always) func overlapped(_ kind: Int32) -> Bool { cv_ovl_enabled(io, kind) != 0 }
+
+    /// One overlapped request in `direction`, started by `start` with the
+    /// waiter's bits: its result (>= 0) or -errno, -ECANCELED if the task
+    /// was cancelled first, -ETIMEDOUT if its I/O deadline passed. Pointers
+    /// it was given stay valid until it completes: the task waits for that,
+    /// even when cancelled, as on a ring.
+    @inline(__always)
+    func overlapped(_ direction: Int32,
+                    _ start: (UInt, UnsafeMutablePointer<Int64>) -> Int32) async -> Int64 {
+        let io = self.io
+        let res = await withIOInterrupt { arm in
+            await withUnsafeContinuation { (c: UnsafeContinuation<Int64, Never>) in
+                var res: Int64 = 0
+                if start(unsafeBitCast(c, to: UInt.self), &res) == 0 {
+                    c.resume(returning: res) // finished at once
+                    return
+                }
+                let cancel = IOInterrupt.overlapped(io, direction)
+                if !arm(cancel) { cancel.fire() }
+            }
+        }
+        guard res < 0 else { return res }
+        // Interrupted. A cancelled send aborts the connection (Winsock can't
+        // say how much of it went), so it fails with ECONNABORTED rather
+        // than ECANCELED: say why it ended either way.
+        if Task.isCancelled { return -Int64(ECANCELED) }
+        if IODeadline.active?.hasFired == true { return -Int64(ETIMEDOUT) }
+        return res
+    }
+}
+#endif
 
 /// A waiting task's continuation, stored in an I/O slot as an integer. It
 /// resumes with true when ready, false when cancelled.

@@ -11,6 +11,11 @@ enum IOInterrupt {
     /// -ECANCELED unless it completed first.
     case uring(OpaquePointer, UInt64)
     #endif
+    #if os(Windows)
+    /// An overlapped request: cancel it (CancelIoEx); it completes with
+    /// -ECANCELED unless it completed first.
+    case overlapped(UnsafeMutablePointer<cv_io>, Int32)
+    #endif
     /// A readiness wait: take the waiter out of the direction's slot and
     /// resume it with false, unless the driver took it first.
     case readiness(UnsafeMutablePointer<cv_io>, Int32)
@@ -23,6 +28,10 @@ enum IOInterrupt {
         #if os(Linux)
         case let .uring(op, gen):
             cv_uring_cancel(op, gen)
+        #endif
+        #if os(Windows)
+        case let .overlapped(io, direction):
+            cv_ovl_cancel(io, direction)
         #endif
         case let .readiness(io, direction):
             let waiter = cv_io_take_waiter(io, direction)
@@ -50,7 +59,7 @@ class IOInterruptTarget: @unchecked Sendable {
 @usableFromInline
 class IOInterruptSlot: @unchecked Sendable {
     private static let idle: UInt8 = 0, armed: UInt8 = 1, firing: UInt8 = 2, fired: UInt8 = 3
-    private static let uring: UInt8 = 0, readiness: UInt8 = 1, object: UInt8 = 2
+    private static let uring: UInt8 = 0, readiness: UInt8 = 1, object: UInt8 = 2, overlapped: UInt8 = 3
 
     private let state = Atomic<UInt8>(IOInterruptSlot.idle)
     private let kind = Atomic<UInt8>(0)
@@ -79,6 +88,12 @@ class IOInterruptSlot: @unchecked Sendable {
             kind.store(Self.uring, ordering: .relaxed)
             a.store(UInt(bitPattern: op), ordering: .relaxed)
             b.store(gen, ordering: .relaxed)
+        #endif
+        #if os(Windows)
+        case let .overlapped(io, direction):
+            kind.store(Self.overlapped, ordering: .relaxed)
+            a.store(UInt(bitPattern: io), ordering: .relaxed)
+            b.store(UInt64(UInt32(bitPattern: direction)), ordering: .relaxed)
         #endif
         case let .readiness(io, direction):
             kind.store(Self.readiness, ordering: .relaxed)
@@ -129,6 +144,11 @@ class IOInterruptSlot: @unchecked Sendable {
         #if os(Linux)
         case Self.uring:
             return .uring(OpaquePointer(bitPattern: a).unsafelyUnwrapped, b.load(ordering: .relaxed))
+        #endif
+        #if os(Windows)
+        case Self.overlapped:
+            return .overlapped(UnsafeMutablePointer(bitPattern: a).unsafelyUnwrapped,
+                               Int32(bitPattern: UInt32(truncatingIfNeeded: b.load(ordering: .relaxed))))
         #endif
         case Self.readiness:
             return .readiness(UnsafeMutablePointer(bitPattern: a).unsafelyUnwrapped,
