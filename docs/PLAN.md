@@ -36,8 +36,8 @@ You want a Swift networking engine that **fully replaces SwiftNIO**, has **featu
 
 | Area | Tokio / SwiftNIO feature | Vega module |
 |---|---|---|
-| **Runtime** | multi-thread and current-thread runtimes, `LocalSet`, `block_on`, builder, `EventLoopGroup` | `Vega` — `Runtime.multiThread / .currentThread / .sharded(K)`, `LocalExecutor` (`!Send` work), `Runtime.block(on:)` |
-| **Tasks** | `spawn`, `JoinHandle`, `JoinSet`, `abort`, task-locals, `yield_now`, `spawn_blocking`, `block_in_place` | `Vega.spawn`, `JoinSet` (wraps `TaskGroup` where it fits), `TaskPool`, `Vega.blocking`, `Vega.yield` |
+| **Runtime** | multi-thread and current-thread runtimes, `LocalSet`, `block_on`, builder, `EventLoopGroup` | `Vega` — `Runtime.multiThread / .currentThread / .sharded(K)`, `LocalExecutor` (`!Send` work: an actor whose jobs run only on one worker), `Runtime.block(on:)` |
+| **Tasks** | `spawn`, `JoinHandle`, `JoinSet`, `abort`, task-locals, `yield_now`, `spawn_blocking`, `block_in_place` | `Runtime.spawn`, `JoinSet` (unscoped, results in completion order, cancelled when dropped), `TaskPool`, `Runtime.blocking`, `Runtime.blockInPlace`, `Runtime.yield`; task-locals are Swift's `@TaskLocal`, inherited by all of these but `TaskPool` |
 | **Scheduling** | work stealing, LIFO slot, coop budget, runtime metrics | `Vega/Scheduler` |
 | **Time** | sleep, interval, timeout, paused/mock clock | `Vega/Time` + `VegaTest.MockClock` |
 | **Net** | TCP, UDP (incl. multicast), Unix stream/datagram, `socket2`-style options, `NIOPipeBootstrap`, raw sockets, vsock | `Vega/Net` |
@@ -46,7 +46,7 @@ You want a Swift networking engine that **fully replaces SwiftNIO**, has **featu
 | **IO traits/codecs** | `AsyncRead/Write`, `BufReader/Writer`, `copy`, `split`, `Framed`, `LengthDelimited`, `Lines`, `ByteToMessageDecoder`, `MessageToByteEncoder`, `NIOExtras` (line-based, length-field, JSON-RPC framing, PCAP, write-coalescing) | `VegaIO`: `AsyncReader/Writer` protocols, `Framed<Codec>`, standard codecs |
 | **Sync** | `Mutex`, `RwLock`, `Semaphore`, `Notify`, `Barrier`, `oneshot`, `mpsc`, `broadcast`, `watch`, `OnceCell` | `Vega/Sync` |
 | **Process / signal / fs** | `tokio::process`, `tokio::signal`, `tokio::fs`, `NIOFileSystem`, `NIOFileHandle` | `VegaProcess`, `VegaSignal`, `VegaFS` (io_uring/IOCP native; blocking pool on other drivers) |
-| **Streams** | `tokio-stream`, `AsyncSequence` bridging, backpressure | `AsyncSequence` adapters, `NIOAsyncSequenceProducer` equivalent |
+| **Streams** | `tokio-stream`, `AsyncSequence` bridging, backpressure | `AsyncSequence` adapters (`FramedRead.items()`, `Channel.Receiver.values()`); a bounded `Channel` is the `NIOAsyncSequenceProducer` equivalent |
 | **TLS** | `tokio-rustls`, `swift-nio-ssl`, ALPN, SNI, mTLS, session resumption, kTLS | `VegaTLS` (vendored BoringSSL, already in `CAvianSSL`); Network.framework TLS on Apple clients |
 | **HTTP** | `swift-nio-http2`, `NIOHTTP1`, `NIOWebSocket`, `hyper` (h1/h2), `h3` | `VegaHTTP1/2/3`, `VegaWebSocket` (evolved from `AvianHTTP` and `AvianQUIC`) |
 | **Extras** | `NIOExtras` (quiescing, debug handlers), SOCKS, HTTP proxy, compression | `VegaExtras`: `Quiesce` (graceful shutdown), SOCKS5, CONNECT proxy, gzip/brotli/zstd (existing CAvian compress) |
