@@ -43,14 +43,14 @@ You want a Swift networking engine that **fully replaces SwiftNIO**, has **featu
 | **Net** | TCP, UDP (incl. multicast), Unix stream/datagram, `socket2`-style options, `NIOPipeBootstrap`, raw sockets, vsock | `Vega/Net` |
 | **Bootstrap** | `ServerBootstrap`, `ClientBootstrap`, `DatagramBootstrap`, happy eyeballs | `VegaNet.Server/Client` + `HappyEyeballs` |
 | **DNS** | `lookup_host`, NIO resolver | `Resolver` (blocking-pool getaddrinfo, plus an async UDP resolver; reuse Garuda's `Resolver`) |
-| **IO traits/codecs** | `AsyncRead/Write`, `BufReader/Writer`, `copy`, `split`, `Framed`, `LengthDelimited`, `Lines`, `ByteToMessageDecoder`, `MessageToByteEncoder`, `NIOExtras` (line-based, length-field, JSON-RPC framing, PCAP, write-coalescing) | `VegaIO`: `AsyncReader/Writer` protocols, `Framed<Codec>`, standard codecs |
+| **IO traits/codecs** | `AsyncRead/Write`, `BufReader/Writer`, `copy`, `split`, `Framed`, `LengthDelimited`, `Lines`, `ByteToMessageDecoder`, `MessageToByteEncoder`, `NIOExtras` (line-based, length-field, JSON-RPC framing, PCAP, write-coalescing) | `VegaIO`: `AsyncReader/Writer` protocols, `FramedRead/FramedWrite`, `BufferedReader/Writer`, `copy`, `copyBidirectional`, lines, length-delimited and Content-Length (JSON-RPC) codecs |
 | **Sync** | `Mutex`, `RwLock`, `Semaphore`, `Notify`, `Barrier`, `oneshot`, `mpsc`, `broadcast`, `watch`, `OnceCell` | `Vega/Sync` |
 | **Process / signal / fs** | `tokio::process`, `tokio::signal`, `tokio::fs`, `NIOFileSystem`, `NIOFileHandle` | `VegaProcess`, `VegaSignal`, `VegaFS` (io_uring/IOCP native; blocking pool on other drivers) |
 | **Streams** | `tokio-stream`, `AsyncSequence` bridging, backpressure | `AsyncSequence` adapters (`FramedRead.items()`, `Channel.Receiver.values()`); a bounded `Channel` is the `NIOAsyncSequenceProducer` equivalent |
 | **TLS** | `tokio-rustls`, `swift-nio-ssl`, ALPN, SNI, mTLS, session resumption, kTLS | `VegaTLS` (vendored BoringSSL, already in `CAvianSSL`); Network.framework TLS on Apple clients |
-| **HTTP** | `swift-nio-http2`, `NIOHTTP1`, `NIOWebSocket`, `hyper` (h1/h2), `h3` | `VegaHTTP1/2/3`, `VegaWebSocket` (evolved from `AvianHTTP` and `AvianQUIC`) |
+| **HTTP** | `swift-nio-http2`, `NIOHTTP1`, `NIOWebSocket`, `hyper` (h1/h2), `h3` | `VegaHTTP1/2`, `VegaWebSocket`; HTTP/3 as `VegaHTTP3` (frames, QPACK) and `VegaHTTP3Net` (server, client) over `VegaQUIC` (sans-I/O) and `VegaQUICNet` (UDP endpoint) |
 | **Extras** | `NIOExtras` (quiescing, debug handlers), SOCKS, HTTP proxy, compression | `VegaExtras`: `Quiesce` (graceful shutdown), SOCKS5, CONNECT proxy, gzip/brotli/zstd (existing CAvian compress) |
-| **Testing** | `EmbeddedChannel`, `NIOAsyncTestingChannel`, `tokio::test`, `loom`-style checks, paused time | `VegaTest`: deterministic seeded runtime, `MockClock`, in-memory duplex streams, fault-injecting driver |
+| **Testing** | `EmbeddedChannel`, `NIOAsyncTestingChannel`, `tokio::test`, `loom`-style checks, paused time | `VegaTest`: `Runtime.seeded` and `Simulation` (seeded schedules, replayable), `MockClock`, in-memory duplex streams, `FaultyStream` (short reads, split writes, delays, resets) |
 | **Observability** | `tracing`, `tokio-console`, runtime metrics, swift-log/metrics | `VegaMetrics` (lock-free per-worker counters, poll histograms, slow-task detection from `LoopExecutor.onSlowJob`), optional swift-log/metrics adapters in a separate package |
 | **Platforms** | Linux, macOS, Windows, iOS (NIOTS) | the drivers below |
 
