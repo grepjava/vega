@@ -76,6 +76,18 @@ extension PipeReader: AsyncReader {}
 extension PipeWriter: AsyncWriter {}
 #endif
 
+#if os(Linux)
+extension VsockStream {
+    /// `split()`, as `StreamHalves`.
+    public consuming func halves() -> StreamHalves<ReadHalf, WriteHalf> {
+        let split = split()
+        return StreamHalves(reader: split.reader, writer: split.writer)
+    }
+}
+
+extension VsockStream: AsyncReader, AsyncWriter {}
+#endif
+
 /// Read until `buffer` holds `n` bytes or the stream ends; returns the bytes
 /// it holds. Grows the buffer if it can't take `n`.
 public func readAtLeast<R: AsyncReader & ~Copyable>(

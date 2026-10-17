@@ -1611,11 +1611,11 @@ static int prepare_fd(int fd) {
 }
 #endif
 
-static int new_socket(int family, int type) {
+static int new_socket_protocol(int family, int type, int protocol) {
 #if defined(__linux__)
-    return socket(family, type | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    return socket(family, type | SOCK_NONBLOCK | SOCK_CLOEXEC, protocol);
 #else
-    int fd = socket(family, type, 0);
+    int fd = socket(family, type, protocol);
     if (fd >= 0 && prepare_fd(fd) != 0) {
         int e = errno;
         close(fd);
@@ -1625,6 +1625,8 @@ static int new_socket(int family, int type) {
     return fd;
 #endif
 }
+
+static int new_socket(int family, int type) { return new_socket_protocol(family, type, 0); }
 
 static struct addrinfo *resolve(const char *host, int port, int passive, int type, int *err) {
     char service[8];
@@ -1676,7 +1678,7 @@ int cv_connect_new(const cv_sockaddr *addr, int type, int *err) {
         *err = errno;
         return -1;
     }
-    if (type == SOCK_STREAM && sa->sa_family != AF_UNIX) {
+    if (type == SOCK_STREAM && (sa->sa_family == AF_INET || sa->sa_family == AF_INET6)) {
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     }
@@ -2662,6 +2664,54 @@ int cv_unix_pair(int fds[2]) {
     return 0;
 }
 
+int cv_raw_socket(int ipv6, int ping, int protocol, int *err) {
+    int family = ipv6 ? AF_INET6 : AF_INET;
+    int fd = ping ? new_socket_protocol(family, SOCK_DGRAM, ipv6 ? IPPROTO_ICMPV6 : IPPROTO_ICMP)
+                  : new_socket_protocol(family, SOCK_RAW, protocol);
+    if (fd < 0) *err = errno;
+    return fd;
+}
+
+int cv_bind_address(int fd, const cv_sockaddr *a) {
+    return bind(fd, (const struct sockaddr *)a->storage, (socklen_t)a->len) == 0 ? 0 : errno;
+}
+
+int cv_listen_address(const cv_sockaddr *a, int backlog, int *err) {
+    const struct sockaddr *sa = (const struct sockaddr *)a->storage;
+    int fd = new_socket(sa->sa_family, SOCK_STREAM);
+    if (fd < 0) {
+        *err = errno;
+        return -1;
+    }
+    if (bind(fd, sa, (socklen_t)a->len) != 0 || listen(fd, backlog) != 0) {
+        *err = errno;
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+#if defined(__linux__)
+#include <linux/vm_sockets.h>
+
+void cv_vsock_sockaddr(unsigned cid, unsigned port, cv_sockaddr *out) {
+    memset(out, 0, sizeof *out);
+    struct sockaddr_vm *vm = (struct sockaddr_vm *)out->storage;
+    vm->svm_family = AF_VSOCK;
+    vm->svm_cid = cid;
+    vm->svm_port = port;
+    out->len = sizeof *vm;
+}
+
+int cv_vsock_parts(const cv_sockaddr *a, unsigned *cid, unsigned *port) {
+    const struct sockaddr_vm *vm = (const struct sockaddr_vm *)a->storage;
+    if (vm->svm_family != AF_VSOCK) return -1;
+    *cid = vm->svm_cid;
+    *port = vm->svm_port;
+    return 0;
+}
+#endif
+
 #else // _WIN32: the few of those the portable code uses
 
 void cv_random_bytes(void *buf, intptr_t n) {
@@ -2768,6 +2818,7 @@ static int sockopt_name(int opt, int *level, int *name) {
     case CV_OPT_IPV6_V6ONLY: *level = IPPROTO_IPV6; *name = IPV6_V6ONLY; return 0;
     case CV_OPT_IP_TTL: *level = IPPROTO_IP; *name = IP_TTL; return 0;
     case CV_OPT_IP_TOS: *level = IPPROTO_IP; *name = IP_TOS; return 0;
+    case CV_OPT_IP_HDRINCL: *level = IPPROTO_IP; *name = IP_HDRINCL; return 0;
     case CV_OPT_IPV6_UNICAST_HOPS: *level = IPPROTO_IPV6; *name = IPV6_UNICAST_HOPS; return 0;
 #ifdef IPV6_TCLASS
     case CV_OPT_IPV6_TCLASS: *level = IPPROTO_IPV6; *name = IPV6_TCLASS; return 0;
@@ -2788,7 +2839,7 @@ static int is_flag(int opt) {
     switch (opt) {
     case CV_OPT_TCP_NODELAY: case CV_OPT_KEEPALIVE: case CV_OPT_TCP_QUICKACK:
     case CV_OPT_REUSEADDR: case CV_OPT_REUSEPORT: case CV_OPT_BROADCAST: case CV_OPT_TIMESTAMP:
-    case CV_OPT_IPV6_V6ONLY: case CV_OPT_IP_MULTICAST_LOOP: case CV_OPT_IPV6_MULTICAST_LOOP:
+    case CV_OPT_IP_HDRINCL: case CV_OPT_IPV6_V6ONLY: case CV_OPT_IP_MULTICAST_LOOP: case CV_OPT_IPV6_MULTICAST_LOOP:
         return 1;
     default:
         return 0;

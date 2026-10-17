@@ -458,7 +458,7 @@ int cv_input_waiting(int fd);
 /// backlog < 0 binds without listening (to hold a port for SO_REUSEPORT
 /// listeners elsewhere).
 int cv_tcp_listen(const char *host, int port, int backlog, int reuse_port, int *err);
-/// Start a connect to one address on a new socket of `type` (SOCK_STREAM gets
+/// Start a connect to one address on a new socket of `type` (a TCP one gets
 /// TCP_NODELAY). Returns the fd; *err is 0 when connected already,
 /// EINPROGRESS when the caller must wait for writability, else the failure
 /// (and -1). A datagram connect only records the peer and never waits.
@@ -521,6 +521,23 @@ int cv_unix_dgram_bind(const char *path, int *err);
 int cv_unix_dgram_pair(int fds[2]);
 /// A Unix socket address for path. 0, or an errno value (ENAMETOOLONG).
 int cv_unix_sockaddr(const char *path, cv_sockaddr *out);
+/// An IPv4 (IPv6 if `ipv6`) raw socket: SOCK_RAW of `protocol` (an IPPROTO_
+/// number), or with `ping` an ICMP datagram socket (SOCK_DGRAM of
+/// IPPROTO_ICMP or IPPROTO_ICMPV6), which needs no privilege where the
+/// system allows it. -1 with *err (EPERM or EACCES without the privilege).
+/// POSIX only.
+int cv_raw_socket(int ipv6, int ping, int protocol, int *err);
+/// bind(2) to an address of any family. 0 or an errno value. POSIX only.
+int cv_bind_address(int fd, const cv_sockaddr *a);
+/// A listening stream socket bound to `a`, of any family (vsock). -1 with
+/// *err. POSIX only.
+int cv_listen_address(const cv_sockaddr *a, int backlog, int *err);
+#if defined(__linux__)
+/// A vsock address (AF_VSOCK, Linux).
+void cv_vsock_sockaddr(unsigned cid, unsigned port, cv_sockaddr *out);
+/// The context id and port of a vsock address: 0, or -1 for another family.
+int cv_vsock_parts(const cv_sockaddr *a, unsigned *cid, unsigned *port);
+#endif
 
 // ---- socket options ------------------------------------------------------
 // Portable option ids, mapped to each platform's level and name in cvega.c.
@@ -551,6 +568,7 @@ enum {
     CV_OPT_UDP_GRO,        // receive coalesced datagrams (Linux)
     CV_OPT_LINGER,         // seconds; -1 is off
     CV_OPT_TIMESTAMP,      // SO_TIMESTAMP: reads can say when their bytes arrived
+    CV_OPT_IP_HDRINCL,     // raw IPv4 socket: sends carry their own IP header
 };
 /// 0 or an errno value.
 int cv_sockopt_set(int fd, int opt, int value);

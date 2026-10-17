@@ -129,10 +129,11 @@ Linux is the primary target; macOS 26.4 and newer and Windows (x64, Swift
 Tokio's mio does, `sendFile` by `TransmitFile`, files, processes, TLS,
 HTTP/1, HTTP/2, HTTP/3 and QUIC, WebSocket with permessage-deflate, and gzip
 and deflate on a vendored zlib. What Windows lacks: `Runtime.sharded` (it
-needs `fork`), brotli and zstd, Unix datagram sockets (Windows has none), and
-arrival timestamps on reads. A cancelled or timed-out `sendFile` there aborts
-the connection, since Winsock can't say how much of a cancelled send went.
-See docs/PLAN.md for the driver. Linux builds also work through WSL:
+needs `fork`), brotli and zstd, Unix datagram sockets (Windows has none),
+raw sockets, vsock, and arrival timestamps on reads. A cancelled or timed-out
+`sendFile` there aborts the connection, since Winsock can't say how much of a
+cancelled send went. See docs/PLAN.md for the driver. Linux builds also work
+through WSL:
 
 ```sh
 swift build --scratch-path ~/.cache/vega-build

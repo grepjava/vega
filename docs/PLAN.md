@@ -40,7 +40,7 @@ You want a Swift networking engine that **fully replaces SwiftNIO**, has **featu
 | **Tasks** | `spawn`, `JoinHandle`, `JoinSet`, `abort`, task-locals, `yield_now`, `spawn_blocking`, `block_in_place` | `Runtime.spawn`, `JoinSet` (unscoped, results in completion order, cancelled when dropped), `TaskPool`, `Runtime.blocking`, `Runtime.blockInPlace`, `Runtime.yield`; task-locals are Swift's `@TaskLocal`, inherited by all of these but `TaskPool` |
 | **Scheduling** | work stealing, LIFO slot, coop budget, runtime metrics | `Vega/Scheduler` |
 | **Time** | sleep, interval, timeout, paused/mock clock | `Vega/Time` + `VegaTest.MockClock` |
-| **Net** | TCP, UDP (incl. multicast), Unix stream/datagram, `socket2`-style options, `NIOPipeBootstrap`, raw sockets, vsock | `Vega/Net` |
+| **Net** | TCP, UDP (incl. multicast), Unix stream/datagram, `socket2`-style options, `NIOPipeBootstrap`, raw sockets, vsock | `Vega/Net`: `RawSocket` (SOCK_RAW and the unprivileged ICMP ping socket; Linux, Darwin), `VsockListener`/`VsockStream` (Linux) |
 | **Bootstrap** | `ServerBootstrap`, `ClientBootstrap`, `DatagramBootstrap`, happy eyeballs | `VegaNet.Server/Client` + `HappyEyeballs` |
 | **DNS** | `lookup_host`, NIO resolver | `Resolver` (blocking-pool getaddrinfo, plus an async UDP resolver; reuse Garuda's `Resolver`) |
 | **IO traits/codecs** | `AsyncRead/Write`, `BufReader/Writer`, `copy`, `split`, `Framed`, `LengthDelimited`, `Lines`, `ByteToMessageDecoder`, `MessageToByteEncoder`, `NIOExtras` (line-based, length-field, JSON-RPC framing, PCAP, write-coalescing) | `VegaIO`: `AsyncReader/Writer` protocols, `FramedRead/FramedWrite`, `BufferedReader/Writer`, `copy`, `copyBidirectional`, lines, length-delimited and Content-Length (JSON-RPC) codecs |
@@ -128,7 +128,7 @@ It stays off because it measured no better. Loopback on the development machine 
 
 Every difference is inside the run-to-run spread (6–29%). With no gain to show, readiness keeps what it has over pending requests: no buffer pinned per idle connection, and one code path with Linux and macOS.
 
-Not on Windows: `Runtime.sharded` (it needs `fork`); brotli and zstd (gzip and deflate are on zlib 1.3.1, vendored as `CVegaZlib` because the Windows SDK has none); Unix datagram sockets (Windows' Unix sockets are streams only); arrival timestamps on reads.
+Not on Windows: `Runtime.sharded` (it needs `fork`); brotli and zstd (gzip and deflate are on zlib 1.3.1, vendored as `CVegaZlib` because the Windows SDK has none); Unix datagram sockets (Windows' Unix sockets are streams only); raw sockets and vsock; arrival timestamps on reads.
 
 **The `network` driver, as built (v0.3).** TCP only. In a runtime with `IOBackend.network`, `TCPStream` and `TCPListener` run over `NWConnection` and `NWListener`, and kqueue stays for UDP, Unix sockets, pipes and processes. Measured costs are in [BENCHMARKS.md](BENCHMARKS.md). The gaps:
 

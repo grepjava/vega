@@ -18,7 +18,8 @@ let socketStream = SOCK_STREAM
 let socketDatagram = SOCK_DGRAM
 #endif
 
-/// An IPv4, IPv6 or Unix socket address. Plain bytes: copying it is free.
+/// An IPv4, IPv6, Unix or (Linux) vsock socket address. Plain bytes:
+/// copying it is free.
 public struct SocketAddress: Sendable, Hashable, CustomStringConvertible {
     var raw: cv_sockaddr
 
@@ -102,8 +103,11 @@ public struct SocketAddress: Sendable, Hashable, CustomStringConvertible {
 
     public var isIPv6: Bool { withUnsafePointer(to: raw) { cv_sockaddr_family($0) } == AF_INET6 }
 
-    /// `1.2.3.4:80`, `[::1]:80`, or a Unix path.
+    /// `1.2.3.4:80`, `[::1]:80`, a Unix path, or `vsock:3:1234`.
     public var description: String {
+        #if os(Linux)
+        if let vsock { return vsock.description }
+        #endif
         guard let port else { return host }
         return isIPv6 ? "[\(host)]:\(port)" : "\(host):\(port)"
     }

@@ -70,6 +70,10 @@ public struct SocketOption: Sendable, Hashable {
     /// `read(into:arrival:)` to say when its bytes arrived. Set on a
     /// listener, the connections it accepts have it too (Linux, Darwin).
     public static let receiveTimestamps = SocketOption(CV_OPT_TIMESTAMP)
+    /// IP_HDRINCL on a raw IPv4 socket (`RawSocket`): what it sends begins
+    /// with the IP header, which the program writes, instead of the kernel
+    /// (Linux, Darwin).
+    public static let headerIncluded = SocketOption(CV_OPT_IP_HDRINCL)
 }
 
 /// A Vega socket: options, and the OS handle for anything Vega doesn't wrap.
@@ -152,6 +156,13 @@ extension UnixDatagram: SocketHandle { public var fileDescriptor: Int32 { reg.fd
 #endif
 extension ReadHalf: SocketHandle { public var fileDescriptor: Int32 { reg.fd } }
 extension WriteHalf: SocketHandle { public var fileDescriptor: Int32 { reg.fd } }
+#if os(Linux) || canImport(Darwin)
+extension RawSocket: SocketHandle { public var fileDescriptor: Int32 { reg.fd } }
+#endif
+#if os(Linux)
+extension VsockListener: SocketHandle { public var fileDescriptor: Int32 { reg.fd } }
+extension VsockStream: SocketHandle { public var fileDescriptor: Int32 { reg.fd } }
+#endif
 
 /// A stream that can say, without reading or waiting, whether a read would
 /// return at once: bytes waiting, end of stream, or an error. For a pool
@@ -164,4 +175,7 @@ public protocol PendingInputProbing: ~Copyable {
 extension TCPStream: PendingInputProbing { public var hasPendingInput: Bool { reg.hasPendingInput } }
 extension UnixStream: PendingInputProbing { public var hasPendingInput: Bool { reg.hasPendingInput } }
 extension ReadHalf: PendingInputProbing { public var hasPendingInput: Bool { reg.hasPendingInput } }
+#if os(Linux)
+extension VsockStream: PendingInputProbing { public var hasPendingInput: Bool { reg.hasPendingInput } }
+#endif
 #endif
