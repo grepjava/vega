@@ -525,6 +525,11 @@ private let validRequest = [(":method", "GET"), (":scheme", "http"), (":path", "
             ([.init(streamID: 0, payload: .settings([(.maxFrameSize, 100)]))], .protocolError),
             ([.init(streamID: 0, payload: .settings([(.initialWindowSize, 0x8000_0000)]))], .flowControlError),
             ([.init(streamID: 1, payload: .pushPromise(promisedStreamID: 2, [], endHeaders: true))], .protocolError),
+            // A stream below one already opened, never itself opened
+            // (section 5.1.1).
+            ([.init(streamID: 5, payload: .headers(headerBlock(validRequest), endStream: true, endHeaders: true)),
+              .init(streamID: 3, payload: .headers(headerBlock(validRequest), endStream: true, endHeaders: true))],
+             .protocolError),
         ]
         for (frames, expected) in cases {
             let code = try raw { peer in
@@ -532,6 +537,42 @@ private let validRequest = [(":method", "GET"), (":scheme", "http"), (":path", "
                 return goawayCode(try await peer.next(where: isGoaway))
             }
             #expect(code == expected, "\(frames)")
+        }
+    }
+
+    /// HEADERS on a stream that has closed is a connection error (section
+    /// 5.1), as h2spec checks.
+    @Test func headersOnAClosedStream() throws {
+        let code = try raw { peer -> HTTP2ErrorCode? in
+            try await peer.send([.init(streamID: 0, payload: .settings([])),
+                                 .init(streamID: 1, payload: .headers(headerBlock(validRequest), endStream: true, endHeaders: true))],
+                                preface: true)
+            _ = try await peer.next { f in
+                if case .data(_, true, _) = f.payload { return f.streamID == 1 }
+                return false
+            }
+            try await peer.send([.init(streamID: 1, payload: .headers(headerBlock(validRequest), endStream: true, endHeaders: true))])
+            return goawayCode(try await peer.next(where: isGoaway))
+        }
+        #expect(code == .streamClosed)
+    }
+
+    /// A stream can't depend on itself, in HEADERS or PRIORITY (section
+    /// 5.3.1).
+    @Test func selfDependency() throws {
+        // A PRIORITY frame on stream 1 naming stream 1, then a HEADERS frame
+        // with the PRIORITY flag doing the same.
+        let priority: [UInt8] = [0, 0, 5, 0x2, 0, 0, 0, 0, 1, 0, 0, 0, 1, 16]
+        let block = headerBlock(validRequest)
+        let headers: [UInt8] = [UInt8(truncatingIfNeeded: (block.count + 5) >> 16), UInt8(truncatingIfNeeded: (block.count + 5) >> 8),
+                                UInt8(truncatingIfNeeded: block.count + 5), 0x1, 0x25, 0, 0, 0, 3, 0, 0, 0, 3, 16] + block
+        for bytes in [priority, headers] {
+            let code = try raw { peer -> HTTP2ErrorCode? in
+                try await peer.send([.init(streamID: 0, payload: .settings([]))], preface: true)
+                try await peer.sendBytes(bytes)
+                return goawayCode(try await peer.next(where: isGoaway))
+            }
+            #expect(code == .protocolError)
         }
     }
 

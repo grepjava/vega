@@ -156,12 +156,15 @@ public struct HTTP2FrameCodec: Decoder, Encoder, Sendable {
             var block = try unpadded(p)
             if flags & 0x20 != 0 {
                 guard block.count >= 5 else { throw FrameError(code: .frameSizeError) }
+                // A stream can't depend on itself (RFC 9113 section 5.3.1).
+                guard u32(block, 0) & 0x7FFF_FFFF != stream else { throw FrameError(code: .protocolError) }
                 block = UnsafeRawBufferPointer(rebasing: block[5...])
             }
             return .headers(Array(block), endStream: endStream, endHeaders: endHeaders)
         case 0x2:
             guard stream != 0 else { throw FrameError(code: .protocolError) }
             guard p.count == 5 else { throw FrameError(code: .frameSizeError) }
+            guard u32(p, 0) & 0x7FFF_FFFF != stream else { throw FrameError(code: .protocolError) }
             return .priority
         case 0x3:
             guard stream != 0 else { throw FrameError(code: .protocolError) }

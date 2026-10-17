@@ -96,6 +96,11 @@ struct H2Core {
     private var sendOrder: [UInt32] = []
     /// The highest stream the peer opened.
     private(set) var highestPeerStream: UInt32 = 0
+    /// The peer's recent streams, and those of them this end reset: what a
+    /// HEADERS frame on a stream below `highestPeerStream` was (RFC 9113
+    /// section 5.1). Bounded: the oldest are forgotten.
+    private var recentPeerStreams = RecentStreams()
+    private var resetPeerStreams = RecentStreams()
     private var nextLocalStream: UInt32
     private var sendWindow = HTTP2Frame.defaultWindowSize
     private var recvWindow = HTTP2Frame.defaultWindowSize
@@ -329,10 +334,18 @@ struct H2Core {
             return []
         }
         guard id > highestPeerStream else {
-            reset(id, .streamClosed, into: &out)
-            return []
+            // One this end reset may still have frames in flight: reset it
+            // again. One that closed normally is a connection error
+            // (section 5.1), and so is one never opened, which a higher
+            // stream implicitly closed (section 5.1.1).
+            if resetPeerStreams.contains(id) {
+                reset(id, .streamClosed, into: &out)
+                return []
+            }
+            throw ConnectionError(code: recentPeerStreams.contains(id) ? .streamClosed : .protocolError)
         }
         highestPeerStream = id
+        recentPeerStreams.insert(id)
         if goawaySent || streams.count >= config.maxConcurrentStreams {
             reset(id, .refusedStream, into: &out)
             return []
@@ -566,6 +579,7 @@ struct H2Core {
     /// Reset a stream: RST_STREAM, and forget it.
     mutating func reset(_ id: UInt32, _ code: HTTP2ErrorCode, into out: inout IOBuffer) {
         streams[id] = nil
+        if (id % 2 == 1) == isServer { resetPeerStreams.insert(id) }
         HTTP2Frame(streamID: id, payload: .rstStream(code)).write(into: &out)
     }
 
@@ -582,4 +596,22 @@ struct H2Core {
         }
         return block.bytes
     }
+}
+
+/// The last few hundred stream IDs, for telling apart what a late frame on
+/// a stream refers to.
+struct RecentStreams {
+    private var ring = [UInt32](repeating: 0, count: 256)
+    private var set: Set<UInt32> = []
+    private var next = 0
+
+    mutating func insert(_ id: UInt32) {
+        guard set.insert(id).inserted else { return }
+        let old = ring[next]
+        if old != 0 { set.remove(old) }
+        ring[next] = id
+        next = (next + 1) % ring.count
+    }
+
+    func contains(_ id: UInt32) -> Bool { set.contains(id) }
 }
