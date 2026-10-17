@@ -1,3 +1,5 @@
+// VegaCrypto's platforms and traits only: QUIC's TLS 1.3 is built on it.
+#if (os(Linux) || os(macOS) || os(Windows)) && (OpenSSL || BoringSSL)
 //===----------------------------------------------------------------------===//
 // RFC 9001 appendix A, the RFC's own bytes: the Initial keys of both sides,
 // a client Initial (A.2) and a server Initial (A.3), sealed here and opened
@@ -171,3 +173,4 @@ func rfcServerInitial() throws {
     #expect(result.packetNumber == 1)
     #expect([UInt8](UnsafeBufferPointer(start: result.payload, count: result.payloadLength)) == rfcServerPayload)
 }
+#endif

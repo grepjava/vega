@@ -1,3 +1,5 @@
+// VegaCrypto's platforms and traits only: QUIC's TLS 1.3 is built on it.
+#if (os(Linux) || os(macOS) || os(Windows)) && (OpenSSL || BoringSSL)
 //===----------------------------------------------------------------------===//
 // A QUIC connection.
 //
@@ -1298,3 +1300,4 @@ public final class QUICConnection {
         return nowMs > lastActivityMs + max(idleTimeoutMs, floor)
     }
 }
+#endif

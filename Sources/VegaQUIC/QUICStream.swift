@@ -1,3 +1,5 @@
+// VegaCrypto's platforms and traits only: QUIC's TLS 1.3 is built on it.
+#if (os(Linux) || os(macOS) || os(Windows)) && (OpenSSL || BoringSSL)
 //===----------------------------------------------------------------------===//
 // QUIC streams.
 //
@@ -389,3 +391,4 @@ public final class QUICStream {
         send.destroy()
     }
 }
+#endif

@@ -233,10 +233,11 @@ import Testing
             let a = shard.sharedRegion(0), b = shard.sharedRegion(1)
             sizes = [a.count, b.count]
             zeroed = b.allSatisfy { $0 == 0 }
-            // A process forked from here, as a shard is, writes; this one
-            // sees it.
+            // A process forked from here, as a shard is (Darwin's Swift
+            // overlay has no fork()), writes; this one sees it.
             let slot = b.baseAddress!.advanced(by: 65536).assumingMemoryBound(to: UInt64.self)
-            let pid = fork()
+            let pid = cv_supervisor_fork()
+            guard pid >= 0 else { return }
             if pid == 0 {
                 slot.pointee = 0x5EED
                 _exit(0)

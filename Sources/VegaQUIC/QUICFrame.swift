@@ -1,3 +1,5 @@
+// VegaCrypto's platforms and traits only: QUIC's TLS 1.3 is built on it.
+#if (os(Linux) || os(macOS) || os(Windows)) && (OpenSSL || BoringSSL)
 //===----------------------------------------------------------------------===//
 // QUIC frames.
 //
@@ -280,3 +282,4 @@ public func quicReadAckFrame(_ r: inout QUICReader, hasECN: Bool,
     }
     return delay
 }
+#endif

@@ -1,3 +1,5 @@
+// VegaCrypto's platforms and traits only: QUIC's TLS 1.3 is built on it.
+#if (os(Linux) || os(macOS) || os(Windows)) && (OpenSSL || BoringSSL)
 //===----------------------------------------------------------------------===//
 // Paths other than the one the connection sends on (RFC 9000 sections 8.2
 // and 9).
@@ -236,3 +238,4 @@ extension QUICConnection {
         return sealed
     }
 }
+#endif

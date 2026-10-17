@@ -1,3 +1,5 @@
+// VegaCrypto's platforms and traits only: QUIC's TLS 1.3 is built on it.
+#if (os(Linux) || os(macOS) || os(Windows)) && (OpenSSL || BoringSSL)
 //===----------------------------------------------------------------------===//
 // A whole connection, in process: a QUICConnection serving the tests' own
 // client (Tests/QUICTestPeer), from the first Initial through the TLS 1.3
@@ -180,3 +182,4 @@ func quicRetiredStreamFramesAreIgnored() throws {
         #expect(server.takeEvents().contains { $0.kind == .streamReadable && $0.streamID == id })
     }
 }
+#endif

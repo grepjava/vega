@@ -1,3 +1,5 @@
+// VegaCrypto's platforms and traits only: QUIC's TLS 1.3 is built on it.
+#if (os(Linux) || os(macOS) || os(Windows)) && (OpenSSL || BoringSSL)
 //===----------------------------------------------------------------------===//
 // QUIC variable-length integers, and the bounds-checked reader built on them.
 //
@@ -265,3 +267,4 @@ public func quicWriteUInt64BE(_ value: UInt64, _ p: UnsafeMutablePointer<UInt8>)
         i &+= 1
     }
 }
+#endif

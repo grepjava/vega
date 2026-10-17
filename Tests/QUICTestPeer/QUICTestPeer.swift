@@ -1,3 +1,5 @@
+// VegaCrypto's platforms and traits only: QUIC's TLS 1.3 is built on it.
+#if (os(Linux) || os(macOS) || os(Windows)) && (OpenSSL || BoringSSL)
 //===----------------------------------------------------------------------===//
 // A QUIC v1 client with exactly what the tests need, for VegaQUICTests and
 // the servers built on VegaQUIC alike.
@@ -437,3 +439,4 @@ public final class QUICTestPeer {
         finishedMessage = [20] + hsU24(verify.count) + verify
     }
 }
+#endif

@@ -1,3 +1,5 @@
+// VegaCrypto's platforms and traits only: QUIC's TLS 1.3 is built on it.
+#if (os(Linux) || os(macOS) || os(Windows)) && (OpenSSL || BoringSSL)
 //===----------------------------------------------------------------------===//
 // The parts of QUIC that are about bookkeeping rather than bytes on the wire:
 // what an acknowledgement means for what is still owed, what a receiver is
@@ -330,3 +332,4 @@ func keyPhaseClearIsReadable() throws {
     let un = try #require(unprotected)
     #expect(un.keyPhase == false)
 }
+#endif
