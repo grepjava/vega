@@ -139,3 +139,10 @@ public struct RuntimeMetrics: Sendable, Equatable {
         return d
     }
 }
+
+/// A job that ran `Runtime.slowPollThreshold` or longer: which worker it
+/// held, and for how long (`Runtime.onSlowPoll`).
+public struct SlowPoll: Sendable, Equatable {
+    public var worker: Int
+    public var duration: Duration
+}

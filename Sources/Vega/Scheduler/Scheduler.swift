@@ -58,6 +58,9 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     /// poll time counted as slow. Read on every job; written rarely.
     let pollTiming = Atomic<Bool>(false)
     let slowPollNanos = Atomic<UInt64>(UInt64.max)
+    /// `Runtime.onSlowPoll`: read only on a slow poll's path.
+    let slowPollLock = RawLock()
+    nonisolated(unsafe) var slowPollHandler: (@Sendable (SlowPoll) -> Void)?
     /// When the runtime started (cv_now_ns), for metrics.
     let startedAt = cv_now_ns()
     /// How many physical cores the workers run on (`Runtime.coreCount`).

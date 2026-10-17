@@ -376,6 +376,15 @@ extension Runtime {
         }
     }
 
+    /// Called on the worker, right after a job that ran `slowPollThreshold`
+    /// or longer (with `measurePollTimes` on): the place to log it, or count
+    /// it in your own metrics, as tokio-console flags a task that blocked
+    /// its worker. Keep it quick: it runs before the worker's next job.
+    public var onSlowPoll: (@Sendable (SlowPoll) -> Void)? {
+        get { scheduler.slowPollLock.withLock { scheduler.slowPollHandler } }
+        set { scheduler.slowPollLock.withLock { scheduler.slowPollHandler = newValue } }
+    }
+
     /// Enqueues since start: timed ones (sleeps and timeouts, and on Linux
     /// `Task.sleep` too), and ones from threads outside the runtime.
     public var enqueueCounts: (timed: UInt64, foreign: UInt64) {

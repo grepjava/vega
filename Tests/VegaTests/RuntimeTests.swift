@@ -249,3 +249,32 @@ func spin(microseconds: UInt64) {
         #expect(done == rounds)
     }
 }
+
+@Suite("Runtime.onSlowPoll")
+struct SlowPollTests {
+    @Test func reportsAJobThatHeldItsWorker() throws {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let seen = SlowSeen()
+        rt.measurePollTimes = true
+        rt.slowPollThreshold = .milliseconds(20)
+        rt.onSlowPoll = { poll in seen.add(poll) }
+        rt.block {
+            await rt.spawn {
+                // Blocks the worker for 50 ms without suspending.
+                let start = ContinuousClock.now
+                while ContinuousClock.now - start < .milliseconds(50) {}
+            }.value
+            await rt.spawn {}.value
+        }
+        let polls = seen.all
+        #expect(polls.count == 1)
+        #expect(polls.first.map { $0.duration >= .milliseconds(50) } == true)
+    }
+}
+
+private final class SlowSeen: Sendable {
+    private let polls = Mutex<[SlowPoll]>([])
+    func add(_ p: SlowPoll) { polls.withLock { $0.append(p) } }
+    var all: [SlowPoll] { polls.withLock { $0 } }
+}

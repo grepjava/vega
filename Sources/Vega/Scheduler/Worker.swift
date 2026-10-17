@@ -165,6 +165,9 @@ final class Worker: @unchecked Sendable {
         if ns > longestPoll.load(ordering: .relaxed) { longestPoll.store(ns, ordering: .relaxed) }
         if ns >= s.slowPollNanos.load(ordering: .relaxed) {
             slowPolls.store(slowPolls.load(ordering: .relaxed) &+ 1, ordering: .relaxed)
+            if let handler = s.slowPollLock.withLock({ s.slowPollHandler }) {
+                handler(SlowPoll(worker: index, duration: .nanoseconds(Int64(clamping: ns))))
+            }
         }
     }
 
