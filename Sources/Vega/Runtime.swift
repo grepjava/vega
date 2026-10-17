@@ -65,6 +65,27 @@ public final class Runtime: Sendable {
                                      blockingThreads: blockingThreads, blockingKeepAlive: blockingKeepAlive))
     }
 
+    /// A current-thread runtime that runs its tasks in an order drawn from
+    /// `seed`, for tests: each time it picks the next job, it picks at
+    /// random among all those ready, not the oldest. Its clock is paused
+    /// and moves on by itself when everything waits on a timer, as
+    /// `MockClock` does.
+    ///
+    /// The same seed gives the same interleaving of the tasks, as long as
+    /// what wakes them is in the runtime: its timers, its sync primitives,
+    /// VegaTest's in-memory streams. Real I/O, `blocking` threads and other
+    /// threads wake them when they happen to. VegaTest's `Simulation` runs
+    /// a test under many seeds, and names the one that fails.
+    public static func seeded(_ seed: UInt64, name: String = "vega-seeded") -> Runtime {
+        let rt = Runtime(scheduler: Scheduler(workers: 1, name: name, pin: false, io: .readiness, currentThread: true,
+                                              seed: seed))
+        rt.pauseClock(autoAdvance: true)
+        return rt
+    }
+
+    /// The seed of a ``seeded(_:name:)`` runtime.
+    public var seed: UInt64? { scheduler.seed }
+
     init(scheduler: Scheduler) {
         self.scheduler = scheduler
     }

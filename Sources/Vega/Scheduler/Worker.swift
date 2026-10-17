@@ -375,6 +375,7 @@ final class Worker: @unchecked Sendable {
     func drive() {
         cv_current_set(Unmanaged.passUnretained(self).toOpaque())
         let s = scheduler.unsafelyUnwrapped
+        if let seed = s.seed { return driveSeeded(s, seed) }
         let executor = s.asUnownedTaskExecutor()
         activeSince.store(cv_now_coarse_ns(), ordering: .relaxed)
         while !s.isShutdown.load(ordering: .relaxed) && !driveDone.load(ordering: .acquiring) {
@@ -391,6 +392,65 @@ final class Worker: @unchecked Sendable {
         activeSince.store(0, ordering: .relaxed)
         driveDone.store(false, ordering: .relaxed)
         cv_current_set(nil)
+    }
+
+    // MARK: seeded
+
+    /// A seeded runtime's state, kept across `block` calls.
+    private var seededRandom: UInt64 = 0
+    private var seededStarted = false
+    private var seededReady: [UnownedJob] = []
+
+    /// SplitMix64: a small generator whose sequence the seed fixes.
+    private func seededNext() -> UInt64 {
+        seededRandom &+= 0x9E37_79B9_7F4A_7C15
+        var z = seededRandom
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
+
+    /// `drive`, for a seeded runtime: every job ready is gathered, and the
+    /// next one run is drawn at random.
+    private func driveSeeded(_ s: Scheduler, _ seed: UInt64) {
+        if !seededStarted {
+            seededStarted = true
+            seededRandom = seed
+        }
+        let executor = s.asUnownedTaskExecutor()
+        activeSince.store(cv_now_coarse_ns(), ordering: .relaxed)
+        while !s.isShutdown.load(ordering: .relaxed) && !driveDone.load(ordering: .acquiring) {
+            if pinnedCount.load(ordering: .relaxed) != 0 { runPinned(s, executor) }
+            _ = s.fireDueTimers(on: self)
+            _ = s.pollIO(on: self)
+            gatherReady(s)
+            if seededReady.isEmpty {
+                if pinnedCount.load(ordering: .relaxed) == 0 { parkCounted(s) }
+                continue
+            }
+            let i = Int(seededNext() % UInt64(seededReady.count))
+            seededReady.swapAt(i, seededReady.count - 1)
+            runJob(seededReady.removeLast(), s, executor)
+        }
+        let since = activeSince.load(ordering: .relaxed)
+        busyNanos.store(busyNanos.load(ordering: .relaxed) &+ (cv_now_coarse_ns() &- since), ordering: .relaxed)
+        activeSince.store(0, ordering: .relaxed)
+        driveDone.store(false, ordering: .relaxed)
+        cv_current_set(nil)
+    }
+
+    /// Everything ready, from the LIFO slot and both queues, into
+    /// `seededReady`, in the order it was made ready.
+    private func gatherReady(_ s: Scheduler) {
+        while true {
+            while let job = queue.pop() { seededReady.append(job) }
+            if let job = lifo {
+                lifo = nil
+                seededReady.append(job)
+            }
+            guard let job = s.inject.popBatch(into: queue, workers: 1) else { return }
+            seededReady.append(job)
+        }
     }
 
     @inline(__always) private static func run(_ job: UnownedJob, _ executor: UnownedTaskExecutor?,

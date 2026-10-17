@@ -39,6 +39,9 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     /// A current-thread runtime: one worker and no thread of its own; the
     /// thread in `Runtime.block` runs its loop.
     let isCurrentThread: Bool
+    /// A seeded runtime (`Runtime.seeded`): its one worker runs the jobs
+    /// ready in an order drawn from this seed.
+    let seed: UInt64?
     /// The process's global executor (`Runtime.installGlobal`, a shard's
     /// runtime): its workers run jobs as Swift's global executor does, on
     /// the generic executor, and the tasks it starts carry no executor
@@ -96,11 +99,13 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     /// `cpus`: with `pin`, worker i goes on `cpus[i % cpus.count]` (default:
     /// the i-th CPU the process may run on).
     init(workers count: Int, name: String, pin: Bool, cpus cpuList: [Int]? = nil, io: IOBackend = .automatic,
-         currentThread: Bool = false, global: Bool = false, idleSpin: Duration? = nil,
+         currentThread: Bool = false, seed: UInt64? = nil, global: Bool = false, idleSpin: Duration? = nil,
          blockingThreads: Int = 512, blockingQueue: Int? = nil, blockingKeepAlive: Duration = .seconds(10)) {
         precondition(count >= 1, "a runtime needs at least one worker")
         precondition(!currentThread || count == 1, "a current-thread runtime has one worker")
+        precondition(seed == nil || currentThread, "only a current-thread runtime is seeded")
         isCurrentThread = currentThread
+        self.seed = seed
         runsGlobal = global
         socketCount.initialize(to: 0)
         idle = Idle(workers: count)
