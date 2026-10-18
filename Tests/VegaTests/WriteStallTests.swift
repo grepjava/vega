@@ -61,7 +61,9 @@ struct WriteStallTests {
     /// A peer that keeps reading keeps the write going past the limit. The
     /// writer goes on for several times the limit rather than for a fixed
     /// size: Windows' loopback buffers tens of megabytes, enough to take any
-    /// one write whole before the limit is up.
+    /// one write whole before the limit is up. The limit leaves room for
+    /// a loaded machine: on Network.framework (iOS) a write goes in 64 KiB
+    /// slices, and a busy simulator took one past 60 ms.
     @Test func aSlowReaderIsNotAStall() throws {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
@@ -85,8 +87,8 @@ struct WriteStallTests {
             var sent = 0
             let outcome: String
             do throws(IOError) {
-                try await Runtime.withWriteStallTimeout(.milliseconds(60)) { () async throws(IOError) in
-                    while (cv_now_ns() - started) / 1_000_000 < 300 && sent < 1 << 30 {
+                try await Runtime.withWriteStallTimeout(.milliseconds(200)) { () async throws(IOError) in
+                    while (cv_now_ns() - started) / 1_000_000 < 800 && sent < 1 << 30 {
                         try await server.write(chunk)
                         sent += chunk.count
                     }
