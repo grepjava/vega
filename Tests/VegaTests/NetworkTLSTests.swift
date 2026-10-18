@@ -5,39 +5,44 @@ import Security
 import Testing
 @testable import Vega
 
-// A self-signed P-256 certificate for "localhost" and 127.0.0.1, valid to
-// 2036, and its key, as PKCS #12 (passphrase "vega", 3DES and SHA-1, which
-// every Apple OS imports): made with OpenSSL, `req -x509 -newkey ec` then
-// `pkcs12 -export -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1`.
+// A self-signed P-256 certificate for "localhost" and 127.0.0.1 and its
+// key, as PKCS #12 (passphrase "vega"), from ci/network-tls-identity.sh.
+// Apple refuses a TLS certificate valid for more than 825 days, even as an
+// anchor, so this one runs out: renew it with that script before
+// `identityExpires`, which `theIdentityIsNotAboutToExpire` watches.
+private let identityExpires = "Jan 15 06:22:11 2029 GMT"
+
 private let identityP12 = """
-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
+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
+5wICCAA=
 """
 
 private let certificateDER = """
-MIIBpzCCAU2gAwIBAgIUabp/zRkrb7/a6xhxb4uaEze/4kcwCgYIKoZIzj0EAwIwFDESMBAGA1UE
-AwwJbG9jYWxob3N0MB4XDTI2MTAxODA2MDIxM1oXDTM2MTAxNTA2MDIxM1owFDESMBAGA1UEAwwJ
-bG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjH1qvJyWi1kuPI4CvRmtHRDLc+bO
-JGGl3iPBUbVtH85TVJ88UIYl/f7++K1W5cwYsv/6J1uNGyg/Z6tOzz6QNaN9MHswHQYDVR0OBBYE
-FGewDj7EI0+OeAiec7wv1bQ6n/7nMBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcEfwAAATAdBgNVHSUE
-FjAUBggrBgEFBQcDAQYIKwYBBQUHAwIwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAoQw
-CgYIKoZIzj0EAwIDSAAwRQIgUdKfN8I5bjgOBOgJRJK5/0SChhpChac9IzkRV4J9encCIQDjOxTw
-fGNE5BWLjYBgQ4cYWpZyex8qlrq/LWGH49i3cA==
+MIIByzCCAXCgAwIBAgIUX4VyTcQnkaha7t2KHHhfQYCs8u8wCgYIKoZIzj0EAwIwFDESMBAGA1UE
+AwwJbG9jYWxob3N0MB4XDTI2MTAxODA2MjIxMVoXDTI5MDExNTA2MjIxMVowFDESMBAGA1UEAwwJ
+bG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE+gCXL3bdw92d7fvBQ4JQ4IW5MyrM
+pBWZnR1GJA+KdUSJJMGZ0OiNOo78CGest24wI90P7InxCLlryfGsR5G1NaOBnzCBnDAdBgNVHQ4E
+FgQUmMY4wDMkC/+F8KCOSyD1IHWmSWowHwYDVR0jBBgwFoAUmMY4wDMkC/+F8KCOSyD1IHWmSWow
+GgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMB0GA1UdJQQWMBQGCCsGAQUFBwMBBggrBgEFBQcD
+AjAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIChDAKBggqhkjOPQQDAgNJADBGAiEAh3TQ
+9SoADrJkIPUZ4p9OpFmvBLKAmU20ngnLQgPP9qUCIQCYsvap/3KLSCIpBgbIPuANYbgIWJGBjaYZ
+Tr4aWFDNUQ==
 """
 
 private func decode(_ base64: String) -> Data {
@@ -113,9 +118,13 @@ nonisolated(unsafe) private let certificate = SecCertificateCreateWithData(nil, 
             var out = IOBuffer(capacity: 16)
             out.append("ping")
             try await stream.write(out)
+            // The echo ends when the server sees this end of stream: a
+            // close_notify under TLS.
             try stream.shutdownWrite()
             var back = IOBuffer(capacity: 16)
-            while try await stream.read(into: &back) > 0 {}
+            try await Runtime.withIODeadline(.seconds(10)) { () async throws(IOError) in
+                while try await stream.read(into: &back) > 0 {}
+            }
             return (.success(session), back.string)
         } catch {
             return (.failure(error), "")
@@ -172,6 +181,17 @@ nonisolated(unsafe) private let certificate = SecCertificateCreateWithData(nil, 
         #expect(with.echoed == "ping")
         let without = try exchange(rt, server: server, client: .client(serverName: "localhost", trust: Self.pinned))
         #expect(throws: IOError.self) { try without.server.get() }
+    }
+
+    /// A month's warning before the embedded identity runs out.
+    @Test func theIdentityIsNotAboutToExpire() throws {
+        let format = DateFormatter()
+        format.locale = Locale(identifier: "en_US_POSIX")
+        format.timeZone = TimeZone(identifier: "GMT")
+        format.dateFormat = "MMM d HH:mm:ss yyyy 'GMT'"
+        let expires = try #require(format.date(from: identityExpires.replacingOccurrences(of: "  ", with: " ")))
+        #expect(expires.timeIntervalSinceNow > 30 * 24 * 3600,
+                "NetworkTLSTests' identity expires \(identityExpires): renew it with ci/network-tls-identity.sh")
     }
 
     /// Only on IOBackend.network; a plain stream has no NetworkTLS session.

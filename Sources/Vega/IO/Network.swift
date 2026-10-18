@@ -194,7 +194,8 @@ enum NetworkIO {
         switch e {
         case .posix(let code): return IOError(code: code.rawValue)
         case .dns: return IOError(code: EHOSTUNREACH)
-        case .tls: return IOError(code: EPROTO)
+        // The OSStatus (errSSL..., -98xx) says which check failed.
+        case .tls(let status): return IOError(code: EPROTO, message: "TLS: OSStatus \(status)")
         default: return IOError(code: EIO)
         }
     }
@@ -353,12 +354,12 @@ final class NetworkStream: NetworkHandle, @unchecked Sendable {
 
     deinit { lock.destroy() }
 
-    /// As close(2): what was sent still goes out, then FIN. The connection
-    /// is cancelled once that is done.
+    /// As close(2): what was sent still goes out, then FIN (after TLS's
+    /// close_notify). The connection is cancelled once that is done.
     override func close() {
         connection.stateUpdateHandler = nil
         let connection = self.connection
-        connection.send(content: nil, contentContext: .defaultStream, isComplete: true,
+        connection.send(content: nil, contentContext: .finalMessage, isComplete: true,
                         completion: .contentProcessed { _ in connection.cancel() })
     }
 
@@ -471,9 +472,11 @@ final class NetworkStream: NetworkHandle, @unchecked Sendable {
         return known
     }
 
-    /// Send end of stream (FIN) after what was sent before.
+    /// Send end of stream after what was sent before: FIN, and under TLS a
+    /// close_notify first. `.finalMessage`, as NIOTransportServices sends
+    /// for output closed: on `.defaultStream`, TLS sends nothing at all.
     func shutdownWrite() {
-        connection.send(content: nil, contentContext: .defaultStream, isComplete: true, completion: .idempotent)
+        connection.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .idempotent)
     }
 }
 
