@@ -14,19 +14,20 @@ public struct HTTP2Configuration: Sendable {
     /// The receive window for all streams together.
     public var connectionWindowSize: Int
     public var maxFrameSize: Int
-    /// The largest header block, decoded, this end accepts.
-    public var maxHeaderListSize: Int
+    /// The largest header block, decoded, this end accepts
+    /// (SETTINGS_MAX_HEADER_LIST_SIZE).
+    public var maxHeaderSize: Int
     /// A bigger body is refused: a request with 413, a response with an error.
     public var maxBodySize: Int
 
     public init(maxConcurrentStreams: Int = 100, initialWindowSize: Int = 1 << 20,
                 connectionWindowSize: Int = 4 << 20, maxFrameSize: Int = 16_384,
-                maxHeaderListSize: Int = 64 * 1024, maxBodySize: Int = 8 << 20) {
+                maxHeaderSize: Int = 64 * 1024, maxBodySize: Int = 8 << 20) {
         self.maxConcurrentStreams = maxConcurrentStreams
         self.initialWindowSize = initialWindowSize
         self.connectionWindowSize = connectionWindowSize
         self.maxFrameSize = maxFrameSize
-        self.maxHeaderListSize = maxHeaderListSize
+        self.maxHeaderSize = maxHeaderSize
         self.maxBodySize = maxBodySize
     }
 }
@@ -194,7 +195,7 @@ struct H2Core {
         var settings: [(HTTP2Setting, UInt32)] = [
             (.initialWindowSize, UInt32(config.initialWindowSize)),
             (.maxFrameSize, UInt32(config.maxFrameSize)),
-            (.maxHeaderListSize, UInt32(config.maxHeaderListSize)),
+            (.maxHeaderListSize, UInt32(config.maxHeaderSize)),
         ]
         if isServer {
             settings.append((.maxConcurrentStreams, UInt32(config.maxConcurrentStreams)))
@@ -218,7 +219,7 @@ struct H2Core {
             guard case .continuation(let fragment, let endHeaders) = frame.payload, id == pending.stream
             else { throw ConnectionError(code: .protocolError) }
             pendingBlock!.block += fragment
-            guard pendingBlock!.block.count <= config.maxHeaderListSize * 2 else {
+            guard pendingBlock!.block.count <= config.maxHeaderSize * 2 else {
                 throw ConnectionError(code: .enhanceYourCalm)
             }
             guard endHeaders else { return [] }
@@ -340,7 +341,7 @@ struct H2Core {
         // Decoded whatever becomes of the stream: HPACK state is shared.
         var fields = DecodedFields()
         do {
-            try hpack.decode(block, sizeLimit: config.maxHeaderListSize, into: &fields)
+            try hpack.decode(block, sizeLimit: config.maxHeaderSize, into: &fields)
         } catch {
             throw ConnectionError(code: error as? HPACKError == .tooLarge ? .enhanceYourCalm : .compressionError)
         }

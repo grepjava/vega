@@ -195,7 +195,7 @@ struct HTTPCompressionTests {
         try rt.block {
             let one = duplex()
             rt.spawn(with: one.second) { stream async in try? await HTTP1Server.serve(stream, handler) }
-            var client = HTTP1Connection(one.first)
+            var client = HTTP1Client(one.first)
             var r1 = try await client.send(HTTPRequest(target: "/", fields: ["host": "x", "accept-encoding": "gzip"]))
             #expect(r1.head.fields["content-encoding"] == "gzip")
             #expect(Int(r1.head.fields["content-length"] ?? "") == r1.body.count)

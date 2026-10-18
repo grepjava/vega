@@ -9,17 +9,18 @@ import VegaHTTP
 import VegaQUIC
 import VegaCrypto
 
-/// HTTP/3's limits.
+/// HTTP/3's limits, for `HTTP3Server` and `HTTP3Client`.
 public struct HTTP3Configuration: Sendable {
-    /// The largest request or response body taken whole; a larger request
-    /// is answered 413.
+    /// The largest field section, decoded, this end accepts
+    /// (SETTINGS_MAX_FIELD_SECTION_SIZE).
+    public var maxHeaderSize: Int
+    /// A bigger body is refused: a request with 413, a response with an
+    /// error.
     public var maxBodySize: Int
-    /// The largest field section (RFC 9114 SETTINGS_MAX_FIELD_SECTION_SIZE).
-    public var maxFieldSectionSize: Int
 
-    public init(maxBodySize: Int = 16 << 20, maxFieldSectionSize: Int = 64 * 1024) {
+    public init(maxHeaderSize: Int = 64 * 1024, maxBodySize: Int = 8 << 20) {
+        self.maxHeaderSize = maxHeaderSize
         self.maxBodySize = maxBodySize
-        self.maxFieldSectionSize = maxFieldSectionSize
     }
 }
 
@@ -47,17 +48,57 @@ public enum HTTP3Server {
     }
 
     /// Serve every connection the endpoint accepts, until it is closed.
+    ///
+    /// Once `shutdown` triggers, no more connections are taken, each one
+    /// served drains as the one-connection `serve` does, and this returns
+    /// when they all have. The endpoint stays open: close it after.
     public static func serve(_ endpoint: QUICEndpoint, configuration: HTTP3Configuration = .init(),
+                             shutdown: ShutdownToken? = nil,
                              _ handler: @escaping @Sendable (HTTPRequest) async throws -> HTTPResponse) async {
         await withTaskGroup(of: Void.self) { group in
-            while let connection = await endpoint.accept() {
-                group.addTask { await serve(connection, configuration: configuration, handler) }
+            while true {
+                let (connection, late) = await accept(endpoint, until: shutdown)
+                for connection in [connection, late] {
+                    guard let connection else { continue }
+                    group.addTask { await serve(connection, configuration: configuration, shutdown: shutdown, handler) }
+                }
+                if connection == nil { break }
             }
         }
     }
 
+    /// The endpoint's next connection, or nil once it is closed or
+    /// `shutdown` triggers. One that arrived as the trigger did comes back
+    /// as `late`, to be served (and drained) rather than dropped.
+    private static func accept(_ endpoint: QUICEndpoint,
+                               until shutdown: ShutdownToken?) async -> (QUICConnection?, late: QUICConnection?) {
+        guard let shutdown else { return (await endpoint.accept(), nil) }
+        if shutdown.isTriggered { return (nil, nil) }
+        return await withTaskGroup(of: QUICConnection?.self) { group in
+            // accept returns nil when cancelled, and wait throws.
+            group.addTask { await endpoint.accept() }
+            group.addTask {
+                try? await shutdown.wait()
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            var late: QUICConnection?
+            while let other = await group.next() {
+                if let other { late = other }
+            }
+            return first == nil || shutdown.isTriggered ? (nil, first ?? late) : (first, nil)
+        }
+    }
+
     /// Serve one connection until it closes.
+    ///
+    /// Once `shutdown` triggers, the server sends GOAWAY, refuses new
+    /// requests (H3_REQUEST_REJECTED, which a client may retry elsewhere),
+    /// and closes the connection (H3_NO_ERROR) when the requests it took
+    /// are answered and their responses delivered.
     public static func serve(_ connection: QUICConnection, configuration: HTTP3Configuration = .init(),
+                             shutdown: ShutdownToken? = nil,
                              _ handler: @escaping @Sendable (HTTPRequest) async throws -> HTTPResponse) async {
         guard connection.applicationProtocol == applicationProtocol else {
             connection.close(code: HTTP3ErrorCode.versionFallback.rawValue)
@@ -67,22 +108,83 @@ public enum HTTP3Server {
         // Our control stream, with our SETTINGS first (RFC 9114 section 6.2.1).
         // It stays open as long as the connection does.
         guard let control = try? await connection.openStream(unidirectional: true) else { return }
-        let settings = h3Settings([(HTTP3Setting.maxFieldSectionSize, UInt64(configuration.maxFieldSectionSize)),
+        let settings = h3Settings([(HTTP3Setting.maxFieldSectionSize, UInt64(configuration.maxHeaderSize)),
                                    (HTTP3Setting.qpackMaxTableCapacity, 0),
                                    (HTTP3Setting.qpackBlockedStreams, 0)])
         try? await control.write(h3Varint(HTTP3StreamType.control) + h3Frame(HTTP3FrameType.settings, settings))
 
+        let drain = Drain()
         await withTaskGroup(of: Void.self) { group in
+            if let shutdown {
+                group.addTask {
+                    // Throws when the group is cancelled: the connection is over.
+                    guard (try? await shutdown.wait()) != nil else { return }
+                    let (next, idle) = drain.start()
+                    // RFC 9114 section 5.2: the first request stream not taken.
+                    try? await control.write(h3Frame(HTTP3FrameType.goaway, h3Varint(next)))
+                    if !idle {
+                        guard (try? await drain.idle.notified()) != nil else { return }
+                    }
+                    connection.closeWhenDone(code: HTTP3ErrorCode.noError.rawValue)
+                }
+            }
             while let stream = await connection.acceptStream() {
                 if stream.isUnidirectional {
                     group.addTask { await readUnidirectional(stream, connection, peer) }
+                } else if drain.admit(stream.id) {
+                    group.addTask {
+                        await serveRequest(stream, connection, configuration, handler)
+                        drain.done()
+                    }
                 } else {
-                    group.addTask { await serveRequest(stream, connection, configuration, handler) }
+                    stream.stopSending(code: HTTP3ErrorCode.requestRejected.rawValue)
+                    stream.reset(code: HTTP3ErrorCode.requestRejected.rawValue)
                 }
             }
             group.cancelAll()
         }
         _ = control
+    }
+
+    /// A connection's requests in progress, and whether it is draining.
+    final class Drain: Sendable {
+        struct State {
+            var active = 0
+            var draining = false
+            /// One past the last request stream taken (client bidirectional
+            /// IDs go up by 4).
+            var next: UInt64 = 0
+        }
+        let state = Locked(State())
+        /// Notified when a drain finds, or leaves, nothing in progress.
+        let idle = Notify()
+
+        /// Take a request on stream `id`, unless draining.
+        func admit(_ id: UInt64) -> Bool {
+            state.withLock { s in
+                if s.draining { return false }
+                s.active += 1
+                s.next = max(s.next, id + 4)
+                return true
+            }
+        }
+
+        func done() {
+            let last = state.withLock { s in
+                s.active -= 1
+                return s.draining && s.active == 0
+            }
+            if last { idle.notifyOne() }
+        }
+
+        /// Start draining: the GOAWAY's stream ID, and whether nothing is
+        /// in progress.
+        func start() -> (next: UInt64, idle: Bool) {
+            state.withLock { s in
+                s.draining = true
+                return (s.next, s.active == 0)
+            }
+        }
     }
 
     /// Which of the peer's critical streams have been seen: each once.
@@ -157,7 +259,7 @@ public enum HTTP3Server {
                              _ configuration: HTTP3Configuration,
                              _ handler: @escaping @Sendable (HTTPRequest) async throws -> HTTPResponse) async {
         var frames = FramedRead(reading: stream,
-                                decoder: HTTP3FrameDecoder(maxPayload: max(configuration.maxFieldSectionSize, 64 * 1024),
+                                decoder: HTTP3FrameDecoder(maxPayload: max(configuration.maxHeaderSize, 64 * 1024),
                                                            maxData: configuration.maxBodySize))
         var head: HTTPRequestHead?
         var body: [UInt8] = []
@@ -176,7 +278,7 @@ public enum HTTP3Server {
             guard let frame else { break }
             switch frame.type {
             case HTTP3FrameType.headers:
-                guard let fields = h3DecodeFields(frame.payload, maxSize: configuration.maxFieldSectionSize) else {
+                guard let fields = h3DecodeFields(frame.payload, maxSize: configuration.maxHeaderSize) else {
                     return connection.close(code: HTTP3ErrorCode.qpackDecompressionFailed.rawValue)
                 }
                 if head == nil {

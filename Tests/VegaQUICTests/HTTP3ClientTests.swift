@@ -91,5 +91,49 @@ struct HTTP3ClientTests {
         #expect(responses[0].head.fields["x-host"]?.hasPrefix("localhost:") == true)
         #expect(responses[19].status == 404)
     }
+
+    /// Once shutdown triggers, the request in progress is answered, a new
+    /// one is refused, the connection closes, and `serve` returns with the
+    /// endpoint still open.
+    @Test func shutdownDrains() throws {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let identity = try TLSIdentity.selfSigned(names: ["localhost"])
+        let certificate = try CertificateKey(chainPEM: identity.certificateChain, keyPEM: identity.privateKey)
+        let verifier = try CertificateVerifier(trustRoots: .certificates(identity.certificateChain))
+        let (slow, lateRefused) = try rt.block { () async throws -> (Int, Bool) in
+            let server = try QUICEndpoint.bind(host: "127.0.0.1", port: 0,
+                                                 configuration: HTTP3Server.quicConfiguration(certificate: certificate),
+                                                 runtime: rt)
+            let shutdown = ShutdownToken()
+            let entered = Notify(), release = Notify()
+            let serving = rt.spawn {
+                await HTTP3Server.serve(server, shutdown: shutdown) { request in
+                    if request.head.target == "/slow" {
+                        entered.notifyOne()
+                        try? await release.notified()
+                    }
+                    return HTTPResponse(status: 200, body: "done")
+                }
+            }
+            let endpoint = try QUICEndpoint.bind(runtime: rt)
+            let result = try await HTTP3Client.withConnection(endpoint, host: "localhost", port: server.localPort,
+                                                             certificateVerification: .verifier(verifier)) { client in
+                let slow = rt.spawn { try? await client.send(HTTPRequest(target: "/slow")) }
+                try await entered.notified()
+                shutdown.trigger()
+                try? await Runtime.sleep(for: .milliseconds(50))
+                let late = try? await client.send(HTTPRequest(target: "/late"))
+                release.notifyOne()
+                return (await slow.value?.status ?? 0, late == nil)
+            }
+            await serving.value
+            await endpoint.close(grace: .zero)
+            await server.close(grace: .zero)
+            return result
+        }
+        #expect(slow == 200)
+        #expect(lateRefused)
+    }
 }
 #endif

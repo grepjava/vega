@@ -6,15 +6,46 @@ import VegaIO
 /// Limits on what a decoder will buffer for one message.
 public struct HTTP1Limits: Sendable {
     /// The request or status line and fields, in bytes.
-    public var maxHeadSize: Int
-    public var maxFields: Int
+    public var maxHeaderSize: Int
+    /// The fields in the head, or in the trailers.
+    public var maxHeaderCount: Int
     /// The trailer section after a chunked body, in bytes.
     public var maxTrailerSize: Int
 
-    public init(maxHeadSize: Int = 32 * 1024, maxFields: Int = 100, maxTrailerSize: Int = 32 * 1024) {
-        self.maxHeadSize = maxHeadSize
-        self.maxFields = maxFields
+    public init(maxHeaderSize: Int = 32 * 1024, maxHeaderCount: Int = 100, maxTrailerSize: Int = 32 * 1024) {
+        self.maxHeaderSize = maxHeaderSize
+        self.maxHeaderCount = maxHeaderCount
         self.maxTrailerSize = maxTrailerSize
+    }
+}
+
+/// HTTP/1.1's limits and buffers, for `HTTP1Server` and `HTTP1Client`: as
+/// `HTTP2Configuration` and `HTTP3Configuration` are for theirs.
+public struct HTTP1Configuration: Sendable {
+    /// The request or status line and fields, in bytes.
+    public var maxHeaderSize: Int
+    /// The fields in the head, or in the trailers.
+    public var maxHeaderCount: Int
+    /// The trailer section after a chunked body, in bytes.
+    public var maxTrailerSize: Int
+    /// A bigger body is refused: a request with 413, a response with
+    /// `.bodyTooLarge`.
+    public var maxBodySize: Int
+    /// What each read takes in, and each write gathers, at most.
+    public var bufferSize: Int
+
+    public init(maxHeaderSize: Int = 32 * 1024, maxHeaderCount: Int = 100, maxTrailerSize: Int = 32 * 1024,
+                maxBodySize: Int = 8 << 20, bufferSize: Int = 16 * 1024) {
+        self.maxHeaderSize = maxHeaderSize
+        self.maxHeaderCount = maxHeaderCount
+        self.maxTrailerSize = maxTrailerSize
+        self.maxBodySize = maxBodySize
+        self.bufferSize = bufferSize
+    }
+
+    /// The decoders' share of it.
+    public var limits: HTTP1Limits {
+        HTTP1Limits(maxHeaderSize: maxHeaderSize, maxHeaderCount: maxHeaderCount, maxTrailerSize: maxTrailerSize)
     }
 }
 
@@ -48,16 +79,16 @@ public struct HTTP1RequestDecoder: FrameDecoder, Sendable {
             var lead = 0
             while lead < bytes.count, bytes[lead] == cCR || bytes[lead] == cLF { lead += 1 }
             guard let end = findHeadEnd(bytes, from: max(lead, scanned)) else {
-                if bytes.count - lead > limits.maxHeadSize {
+                if bytes.count - lead > limits.maxHeaderSize {
                     let lineEnded = bytes[lead...].contains(cLF)
                     throw lineEnded ? .headTooLarge : .uriTooLong
                 }
                 state = .head(scanned: max(lead, bytes.count - 2))
                 return nil
             }
-            if end - lead > limits.maxHeadSize { throw .headTooLarge }
+            if end - lead > limits.maxHeaderSize { throw .headTooLarge }
             let (head, framing) = try parsed { () throws(HTTP1ParseError) in
-                try parseRequestHead(bytes, start: lead, end: end, maxFields: limits.maxFields)
+                try parseRequestHead(bytes, start: lead, end: end, maxFields: limits.maxHeaderCount)
             }
             let body: BodyReader.State
             if framing.transferEncoding == .chunked {
@@ -67,7 +98,7 @@ public struct HTTP1RequestDecoder: FrameDecoder, Sendable {
             } else {
                 body = .done
             }
-            state = .body(BodyReader(state: body, maxFields: limits.maxFields, maxTrailerSize: limits.maxTrailerSize))
+            state = .body(BodyReader(state: body, maxFields: limits.maxHeaderCount, maxTrailerSize: limits.maxTrailerSize))
             return (.head(head), end)
         case .body(var reader):
             guard let (part, used) = try parsed({ () throws(HTTP1ParseError) in try reader.next(bytes) }) else { return nil }
@@ -136,13 +167,13 @@ public struct HTTP1ResponseDecoder: FrameDecoder, Sendable {
             return nil
         case .head(let scanned):
             guard let end = findHeadEnd(bytes, from: scanned) else {
-                if bytes.count > limits.maxHeadSize { throw .headTooLarge }
+                if bytes.count > limits.maxHeaderSize { throw .headTooLarge }
                 state = .head(scanned: max(0, bytes.count - 2))
                 return nil
             }
-            if end > limits.maxHeadSize { throw .headTooLarge }
+            if end > limits.maxHeaderSize { throw .headTooLarge }
             let (head, framing) = try parsed { () throws(HTTP1ParseError) in
-                try parseResponseHead(bytes, start: 0, end: end, maxFields: limits.maxFields)
+                try parseResponseHead(bytes, start: 0, end: end, maxFields: limits.maxHeaderCount)
             }
             let status = head.status
             // An interim response comes before the real one to the same request.
@@ -172,7 +203,7 @@ public struct HTTP1ResponseDecoder: FrameDecoder, Sendable {
             }
             if case .untilClose = body { isReusable = false }
             if !head.keepAlive { isReusable = false }
-            state = .body(BodyReader(state: body, maxFields: limits.maxFields, maxTrailerSize: limits.maxTrailerSize))
+            state = .body(BodyReader(state: body, maxFields: limits.maxHeaderCount, maxTrailerSize: limits.maxTrailerSize))
             return (.head(head), end)
         case .body(var reader):
             guard let (part, used) = try parsed({ () throws(HTTP1ParseError) in try reader.next(bytes) }) else { return nil }

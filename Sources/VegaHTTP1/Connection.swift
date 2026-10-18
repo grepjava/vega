@@ -19,19 +19,6 @@ import VegaIO
 /// For streamed bodies or upgrades, use `HTTP1RequestDecoder` and
 /// `HTTP1ResponseEncoder` directly.
 public enum HTTP1Server {
-    public struct Configuration: Sendable {
-        public var limits: HTTP1Limits
-        /// A bigger request body is answered with 413.
-        public var maxBodySize: Int
-        public var bufferSize: Int
-
-        public init(limits: HTTP1Limits = .init(), maxBodySize: Int = 8 * 1024 * 1024, bufferSize: Int = 16 * 1024) {
-            self.limits = limits
-            self.maxBodySize = maxBodySize
-            self.bufferSize = bufferSize
-        }
-    }
-
     /// Serve requests on `stream` until the client closes it, a request asks
     /// to close, or one is malformed (answered with its 4xx and a close). A
     /// handler that throws is answered with 500.
@@ -42,7 +29,7 @@ public enum HTTP1Server {
     /// cancelled by the trigger; the caller then closes the connection.
     public static func serve<Stream: AsyncReader & AsyncWriter & ~Copyable>(
         _ stream: borrowing Stream,
-        configuration: Configuration = .init(),
+        configuration: HTTP1Configuration = .init(),
         shutdown: ShutdownToken? = nil,
         _ handler: (HTTPRequest) async throws -> HTTPResponse
     ) async throws(IOError) {
@@ -158,13 +145,13 @@ public enum HTTP1Server {
 ///
 /// ```swift
 /// let tcp = try await TCPStream.connect(host: "example.com", port: 80)
-/// var http = HTTP1Connection(tcp)
+/// var http = HTTP1Client(tcp)
 /// let response = try await http.send(HTTPRequest(target: "/", fields: ["host": "example.com"]))
 /// ```
 ///
 /// Requests go one at a time; after a response that ends with the
 /// connection, `isReusable` turns false.
-public struct HTTP1Connection<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~Copyable {
+public struct HTTP1Client<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~Copyable {
     public var stream: Stream
     /// A bigger response body fails with `.bodyTooLarge`.
     public var maxBodySize: Int
@@ -173,12 +160,11 @@ public struct HTTP1Connection<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~C
     private var output: IOBuffer
     private var failed = false
 
-    public init(_ stream: consuming Stream, limits: HTTP1Limits = .init(),
-                maxBodySize: Int = 64 * 1024 * 1024, bufferSize: Int = 16 * 1024) {
+    public init(_ stream: consuming Stream, configuration: HTTP1Configuration = .init()) {
         self.stream = stream
-        self.maxBodySize = maxBodySize
-        reading = Reading(HTTP1ResponseDecoder(limits: limits), capacity: bufferSize)
-        output = IOBuffer(capacity: bufferSize)
+        self.maxBodySize = configuration.maxBodySize
+        reading = Reading(HTTP1ResponseDecoder(limits: configuration.limits), capacity: configuration.bufferSize)
+        output = IOBuffer(capacity: configuration.bufferSize)
     }
 
     /// Whether another request can be sent.

@@ -110,7 +110,7 @@ public final class HTTP3Client: Sendable {
         // Our control stream with SETTINGS, kept open as long as the
         // connection; and the server's streams, read so they never stall.
         let control = try? await connection.openStream(unidirectional: true)
-        let settings = h3Settings([(HTTP3Setting.maxFieldSectionSize, UInt64(configuration.maxFieldSectionSize)),
+        let settings = h3Settings([(HTTP3Setting.maxFieldSectionSize, UInt64(configuration.maxHeaderSize)),
                                    (HTTP3Setting.qpackMaxTableCapacity, 0),
                                    (HTTP3Setting.qpackBlockedStreams, 0)])
         try? await control?.write(h3Varint(HTTP3StreamType.control) + h3Frame(HTTP3FrameType.settings, settings))
@@ -172,7 +172,7 @@ public final class HTTP3Client: Sendable {
 
     private func readResponse(_ stream: QUICStream, head: Bool) async throws(HTTP3ClientError) -> HTTPResponse {
         var frames = FramedRead(reading: stream,
-                                decoder: HTTP3FrameDecoder(maxPayload: max(configuration.maxFieldSectionSize, 64 * 1024),
+                                decoder: HTTP3FrameDecoder(maxPayload: max(configuration.maxHeaderSize, 64 * 1024),
                                                            maxData: configuration.maxBodySize))
         var response: HTTPResponseHead?
         var body: [UInt8] = []
@@ -189,7 +189,7 @@ public final class HTTP3Client: Sendable {
             guard let frame else { break }
             switch frame.type {
             case HTTP3FrameType.headers:
-                guard let fields = h3DecodeFields(frame.payload, maxSize: configuration.maxFieldSectionSize) else {
+                guard let fields = h3DecodeFields(frame.payload, maxSize: configuration.maxHeaderSize) else {
                     throw .malformedResponse
                 }
                 if response == nil {

@@ -178,7 +178,7 @@ private func encoded(_ body: (inout IOBuffer) throws -> Void) rethrows -> String
     }
 
     @Test func limits() {
-        let small = HTTP1Limits(maxHeadSize: 64, maxFields: 3, maxTrailerSize: 16)
+        let small = HTTP1Limits(maxHeaderSize: 64, maxHeaderCount: 3, maxTrailerSize: 16)
         #expect(requestError("GET /\(String(repeating: "a", count: 100))", limits: small) == .uriTooLong)
         #expect(requestError("GET / HTTP/1.1\r\nHost: x\r\nA: \(String(repeating: "a", count: 100))", limits: small) == .headTooLarge)
         #expect(requestError("GET / HTTP/1.1\r\nHost: x\r\nA: 1\r\nB: 2\r\nC: 3\r\n\r\n", limits: small) == .tooManyFields)
@@ -374,7 +374,7 @@ private func encoded(_ body: (inout IOBuffer) throws -> Void) rethrows -> String
                 }
                 return served
             }
-            var client = HTTP1Connection(pair.first)
+            var client = HTTP1Client(pair.first)
             let hello = try await client.send(HTTPRequest(target: "/hello?x=1", fields: ["host": "vega.test"]))
             #expect(hello.status == 200)
             #expect(hello.text == "GET /hello?x=1")
@@ -406,7 +406,7 @@ private func encoded(_ body: (inout IOBuffer) throws -> Void) rethrows -> String
     @Test func refusalsAndContinue() throws {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
-        let configuration = HTTP1Server.Configuration(maxBodySize: 10)
+        let configuration = HTTP1Configuration(maxBodySize: 10)
         func exchange(_ text: String) async throws -> String {
             let pair = duplex()
             rt.spawn(with: pair.second) { stream async in
@@ -477,7 +477,7 @@ private func encoded(_ body: (inout IOBuffer) throws -> Void) rethrows -> String
             let busyServer = rt.spawn(with: busy.second) { stream async -> Bool in
                 (try? await HTTP1Server.serve(stream, shutdown: signal, handler)) != nil
             }
-            var idleClient = HTTP1Connection(idle.first)
+            var idleClient = HTTP1Client(idle.first)
             let first = try await idleClient.send(HTTPRequest(target: "/", fields: ["host": "x"]))
             #expect(first.text == "ok")
             #expect(first.head.fields["connection"] == nil)
@@ -487,7 +487,7 @@ private func encoded(_ body: (inout IOBuffer) throws -> Void) rethrows -> String
                 signal.trigger()
                 release.notifyOne()
             }
-            var busyClient = HTTP1Connection(busy.first)
+            var busyClient = HTTP1Client(busy.first)
             let slow = try await busyClient.send(HTTPRequest(target: "/slow", fields: ["host": "x"]))
             #expect(slow.text == "ok")
             #expect(slow.head.fields["connection"] == "close")
@@ -511,7 +511,7 @@ private func encoded(_ body: (inout IOBuffer) throws -> Void) rethrows -> String
                                             configuration: .init(shutdownToken: signal)) { conn in
                 try? await HTTP1Server.serve(conn, shutdown: signal) { _ in HTTPResponse(body: "ok") }
             }
-            var client = HTTP1Connection(try await TCPStream.connect(host: "127.0.0.1", port: server.port))
+            var client = HTTP1Client(try await TCPStream.connect(host: "127.0.0.1", port: server.port))
             let first = try await client.send(HTTPRequest(target: "/", fields: ["host": "x"]))
             #expect(first.text == "ok")
             let start = ContinuousClock.now
@@ -539,7 +539,7 @@ private func encoded(_ body: (inout IOBuffer) throws -> Void) rethrows -> String
                 }
             }
             for _ in 0..<3 {
-                var client = HTTP1Connection(try await TCPStream.connect(host: "127.0.0.1", port: port))
+                var client = HTTP1Client(try await TCPStream.connect(host: "127.0.0.1", port: port))
                 for i in 0..<20 {
                     let body = Array(repeating: UInt8(i), count: i * 1000) + [1, 2, 3]
                     let r = try await client.send(HTTPRequest(method: .put, target: "/\(i)", fields: ["host": "local"], body: body))

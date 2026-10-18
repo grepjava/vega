@@ -1483,6 +1483,9 @@ public struct QUICServerConfiguration {
 
     public var isClosed: Bool { status == .drained }
 
+    /// Bytes sent and not yet acknowledged or declared lost.
+    package var bytesInFlight: Int { recovery.bytesInFlight }
+
     /// Whether the connection has been silent long enough to give up on.
     public func isIdle(nowMs: UInt64) -> Bool {
         if idleTimeoutMs == 0 { return false }

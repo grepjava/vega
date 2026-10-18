@@ -148,17 +148,29 @@ public final class QUICConnection: Sendable {
     /// Why the connection ended, once it has.
     public var closeReason: QUICConnectionError? { state.withLock { $0.closed } }
 
-    /// The next stream the peer opened; nil once the connection is closed.
+    /// The next stream the peer opened; nil once the connection is closed,
+    /// or the task is cancelled.
     public func acceptStream() async -> QUICStream? {
-        await withUnsafeContinuation { (c: UnsafeContinuation<QUICStream?, Never>) in
-            let now = state.withLock { s -> (Bool, QUICStream?) in
-                if !s.incoming.isEmpty { return (true, s.incoming.removeFirst()) }
-                if s.closed != nil { return (true, nil) }
-                precondition(s.acceptWaiter == nil, "QUICConnection.acceptStream() called while another call waits")
-                s.acceptWaiter = c
-                return (false, nil)
+        await withTaskCancellationHandler {
+            await withUnsafeContinuation { (c: UnsafeContinuation<QUICStream?, Never>) in
+                let now = state.withLock { s -> (Bool, QUICStream?) in
+                    if !s.incoming.isEmpty { return (true, s.incoming.removeFirst()) }
+                    if s.closed != nil { return (true, nil) }
+                    // Checked under the lock: either the cancel handler runs
+                    // after this and finds the waiter, or the flag is visible.
+                    if Task.isCancelled { return (true, nil) }
+                    precondition(s.acceptWaiter == nil, "QUICConnection.acceptStream() called while another call waits")
+                    s.acceptWaiter = c
+                    return (false, nil)
+                }
+                if now.0 { c.resume(returning: now.1) }
             }
-            if now.0 { c.resume(returning: now.1) }
+        } onCancel: {
+            let waiter = state.withLock { s in
+                defer { s.acceptWaiter = nil }
+                return s.acceptWaiter
+            }
+            waiter?.resume(returning: nil)
         }
     }
 
@@ -199,6 +211,14 @@ public final class QUICConnection: Sendable {
     /// Streams' waiting reads and writes fail; the peer is told at once.
     public func close(code: UInt64 = 0, reason: String = "") {
         endpoint.post(.close(self, code, Array(reason.utf8)))
+    }
+
+    /// Close with an application error code once the bidirectional
+    /// streams are done (unidirectional ones, such as HTTP/3's control
+    /// streams, may stay open) and the peer has acknowledged everything
+    /// sent: a close that loses nothing in flight.
+    package func closeWhenDone(code: UInt64) {
+        endpoint.post(.closeWhenDone(self, code))
     }
 
     // MARK: From the endpoint

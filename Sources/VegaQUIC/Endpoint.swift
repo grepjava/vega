@@ -83,6 +83,8 @@ public final class QUICEndpoint: @unchecked Sendable {
         case stream(QUICStream)
         case open(QUICConnection)
         case close(QUICConnection, UInt64, [UInt8])
+        /// Close once no bidirectional stream is left and all sent is acknowledged.
+        case closeWhenDone(QUICConnection, UInt64)
         /// A client connection, made by `connect`, to start.
         case connect(QUICConnection)
     }
@@ -112,6 +114,8 @@ public final class QUICEndpoint: @unchecked Sendable {
     var connections: [QUICConnectionID: EndpointConnection] = [:]
     var live: [EndpointConnection] = []
     var touched: [EndpointConnection] = []
+    /// Connections closing once done (`closeWhenDone`), checked each service.
+    var closingWhenDone: [EndpointConnection] = []
     var replies: [(bytes: [UInt8], to: SocketAddress, from: SocketAddress?)] = []
     let sendBuffer: UnsafeMutablePointer<UInt8>
     var pendingLength = 0
@@ -218,17 +222,28 @@ public final class QUICEndpoint: @unchecked Sendable {
     }
 
     /// The next connection whose handshake is done; nil once the endpoint
-    /// is closed.
+    /// is closed, or the task is cancelled.
     public func accept() async -> QUICConnection? {
-        await withUnsafeContinuation { (c: UnsafeContinuation<QUICConnection?, Never>) in
-            let now = shared.withLock { s -> (Bool, QUICConnection?) in
-                if !s.accepted.isEmpty { return (true, s.accepted.removeFirst()) }
-                if s.stopped || s.stopRequested { return (true, nil) }
-                precondition(s.acceptWaiter == nil, "QUICEndpoint.accept() called while another call waits")
-                s.acceptWaiter = c
-                return (false, nil)
+        await withTaskCancellationHandler {
+            await withUnsafeContinuation { (c: UnsafeContinuation<QUICConnection?, Never>) in
+                let now = shared.withLock { s -> (Bool, QUICConnection?) in
+                    if !s.accepted.isEmpty { return (true, s.accepted.removeFirst()) }
+                    if s.stopped || s.stopRequested { return (true, nil) }
+                    // Checked under the lock: either the cancel handler runs
+                    // after this and finds the waiter, or the flag is visible.
+                    if Task.isCancelled { return (true, nil) }
+                    precondition(s.acceptWaiter == nil, "QUICEndpoint.accept() called while another call waits")
+                    s.acceptWaiter = c
+                    return (false, nil)
+                }
+                if now.0 { c.resume(returning: now.1) }
             }
-            if now.0 { c.resume(returning: now.1) }
+        } onCancel: {
+            let waiter = shared.withLock { s in
+                defer { s.acceptWaiter = nil }
+                return s.acceptWaiter
+            }
+            waiter?.resume(returning: nil)
         }
     }
 
@@ -326,8 +341,21 @@ public final class QUICEndpoint: @unchecked Sendable {
         checkShutdown(nowMs: now)
         takePosts()
         serviceTouched()
+        if !closingWhenDone.isEmpty { closeThoseDone() }
         reap()
         return shared.withLock { !$0.posts.isEmpty } || !touched.isEmpty
+    }
+
+    /// Connections waiting to close once done: closed when they are.
+    func closeThoseDone() {
+        closingWhenDone.removeAll { connection in
+            guard let code = connection.closeWhenDone, !connection.quic.isClosed else { return true }
+            guard connection.streams.keys.allSatisfy(QUICStreamKind.isUnidirectional),
+                  !connection.quic.hasOutput, connection.quic.bytesInFlight == 0 else { return false }
+            connection.quic.close(code, application: true)
+            touch(connection)
+            return true
+        }
     }
 
     func touch(_ connection: EndpointConnection) {
@@ -380,6 +408,11 @@ public final class QUICEndpoint: @unchecked Sendable {
                 stream.connection.core.pump(stream)
             case .open(let handle):
                 handle.core.openStreams(handle)
+            case .closeWhenDone(let handle, let code):
+                if !handle.core.quic.isClosed {
+                    handle.core.closeWhenDone = code
+                    closingWhenDone.append(handle.core)
+                }
             case .close(let handle, let code, let reason):
                 if !handle.core.quic.isClosed { handle.core.quic.close(code, application: true, reason: reason) }
                 touch(handle.core)
@@ -643,6 +676,9 @@ final class EndpointConnection {
     var touched = false
     var announced = false
     var abandoned = false
+    /// A close (its code) waiting for the bidirectional streams to finish,
+    /// and for what was sent to be acknowledged.
+    var closeWhenDone: UInt64?
     var streams: [UInt64: QUICStream] = [:]
     /// The application's handle. Held here until it is handed over (from
     /// `accept()` or `connect`), weakly after: a connection nobody holds,
