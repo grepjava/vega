@@ -3,13 +3,14 @@
 # later. Run from the source tree.
 #   macos  swift test on kqueue (OpenSSL from Homebrew's openssl@3)
 #   ios    xcodebuild test on the newest iPhone simulator (Network.framework)
+#   nio    VegaNIO's own tests (VegaNIO/), on kqueue
 # Logs go to .build-ci/<job>.log; exits non-zero if a job fails. A job
 # that runs past its limit (VEGA_CI_LIMIT seconds, 40 minutes by default)
 # is killed and fails: a hung test can't stall the run.
 set -u
 cd "$(dirname "$0")/.."
 JOBS=("$@")
-[ ${#JOBS[@]} -eq 0 ] && JOBS=(macos ios)
+[ ${#JOBS[@]} -eq 0 ] && JOBS=(macos ios nio)
 mkdir -p .build-ci
 echo "$(sw_vers -productVersion), $(swift --version 2>&1 | head -1), $(git rev-parse --short HEAD)"
 
@@ -42,6 +43,10 @@ for job in "${JOBS[@]}"; do
       export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig"
       { swift build --build-tests --scratch-path .build-ci/macos &&
         limited swift test --skip-build --scratch-path .build-ci/macos; } > "$log" 2>&1 ;;
+    nio)
+      export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig"
+      { swift build --build-tests --package-path VegaNIO --scratch-path .build-ci/nio &&
+        limited swift test --skip-build --package-path VegaNIO --scratch-path .build-ci/nio; } > "$log" 2>&1 ;;
     ios)
       sim=$(xcrun simctl list devices available iOS | grep -oE 'iPhone [0-9]+( Pro)?' | sort -V | tail -1)
       limited xcodebuild test -scheme Vega-Package -destination "platform=iOS Simulator,name=$sim" \
