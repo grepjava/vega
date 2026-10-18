@@ -1,6 +1,5 @@
 import Testing
 @testable import Vega
-import VegaExtras
 
 /// A RawLock, not a Mutex: ThreadSanitizer doesn't see Mutex on Linux.
 private final class Graces: @unchecked Sendable {

@@ -28,7 +28,7 @@ The Vega snippets below compile and run against Vega at the commit that added th
 | `NIOPipeBootstrap` | `makePipe()`, `PipeReader(adopting:)`, `PipeWriter(adopting:)` | `Vega` |
 | `EmbeddedChannel`, `NIOAsyncTestingChannel` | `duplex()` in-memory streams, `MockClock` | `VegaTest` |
 | `ServerQuiescingHelper` | `ShutdownSignal`, which `TCPServer.shutdown` triggers and the HTTP servers take | `Vega` |
-| `HTTPResponseCompressor`, `NIOHTTPRequestDecompressor` | `HTTPCompression` (`wrap(_:)` a handler; `decompress(_:)`), `Compressor`, `Decompressor` | `VegaExtras` |
+| `HTTPResponseCompressor`, `NIOHTTPRequestDecompressor` | `HTTPCompression` (`wrap(_:)` a handler; `decompress(_:)`), `Compressor`, `Decompressor` | `VegaCompression` |
 
 ## The event loop group becomes a runtime
 

@@ -25,12 +25,12 @@ import ucrt
 #endif
 
 public struct ByteBuffer {
-    @usableFromInline var storage: UnsafeMutablePointer<UInt8>?
+    @usableFromInline package var storage: UnsafeMutablePointer<UInt8>?
     @usableFromInline var capacity: Int
     /// Index of the first unread byte.
-    @usableFromInline var readerIndex: Int
+    @usableFromInline package var readerIndex: Int
     /// Index one past the last written byte.
-    @usableFromInline var writerIndex: Int
+    @usableFromInline package var writerIndex: Int
 
     @inlinable
     public init() {

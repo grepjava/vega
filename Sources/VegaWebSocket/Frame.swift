@@ -10,6 +10,7 @@
 import Vega
 import VegaIO
 import VegaWire
+import VegaWebSocketCore
 
 public enum WebSocketOpcode: UInt8, Sendable {
     case continuation = 0x0

@@ -1,7 +1,7 @@
 # CVegaZlib — a vendored zlib, for Windows
 
 This directory is zlib, and none of it is ours. CVegaCompress (gzip and
-deflate bodies in VegaExtras, permessage-deflate in VegaWebSocket) links the
+deflate bodies in VegaCompression, permessage-deflate in VegaWebSocket) links the
 system's zlib on Linux and Apple platforms, which always have one; the
 Windows SDK has none, so on Windows CVegaCompress depends on this copy
 instead (a target dependency with a platform condition in `Package.swift`).

@@ -70,8 +70,8 @@ mature, widely deployed and far more proven than Vega.
 | Blocking work | `Runtime.blocking` | `NIOThreadPool` | `spawn_blocking` |
 | Timers and tests | timer wheel; `MockClock` paused time, in-memory `duplex()` streams | `EmbeddedEventLoop`, `NIOAsyncTestingChannel` | timer wheel; `time::pause`, `tokio-test` |
 | TLS | VegaTLS on OpenSSL 3 or vendored BoringSSL; kernel TLS offload on Linux; Network.framework's TLS on Apple (`NetworkTLS`) | swift-nio-ssl (BoringSSL) | rustls or native-tls, separate crates |
-| HTTP | VegaHTTP1, VegaHTTP2, VegaWebSocket | NIOHTTP1, swift-nio-http2, NIOWebSocket | hyper, tungstenite, separate crates |
-| QUIC and HTTP/3 | VegaQUIC (sans-I/O, client and server), VegaQUICNet (on Vega's UDP sockets), VegaHTTP3 (frames, QPACK), VegaHTTP3Net (server and client) | not in SwiftNIO itself; on Apple platforms, Network.framework's QUIC | quinn, h3, separate crates |
+| HTTP | VegaHTTP1, VegaHTTP2, VegaHTTP3, VegaWebSocket | NIOHTTP1, swift-nio-http2, NIOWebSocket | hyper, tungstenite, separate crates |
+| QUIC and HTTP/3 | VegaQUIC (client and server on Vega's UDP sockets), VegaHTTP3 (server and client); their sans-I/O cores VegaQUICCore and VegaHTTP3Core | not in SwiftNIO itself; on Apple platforms, Network.framework's QUIC | quinn, h3, separate crates |
 | Maturity | 0.5, since 2026 | since 2018, the base of Vapor, Hummingbird, gRPC Swift and more | since 2016, the base of most async Rust |
 
 **What has been measured** ([docs/BENCHMARKS.md](docs/BENCHMARKS.md), one
@@ -104,14 +104,13 @@ Measure your own.
 | `Sources/VegaMetrics` | `metricsSamples(every:)` (periodic deltas of `Runtime.metrics`), Prometheus text export |
 | `Sources/VegaTLS` | `TLSStream` over any stream, `TLSConfiguration`, `TLSContext`; ALPN, SNI, mutual TLS, session resumption, Linux kernel TLS (kTLS) offload |
 | `Sources/VegaCrypto` | over the same library: `Hash`, `HMAC`, `PBKDF2`, `HKDF`, `AEAD`, QUIC `HeaderProtection`, `KeyExchange`, JWS/TLS `SigningKey` and `PublicKey`, `CertificateKey`, `SecureRandom` |
-| `Sources/VegaWire` | wire formats, sans I/O: `ByteBuffer`, HPACK, HTTP/2 frame headers, WebSocket frames, permessage-deflate negotiation |
-| `Sources/VegaHTTP1`, `Sources/VegaHTTP2` | HTTP/1.1 parsing, codecs and connections; HTTP/2 connections |
+| `Sources/VegaCompression` | HTTP content codings: gzip, deflate, brotli, zstd |
+| `Sources/VegaProxy` | connecting through SOCKS5 and HTTP CONNECT proxies |
+| `Sources/VegaHTTP1`, `Sources/VegaHTTP2`, `Sources/VegaHTTP3` | HTTP/1.1, HTTP/2 and HTTP/3 servers and clients; HTTP/3 with whole bodies, as HTTP/2's |
 | `Sources/VegaWebSocket` | WebSocket connections and permessage-deflate compression |
-| `Sources/VegaQUIC` | QUIC v1 and v2 as a sans-I/O state machine: packets and their protection, loss recovery and congestion control, streams, path validation, Retry, and both sides of the TLS 1.3 handshake. Datagrams in, datagrams out, no clock |
-| `Sources/VegaQUICNet` | QUIC on Vega's UDP sockets: `QUICEndpoint` (listen, connect), `QUICConnectionHandle`, and `QUICStreamHandle`, an `AsyncReader` and `AsyncWriter` |
-| `Sources/VegaHTTP3` | HTTP/3 frames and QPACK |
-| `Sources/VegaHTTP3Net` | `HTTP3Server` and `HTTP3Client`, with whole bodies, as VegaHTTP2's |
-| `Sources/VegaExtras` | HTTP content codings (gzip, deflate, brotli, zstd) and SOCKS and HTTP proxy handshakes |
+| `Sources/VegaQUIC` | QUIC on Vega's UDP sockets: `QUICEndpoint` (listen, connect), `QUICConnectionHandle`, and `QUICStreamHandle`, an `AsyncReader` and `AsyncWriter` |
+| `Sources/Vega*Core` | each protocol's logic, sans I/O, for servers that bring their own I/O: `VegaHTTP2Core` (HPACK, frame headers), `VegaHTTP3Core` (frames, QPACK), `VegaWebSocketCore` (frames, permessage-deflate negotiation), `VegaQUICCore` (QUIC v1 and v2 as a state machine: packets and their protection, loss recovery and congestion control, streams, path validation, Retry, and both sides of the TLS 1.3 handshake; datagrams in, datagrams out, no clock) |
+| `Sources/VegaWire` | the bytes the Core modules share: `ByteBuffer`, `ByteSpan`, parsing helpers |
 | `Sources/VegaTest` | test support: `MockClock` (paused time), `duplex()` (in-memory byte streams) |
 | `Sources/CVega` | C shim: parking, threads, the epoll/kqueue/io_uring/IOCP drivers, sockets |
 | `Sources/CVegaTLS`, `Sources/CVegaCompress` | C shims for the TLS library and for compression |

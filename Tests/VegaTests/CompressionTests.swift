@@ -3,8 +3,8 @@ import Vega
 import VegaIO
 import VegaHTTP1
 import VegaHTTP2
-import VegaExtras
 import VegaTest
+import VegaCompression
 
 private let text = Array(String(repeating: "vega compresses what the client asked for. ", count: 400).utf8)
 

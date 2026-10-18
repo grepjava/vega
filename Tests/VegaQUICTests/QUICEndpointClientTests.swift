@@ -11,8 +11,8 @@ import Vega
 import VegaIO
 import VegaCrypto
 import VegaTLS
-import VegaQUICNet
-@testable import VegaQUIC
+import VegaQUIC
+@testable import VegaQUICCore
 
 private func identity() throws -> (pem: String, key: CertificateKey) {
     let identity = try TLSIdentity.selfSigned(names: ["localhost"])

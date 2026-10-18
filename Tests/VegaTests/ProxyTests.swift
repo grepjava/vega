@@ -2,8 +2,8 @@ import Synchronization
 import Testing
 import Vega
 import VegaIO
-import VegaExtras
 import VegaHTTP1
+import VegaProxy
 
 /// An echo server on a fresh port; returns the port.
 private func echoServer(_ rt: Runtime) throws -> Int {

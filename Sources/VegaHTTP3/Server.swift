@@ -4,9 +4,9 @@ import Synchronization
 import Vega
 import VegaIO
 import VegaHTTP1
-import VegaHTTP3
+import VegaHTTP3Core
+import VegaQUICCore
 import VegaQUIC
-import VegaQUICNet
 import VegaCrypto
 
 /// HTTP/3's limits.

@@ -22,9 +22,9 @@ import ucrt
 import VegaCrypto
 import VegaHTTP1
 import VegaHTTP2
-import VegaHTTP3Net
+import VegaHTTP3
+import VegaQUICCore
 import VegaQUIC
-import VegaQUICNet
 import VegaTLS
 import VegaWebSocket
 

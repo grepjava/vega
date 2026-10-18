@@ -6,6 +6,7 @@ import VegaHTTP1
 @testable import VegaHTTP2
 import VegaTest
 import VegaWire
+import VegaHTTP2Core
 
 /// Bytes from hex, spaces and newlines ignored: RFC examples as printed.
 private func hex(_ s: String) -> [UInt8] {

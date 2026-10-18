@@ -2,6 +2,7 @@ import Vega
 import VegaIO
 import VegaHTTP1
 import VegaWire
+import VegaHTTP2Core
 
 /// Limits and windows for one HTTP/2 connection.
 public struct HTTP2Configuration: Sendable {

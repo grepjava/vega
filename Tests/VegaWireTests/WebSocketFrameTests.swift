@@ -9,6 +9,7 @@
 import Testing
 
 @testable import VegaWire
+import VegaWebSocketCore
 
 private func withBytes<R>(_ bytes: [UInt8], _ body: (UnsafePointer<UInt8>, Int) -> R) -> R {
     bytes.withUnsafeBufferPointer { body($0.baseAddress!, $0.count) }

@@ -3,9 +3,9 @@
 import Vega
 import VegaIO
 import VegaHTTP1
-import VegaHTTP3
+import VegaHTTP3Core
+import VegaQUICCore
 import VegaQUIC
-import VegaQUICNet
 
 /// Why an HTTP/3 request failed.
 public enum HTTP3ClientError: Error, Hashable, Sendable, CustomStringConvertible {

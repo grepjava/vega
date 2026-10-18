@@ -3,7 +3,7 @@
 import Testing
 import VegaCrypto
 @testable import VegaWire
-@testable import VegaQUIC
+@testable import VegaQUICCore
 
 /// Hex, so vectors can be pasted in the shape the RFC prints them.
 private func qhex(_ s: String) -> [UInt8] {

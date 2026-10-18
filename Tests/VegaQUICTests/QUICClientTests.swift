@@ -10,7 +10,7 @@ import Testing
 import VegaCrypto
 import VegaTLS
 @testable import VegaWire
-@testable import VegaQUIC
+@testable import VegaQUICCore
 
 private func makeIdentity(_ names: [String] = ["localhost"]) throws -> (pem: String, key: CertificateKey) {
     let identity = try TLSIdentity.selfSigned(names: names)

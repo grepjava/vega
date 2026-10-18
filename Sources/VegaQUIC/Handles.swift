@@ -3,7 +3,7 @@
 import Synchronization
 import Vega
 import VegaIO
-import VegaQUIC
+import VegaQUICCore
 
 /// Why a QUIC connection or stream stopped.
 public enum QUICConnectionError: Error, Hashable, Sendable, CustomStringConvertible {

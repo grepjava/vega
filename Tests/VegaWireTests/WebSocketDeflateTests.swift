@@ -4,6 +4,7 @@
 
 import Testing
 @testable import VegaWire
+import VegaWebSocketCore
 
 /// The response header value for these Sec-WebSocket-Extensions values, or nil.
 private func answer(_ values: String...) -> String? {

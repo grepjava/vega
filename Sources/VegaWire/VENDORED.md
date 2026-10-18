@@ -1,10 +1,10 @@
 # VegaWire
 
-The wire formats that Vega's protocol modules share, sans I/O: `ByteBuffer`
-and `ByteSpan`, HPACK (RFC 7541), HTTP/2 frame headers, WebSocket frames
-(RFC 6455) and the permessage-deflate negotiation (RFC 7692). Pure Swift, no
-C. VegaHTTP2 and VegaWebSocket are built on it, as are VegaHTTP3 (QPACK reuses
-HPACK's Huffman code) and VegaQUIC.
+The bytes that Vega's sans-I/O Core modules share: `ByteBuffer`, `ByteSpan`
+and the parsing helpers. Pure Swift, no C. HPACK (RFC 7541) and the HTTP/2
+frame headers came with it and are now in VegaHTTP2Core; the WebSocket frames
+(RFC 6455) and the permessage-deflate negotiation (RFC 7692) are in
+VegaWebSocketCore.
 
 It came to Vega from Garuda's `GarudaWire` module, which had vendored it from
 aviancore's `AvianHTTP` (github.com/grepjava/aviancore, commit d7a4ef3, 0.7.3),

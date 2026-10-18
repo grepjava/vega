@@ -1,3 +1,4 @@
+import VegaWire
 //===----------------------------------------------------------------------===//
 // permessage-deflate negotiation (RFC 7692 section 7.1).
 //

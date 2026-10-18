@@ -48,8 +48,8 @@ You want a Swift networking engine that **fully replaces SwiftNIO**, has **featu
 | **Process / signal / fs** | `tokio::process`, `tokio::signal`, `tokio::fs`, `NIOFileSystem`, `NIOFileHandle` | `VegaProcess`, `VegaFS` (io_uring/IOCP native; blocking pool on other drivers); signals are `Runtime.signals` in `Vega` itself (a self-pipe and one thread, no driver involved), not a module of their own |
 | **Streams** | `tokio-stream`, `AsyncSequence` bridging, backpressure | `AsyncSequence` adapters (`FramedRead.items()`, `Channel.Receiver.values()`); a bounded `Channel` is the `NIOAsyncSequenceProducer` equivalent |
 | **TLS** | `tokio-rustls`, `swift-nio-ssl`, ALPN, SNI, mTLS, session resumption, kTLS | `VegaTLS` (vendored BoringSSL, already in `CAvianSSL`); on Apple's `IOBackend.network`, `NetworkTLS`: Network.framework's own TLS for clients and servers (`TCPStream.connect(host:port:tls:)`, `TCPListener.bind(...tls:)`, ALPN, SNI, system or anchored trust, mutual TLS), as NIOTransportServices' `tlsOptions`. kTLS: `TLSConfiguration.kernelOffload` (`.transmit` / `.transmitAndReceive`) hands records to Linux's kernel TLS after the handshake, with OpenSSL or BoringSSL. Keys come from the key log (TLS 1.3) or the master secret (TLS 1.2), since both libraries run over Vega's own BIO. `sendFile` over TLS uses sendfile(2). close_notify and KeyUpdate are sent as typed records; on receive, alerts, tickets and KeyUpdate are handled, with rekey on Linux 6.14+. Falls back to userspace silently |
-| **HTTP** | `swift-nio-http2`, `NIOHTTP1`, `NIOWebSocket`, `hyper` (h1/h2), `h3` | `VegaHTTP1/2`, `VegaWebSocket`; HTTP/3 as `VegaHTTP3` (frames, QPACK) and `VegaHTTP3Net` (server, client) over `VegaQUIC` (sans-I/O) and `VegaQUICNet` (UDP endpoint) |
-| **Extras** | `NIOExtras` (quiescing, debug handlers), SOCKS, HTTP proxy, compression | `VegaExtras`: `Quiesce` (graceful shutdown), SOCKS5, CONNECT proxy, gzip/brotli/zstd (existing CAvian compress) |
+| **HTTP** | `swift-nio-http2`, `NIOHTTP1`, `NIOWebSocket`, `hyper` (h1/h2), `h3` | `VegaHTTP1`, `VegaHTTP2`, `VegaHTTP3`, `VegaWebSocket` over `VegaQUIC` (UDP endpoint); each protocol's sans-I/O logic in its `Core` module (`VegaHTTP2Core`, `VegaHTTP3Core`, `VegaWebSocketCore`, `VegaQUICCore`) |
+| **Extras** | `NIOExtras` (quiescing, debug handlers), SOCKS, HTTP proxy, compression | `Quiesce` (graceful shutdown) in `Vega`; `VegaProxy` (SOCKS5, CONNECT); `VegaCompression` (gzip, deflate, brotli, zstd) |
 | **Testing** | `EmbeddedChannel`, `NIOAsyncTestingChannel`, `tokio::test`, `loom`-style checks, paused time | `VegaTest`: `Runtime.seeded` and `Simulation` (seeded schedules, replayable), `MockClock`, in-memory duplex streams, `FaultyStream` (short reads, split writes, delays, resets) |
 | **Observability** | `tracing`, `tokio-console`, runtime metrics, swift-log/metrics | `Runtime.metrics` (lock-free per-worker counters, poll histograms), `Runtime.onSlowPoll`, `VegaMetrics` (sampling, Prometheus text); the `Adapters` package: `VegaSwiftMetrics` (`reportMetrics`) and `VegaLogging` (`logSlowPolls`) |
 | **Platforms** | Linux, macOS, Windows, iOS (NIOTS) | the drivers below |
@@ -178,7 +178,7 @@ Not on Windows: `Runtime.sharded` (it needs `fork`); brotli and zstd (gzip and d
   - `VegaFS`, `VegaProcess`, `VegaSignal`
   - `VegaTLS` (over `CAvianSSL`)
   - `VegaHTTP1`, `VegaHTTP2`, `VegaHTTP3`, `VegaWebSocket` (evolved from `AvianHTTP` and `AvianQUIC`)
-  - `VegaExtras`, `VegaMetrics`, `VegaTest`
+  - `VegaCompression`, `VegaProxy`, `VegaMetrics`, `VegaTest`
   - `AvianCore`, `AvianHTTP` and `AvianQUIC` stay as the sans-I/O protocol layers the `Vega*` modules sit on.
 - **Docs and releases.**
   - `docs/VEGA.md` (design), `docs/MIGRATING-FROM-NIO.md` (concept mapping: `Channel` → `TCPStream` + `Framed`, `ChannelHandler` → `Codec`/async function, `EventLoopFuture` → `async`).

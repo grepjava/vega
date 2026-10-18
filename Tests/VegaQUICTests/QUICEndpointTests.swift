@@ -12,8 +12,8 @@ import VegaIO
 import VegaCrypto
 import VegaTLS
 import QUICTestPeer
-import VegaQUICNet
-@testable import VegaQUIC
+import VegaQUIC
+@testable import VegaQUICCore
 
 /// The test peer's datagrams over a socket.
 final class Wire {

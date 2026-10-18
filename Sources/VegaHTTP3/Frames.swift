@@ -3,8 +3,8 @@
 import Vega
 import VegaIO
 import VegaHTTP1
-import VegaHTTP3
-import VegaQUIC
+import VegaHTTP3Core
+import VegaQUICCore
 import VegaWire
 
 /// One HTTP/3 frame (RFC 9114 section 7): its type and payload.

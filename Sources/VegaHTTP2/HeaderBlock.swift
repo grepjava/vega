@@ -1,5 +1,6 @@
 import VegaWire
 import VegaHTTP1
+import VegaHTTP2Core
 
 /// A header block to send, encoded with VegaWire's HPACK.
 ///

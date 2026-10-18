@@ -5,9 +5,9 @@ import Vega
 import VegaCrypto
 import VegaTLS
 import VegaHTTP1
+import VegaQUICCore
 import VegaQUIC
-import VegaQUICNet
-import VegaHTTP3Net
+import VegaHTTP3
 
 @Suite("HTTP3Client")
 struct HTTP3ClientTests {

@@ -30,7 +30,7 @@ import CVega
 import Synchronization
 import Vega
 import VegaIO
-import VegaQUIC
+import VegaQUICCore
 import VegaWire
 
 /// A UDP socket speaking QUIC: a server (`listen`, then `accept`) or a

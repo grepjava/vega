@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 import VegaWire
+import VegaHTTP2Core
 
 public enum QPACKTables {
     /// name, value

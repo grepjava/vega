@@ -12,7 +12,7 @@ import VegaCrypto
 import VegaTLS
 import QUICTestPeer
 @testable import VegaWire
-@testable import VegaQUIC
+@testable import VegaQUICCore
 
 private func deliver(_ datagram: [UInt8], to server: QUICConnection, nowMs: UInt64) {
     var datagram = datagram

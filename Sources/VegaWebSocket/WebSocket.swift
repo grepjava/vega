@@ -3,6 +3,7 @@ import Vega
 import VegaIO
 import VegaWire
 import VegaHTTP1
+import VegaWebSocketCore
 
 /// A whole message: fragments are joined before it's handed on.
 public enum WebSocketMessage: Sendable, Equatable {

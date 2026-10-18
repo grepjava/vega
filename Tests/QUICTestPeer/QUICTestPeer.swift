@@ -16,7 +16,7 @@
 // it can be an ordinary target.
 //===----------------------------------------------------------------------===//
 
-import VegaQUIC
+import VegaQUICCore
 import VegaWire
 import VegaCrypto
 import VegaTLS

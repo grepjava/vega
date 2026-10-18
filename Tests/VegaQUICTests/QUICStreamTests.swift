@@ -13,7 +13,7 @@
 
 import Testing
 @testable import VegaWire
-@testable import VegaQUIC
+@testable import VegaQUICCore
 
 // MARK: - What an acknowledgement means
 
