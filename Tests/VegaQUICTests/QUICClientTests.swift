@@ -364,28 +364,28 @@ struct CertificateVerifierTests {
     @Test func aSelfSignedRootTrustedAsPEMVerifies() throws {
         let (pem, der) = try chain(["localhost", "*.example.com"])
         let verifier = try CertificateVerifier(trustRoots: .certificates(pem))
-        try verifier.verify(chain: der, hostname: "localhost")
-        try verifier.verify(chain: der, hostname: "www.example.com")
+        try verifier.verify(chain: der, serverName: "localhost")
+        try verifier.verify(chain: der, serverName: "www.example.com")
         try verifier.verifyChain(der)
-        #expect(throws: CryptoError.self) { try verifier.verify(chain: der, hostname: "") }
-        #expect(verifier.isTrusted(chain: der, hostname: "LOCALHOST"))
+        #expect(throws: CryptoError.self) { try verifier.verify(chain: der, serverName: "") }
+        #expect(verifier.isTrusted(chain: der, serverName: "LOCALHOST"))
     }
 
     @Test func theWrongNameIsRefused() throws {
         let (pem, der) = try chain(["localhost", "*.example.com"])
         let verifier = try CertificateVerifier(trustRoots: .certificates(pem))
-        #expect(!verifier.isTrusted(chain: der, hostname: "example.org"))
+        #expect(!verifier.isTrusted(chain: der, serverName: "example.org"))
         // A wildcard covers one label, no more and no fewer.
-        #expect(!verifier.isTrusted(chain: der, hostname: "example.com"))
-        #expect(!verifier.isTrusted(chain: der, hostname: "a.b.example.com"))
-        #expect(throws: CryptoError.self) { try verifier.verify(chain: der, hostname: "example.org") }
+        #expect(!verifier.isTrusted(chain: der, serverName: "example.com"))
+        #expect(!verifier.isTrusted(chain: der, serverName: "a.b.example.com"))
+        #expect(throws: CryptoError.self) { try verifier.verify(chain: der, serverName: "example.org") }
     }
 
     @Test func anIPAddressIsCheckedAgainstIPNames() throws {
         let (pem, der) = try chain(["127.0.0.1", "localhost"])
         let verifier = try CertificateVerifier(trustRoots: .certificates(pem))
-        #expect(verifier.isTrusted(chain: der, hostname: "127.0.0.1"))
-        #expect(!verifier.isTrusted(chain: der, hostname: "127.0.0.2"))
+        #expect(verifier.isTrusted(chain: der, serverName: "127.0.0.1"))
+        #expect(!verifier.isTrusted(chain: der, serverName: "127.0.0.2"))
     }
 
     @Test func anUntrustedRootIsRefused() throws {
@@ -393,7 +393,7 @@ struct CertificateVerifierTests {
         let (otherPEM, _) = try chain(["localhost"])
         let verifier = try CertificateVerifier(trustRoots: .certificates(otherPEM))
         do throws(CryptoError) {
-            try verifier.verify(chain: der, hostname: "localhost")
+            try verifier.verify(chain: der, serverName: "localhost")
             Issue.record("an untrusted chain verified")
         } catch {
             guard error.code == .failed, let reason = error.message else { Issue.record("\(error)"); return }
@@ -401,14 +401,14 @@ struct CertificateVerifierTests {
         }
         // Nor do the system's roots vouch for a self-signed certificate.
         let system = try CertificateVerifier.system
-        #expect(!system.isTrusted(chain: der, hostname: "localhost"))
+        #expect(!system.isTrusted(chain: der, serverName: "localhost"))
     }
 
     @Test func garbageIsRefused() throws {
         let (pem, _) = try chain(["localhost"])
         let verifier = try CertificateVerifier(trustRoots: .certificates(pem))
-        #expect(!verifier.isTrusted(chain: [], hostname: "localhost"))
-        #expect(!verifier.isTrusted(chain: [[1, 2, 3]], hostname: "localhost"))
+        #expect(!verifier.isTrusted(chain: [], serverName: "localhost"))
+        #expect(!verifier.isTrusted(chain: [[1, 2, 3]], serverName: "localhost"))
         #expect(throws: CryptoError.self) { _ = try CertificateVerifier(trustRoots: .certificates("not PEM")) }
     }
 }

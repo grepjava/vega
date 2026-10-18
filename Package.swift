@@ -98,9 +98,10 @@ let package = Package(
                                  .linkedLibrary("libssl", .when(platforms: [.windows], traits: ["OpenSSL"])),
                                  .linkedLibrary("libcrypto", .when(platforms: [.windows], traits: ["OpenSSL"])),
                                  .linkedLibrary("crypt32", .when(platforms: [.windows]))]),
-        .target(name: "VegaTLS", dependencies: ["Vega", "VegaIO", "CVegaTLS", "CVega"], swiftSettings: swiftSettings),
+        .target(name: "VegaTLS", dependencies: ["Vega", "VegaIO", "VegaCrypto", "CVegaTLS", "CVega"], swiftSettings: swiftSettings),
         // Hashes, HMAC, HKDF, AEADs, key exchange and signatures, over the
-        // same library as VegaTLS (and empty without one).
+        // same library as VegaTLS. Without one, only Digest (SHA-256, HMAC and
+        // PBKDF2 on CommonCrypto, on Apple's platforms).
         .target(name: "VegaCrypto", dependencies: ["CVegaTLS"], swiftSettings: swiftSettings),
         // gzip and deflate on the system's zlib; brotli and zstd loaded with
         // dlopen when there. On Windows (no zlib in its SDK) gzip and

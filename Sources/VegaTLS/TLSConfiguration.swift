@@ -3,6 +3,7 @@
 import CVegaTLS
 import Synchronization
 import Vega
+import VegaCrypto
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
@@ -25,17 +26,6 @@ public struct TLSConfiguration: Sendable {
         case client, server
     }
 
-    /// Which certificate authorities to trust.
-    public enum TrustRoots: Sendable, Hashable {
-        /// The system's: OpenSSL's default store (`SSL_CERT_FILE` and
-        /// `SSL_CERT_DIR` override it), plus Windows' certificate store.
-        case system
-        /// Only these, as PEM.
-        case certificates(String)
-        /// The system's and these.
-        case systemAnd(String)
-    }
-
     /// Whether to check the peer's certificate.
     public enum Verification: Sendable, Hashable {
         /// Don't: any certificate, or (server) none, is accepted. A client
@@ -47,13 +37,6 @@ public struct TLSConfiguration: Sendable {
         /// Check it (against `trustRoots`, and on a client against the
         /// server name); a server refuses clients without one (mutual TLS).
         case required
-    }
-
-    public enum Version: UInt16, Sendable, Hashable, Comparable {
-        case v1_2 = 0x0303
-        case v1_3 = 0x0304
-
-        public static func < (a: Version, b: Version) -> Bool { a.rawValue < b.rawValue }
     }
 
     /// Which directions of a connection's records Linux's kernel TLS takes
@@ -78,9 +61,9 @@ public struct TLSConfiguration: Sendable {
     /// first that the client offers (and refuses a client offering only
     /// others).
     public var applicationProtocols: [String]
-    public var minimumVersion: Version = .v1_2
+    public var minimumVersion: TLSVersion = .v1_2
     /// nil: the newest the TLS library has.
-    public var maximumVersion: Version?
+    public var maximumVersion: TLSVersion?
     /// The TLS 1.2 cipher suites, as an OpenSSL cipher list; nil: the
     /// library's defaults. TLS 1.3's suites are fixed, and need no choosing.
     public var cipherList: String?
@@ -253,13 +236,12 @@ public final class TLSContext: @unchecked Sendable {
             throw IOError(code: IOError.tls.code, message: "a server needs an identity")
         }
         if c.verification != .disabled || c.role == .client {
-            switch c.trustRoots {
-            case .system:
+            let roots = c.trustRoots
+            if roots.includesSystem {
                 try check { err, len in cv_tls_ctx_use_system_trust(ctx, err, len) }
-            case .certificates(let pem):
-                try check { err, len in cv_tls_ctx_add_trust(ctx, pem, Int32(pem.utf8.count), err, len) }
-            case .systemAnd(let pem):
-                try check { err, len in cv_tls_ctx_use_system_trust(ctx, err, len) }
+            }
+            if !roots.includesSystem || !roots.pem.isEmpty {
+                let pem = roots.pem
                 try check { err, len in cv_tls_ctx_add_trust(ctx, pem, Int32(pem.utf8.count), err, len) }
             }
         }

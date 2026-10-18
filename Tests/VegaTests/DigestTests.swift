@@ -1,5 +1,5 @@
 import Testing
-import VegaTLS
+import VegaCrypto
 
 private func hex(_ bytes: [UInt8]) -> String {
     bytes.map { String($0, radix: 16).count == 1 ? "0" + String($0, radix: 16) : String($0, radix: 16) }.joined()
@@ -35,7 +35,7 @@ struct DigestTests {
     }
 
     @Test func refusesNoIterations() {
-        #expect(throws: DigestError()) {
+        #expect(throws: CryptoError.self) {
             try Digest.pbkdf2SHA256(password: [], salt: [], iterations: 0)
         }
     }

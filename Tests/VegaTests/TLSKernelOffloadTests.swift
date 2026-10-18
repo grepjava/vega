@@ -55,7 +55,7 @@ private let kernelChaCha: Bool = {
 /// A protocol version and cipher suite to run with.
 struct Suite: Sendable, CustomStringConvertible {
     var description: String
-    var maximum: TLSConfiguration.Version?
+    var maximum: TLSVersion?
     var ciphers: String?
 
     /// Whether the kernel can take this suite: with no tls module, or

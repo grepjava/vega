@@ -16,7 +16,7 @@ import Security
 /// ```swift
 /// let stream = try await TCPStream.connect(host: "example.com", port: 443,
 ///                                          tls: .client(applicationProtocols: ["h2", "http/1.1"]))
-/// let session = try await stream.networkTLS()  // session.applicationProtocol: "h2"
+/// let session = try await stream.tlsSession()  // session.applicationProtocol: "h2"
 /// ```
 ///
 /// A server takes an identity from the keychain or a PKCS #12 file:
@@ -24,7 +24,7 @@ import Security
 /// ```swift
 /// let listener = try TCPListener.bind(port: 8443, tls: .server(identity: identity))
 /// let stream = try await listener.accept()
-/// _ = try await stream.networkTLS()  // the handshake
+/// _ = try await stream.tlsSession()  // the handshake
 /// ```
 ///
 /// On other backends, and on platforms without Network.framework, use
@@ -47,7 +47,7 @@ public struct NetworkTLS: @unchecked Sendable {
         case anchors([SecCertificate])
         /// Any certificate, unchecked. For tests only: anyone can pose as
         /// the server.
-        case anyCertificate
+        case insecureAnyCertificate
     }
 
     /// A client's TLS. `serverName` is checked against the certificate and
@@ -56,7 +56,7 @@ public struct NetworkTLS: @unchecked Sendable {
     /// ask for one.
     public static func client(serverName: String? = nil, applicationProtocols: [String] = [],
                               trust: Trust = .system, identity: SecIdentity? = nil,
-                              minimumVersion: tls_protocol_version_t = .TLSv12) -> NetworkTLS {
+                              minimumVersion: TLSVersion = .v1_2) -> NetworkTLS {
         let tls = NWProtocolTLS.Options()
         let o = tls.securityProtocolOptions
         if let serverName { sec_protocol_options_set_tls_server_name(o, serverName) }
@@ -73,7 +73,7 @@ public struct NetworkTLS: @unchecked Sendable {
     /// (mutual TLS).
     public static func server(identity: SecIdentity, applicationProtocols: [String] = [],
                               clientTrust: Trust? = nil,
-                              minimumVersion: tls_protocol_version_t = .TLSv12) -> NetworkTLS {
+                              minimumVersion: TLSVersion = .v1_2) -> NetworkTLS {
         let tls = NWProtocolTLS.Options()
         let o = tls.securityProtocolOptions
         if let id = sec_identity_create(identity) { sec_protocol_options_set_local_identity(o, id) }
@@ -85,16 +85,16 @@ public struct NetworkTLS: @unchecked Sendable {
         return NetworkTLS(options: tls)
     }
 
-    private static func common(_ o: sec_protocol_options_t, _ alpn: [String], _ minimum: tls_protocol_version_t) {
+    private static func common(_ o: sec_protocol_options_t, _ alpn: [String], _ minimum: TLSVersion) {
         for p in alpn { sec_protocol_options_add_tls_application_protocol(o, p) }
-        sec_protocol_options_set_min_tls_protocol_version(o, minimum)
+        sec_protocol_options_set_min_tls_protocol_version(o, tls_protocol_version_t(rawValue: minimum.rawValue) ?? .TLSv12)
     }
 
     private static func verify(_ o: sec_protocol_options_t, _ trust: Trust) {
         switch trust {
         case .system:
             break
-        case .anyCertificate:
+        case .insecureAnyCertificate:
             sec_protocol_options_set_verify_block(o, { _, _, complete in complete(true) }, NetworkIO.target)
         case .anchors(let anchors):
             let anchors = anchors as CFArray
@@ -114,7 +114,7 @@ public struct NetworkTLS: @unchecked Sendable {
         /// The protocol ALPN chose, if any.
         public let applicationProtocol: String?
         /// The TLS version.
-        public let version: tls_protocol_version_t
+        public let version: TLSVersion
     }
 }
 
@@ -131,20 +131,20 @@ extension TCPStream {
     /// handshake is done: an accepted stream's goes on after `accept`
     /// returns, and this waits for it (and throws how it failed). Throws
     /// `.unsupported` for a stream without it.
-    public func networkTLS() async throws(IOError) -> NetworkTLS.Session {
+    public func tlsSession() async throws(IOError) -> NetworkTLS.Session {
         guard let nw = reg.nw, let stream = NetworkIO.handle(nw) as? NetworkStream else { throw .unsupported }
         try await stream.ready()
         guard let metadata = stream.tlsMetadata else { throw .unsupported }
         return NetworkTLS.Session(
             applicationProtocol: sec_protocol_metadata_get_negotiated_protocol(metadata).map { String(cString: $0) },
-            version: sec_protocol_metadata_get_negotiated_tls_protocol_version(metadata))
+            version: TLSVersion(rawValue: sec_protocol_metadata_get_negotiated_tls_protocol_version(metadata).rawValue))
     }
 }
 
 extension TCPListener {
     /// Listen with TLS that Network.framework runs on every connection
     /// accepted: `accept` returns before the handshake, and the stream's
-    /// `networkTLS()` waits for it. Throws `.unsupported` unless the
+    /// `tlsSession()` waits for it. Throws `.unsupported` unless the
     /// runtime's backend is `.network`.
     public static func bind(host: String = "", port: Int, backlog: Int = 1024, reusePort: Bool = false,
                             tls: NetworkTLS) throws(IOError) -> TCPListener {

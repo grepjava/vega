@@ -14,21 +14,9 @@ import CVegaTLS
 ///
 /// ```swift
 /// let verifier = try CertificateVerifier(trustRoots: .certificates(caPEM))
-/// try verifier.verify(chain: certificates, hostname: "example.com")
+/// try verifier.verify(chain: certificates, serverName: "example.com")
 /// ```
 public final class CertificateVerifier: Sendable {
-    /// Where trust comes from.
-    public enum TrustRoots: Sendable, Hashable {
-        /// The system's: OpenSSL's default store (`SSL_CERT_FILE` and
-        /// `SSL_CERT_DIR` override it), plus Windows' certificate store.
-        case system
-        /// Only these, as PEM. A self-signed certificate here is trusted as
-        /// itself.
-        case certificates(String)
-        /// The system's and these.
-        case systemAnd(String)
-    }
-
     private final class Raw: @unchecked Sendable {
         let ptr: OpaquePointer
         init(_ ptr: OpaquePointer) { self.ptr = ptr }
@@ -40,13 +28,8 @@ public final class CertificateVerifier: Sendable {
 
     public init(trustRoots: TrustRoots = .system) throws(CryptoError) {
         self.trustRoots = trustRoots
-        let system: Bool
-        var pem: String
-        switch trustRoots {
-        case .system: system = true; pem = ""
-        case .certificates(let p): system = false; pem = p
-        case .systemAnd(let p): system = true; pem = p
-        }
+        let system = trustRoots.includesSystem
+        var pem = trustRoots.pem
         var err = [CChar](repeating: 0, count: 256)
         let made = pem.withUTF8 { p in
             p.withMemoryRebound(to: CChar.self) { cv_verifier_new(system ? 1 : 0, $0.baseAddress, $0.count, &err, err.count) }
@@ -69,14 +52,14 @@ public final class CertificateVerifier: Sendable {
 
     /// Throws `.failed` with the reason when `chain` (DER, leaf first, as a
     /// TLS Certificate message carries it) is not to be trusted for
-    /// `hostname` -- a DNS name, matched against the leaf's subject
+    /// `serverName` -- a DNS name, matched against the leaf's subject
     /// alternative names with wildcards as RFC 6125 has them, or an IP
-    /// address, matched against its IP ones. An empty `hostname` fails: a
+    /// address, matched against its IP ones. An empty `serverName` fails: a
     /// chain checked against no name would be anyone's (`verifyChain` is
     /// the check without one, for a client's certificate).
-    public func verify(chain: [[UInt8]], hostname: String) throws(CryptoError) {
-        guard !hostname.isEmpty else { throw .failed("certificate verify failed: no host name to check it against") }
-        try check(chain, hostname)
+    public func verify(chain: [[UInt8]], serverName: String) throws(CryptoError) {
+        guard !serverName.isEmpty else { throw .failed("certificate verify failed: no server name to check it against") }
+        try check(chain, serverName)
     }
 
     /// The chain alone, with no name: for a server checking a client's
@@ -111,9 +94,9 @@ public final class CertificateVerifier: Sendable {
     }
 
     /// `verify`, as a yes or no.
-    public func isTrusted(chain: [[UInt8]], hostname: String) -> Bool {
+    public func isTrusted(chain: [[UInt8]], serverName: String) -> Bool {
         do throws(CryptoError) {
-            try verify(chain: chain, hostname: hostname)
+            try verify(chain: chain, serverName: serverName)
             return true
         } catch {
             return false

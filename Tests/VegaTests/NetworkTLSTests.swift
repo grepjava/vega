@@ -98,7 +98,7 @@ nonisolated(unsafe) private let certificate = SecCertificateCreateWithData(nil, 
     private static func serve(_ listener: borrowing TCPListener) async -> Result<NetworkTLS.Session, IOError> {
         do throws(IOError) {
             let conn = try await listener.accept()
-            let session = try await conn.networkTLS()
+            let session = try await conn.tlsSession()
             var buf = IOBuffer(capacity: 64)
             while try await conn.read(into: &buf) > 0 {
                 try await conn.write(buf)
@@ -114,7 +114,7 @@ nonisolated(unsafe) private let certificate = SecCertificateCreateWithData(nil, 
     private static func call(port: Int, tls: NetworkTLS) async -> (Result<NetworkTLS.Session, IOError>, String) {
         do throws(IOError) {
             let stream = try await TCPStream.connect(host: "127.0.0.1", port: port, tls: tls)
-            let session = try await stream.networkTLS()
+            let session = try await stream.tlsSession()
             var out = IOBuffer(capacity: 16)
             out.append("ping")
             try await stream.write(out)
@@ -140,7 +140,7 @@ nonisolated(unsafe) private let certificate = SecCertificateCreateWithData(nil, 
         #expect(ends.echoed == "ping")
         #expect(client.applicationProtocol == "h2")
         #expect(server.applicationProtocol == "h2")
-        #expect(client.version == .TLSv13)
+        #expect(client.version == .v1_3)
     }
 
     /// The system's trust store doesn't know a self-signed certificate.
@@ -160,11 +160,11 @@ nonisolated(unsafe) private let certificate = SecCertificateCreateWithData(nil, 
         #expect(throws: IOError.self) { try ends.client.get() }
     }
 
-    @Test func anyCertificateTakesAnything() throws {
+    @Test func insecureAnyCertificateTakesAnything() throws {
         let rt = runtime()
         defer { rt.shutdown() }
         let ends = try exchange(rt, server: .server(identity: identity),
-                                client: .client(serverName: "other.test", trust: .anyCertificate))
+                                client: .client(serverName: "other.test", trust: .insecureAnyCertificate))
         _ = try ends.client.get()
         #expect(ends.echoed == "ping")
     }
@@ -213,7 +213,7 @@ nonisolated(unsafe) private let certificate = SecCertificateCreateWithData(nil, 
             let listener = try TCPListener.bind(host: "127.0.0.1", port: 0)
             let stream = try await TCPStream.connect(host: "127.0.0.1", port: listener.localPort)
             do throws(IOError) {
-                _ = try await stream.networkTLS()
+                _ = try await stream.tlsSession()
                 return false
             } catch {
                 return error == .unsupported

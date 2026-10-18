@@ -77,7 +77,7 @@ private func exchange(server: TLSContext, client: TLSContext, name: String? = "v
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
         let server = try serverContext(), client = try clientContext()
-        let (version, name, alpn, cert) = try rt.block { () async throws -> (TLSConfiguration.Version?, String?, String?, Bool) in
+        let (version, name, alpn, cert) = try rt.block { () async throws -> (TLSVersion?, String?, String?, Bool) in
             let pair = duplex(capacity: 64 * 1024)
             let s = rt.spawn(with: pair.second) { t async -> String? in
                 guard let tls = try? await TLSStream.accept(t, context: server) else { return nil }

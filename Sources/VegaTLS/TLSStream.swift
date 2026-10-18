@@ -88,7 +88,10 @@ public struct TLSStream<Transport: AsyncReader & AsyncWriter & ~Copyable>: ~Copy
     public var applicationProtocol: String? { state.string(cv_tls_alpn) }
     /// The server name the client asked for (SNI), if any.
     public var serverName: String? { state.string(cv_tls_server_name) }
-    public var version: TLSConfiguration.Version? { TLSConfiguration.Version(rawValue: UInt16(cv_tls_version(state.tls))) }
+    public var version: TLSVersion? {
+        let code = cv_tls_version(state.tls)
+        return code > 0 ? TLSVersion(rawValue: UInt16(code)) : nil
+    }
     /// Whether an earlier session was resumed (no full handshake).
     public var isResumed: Bool { cv_tls_resumed(state.tls) != 0 }
     /// The peer's certificate as DER, if it sent one.
@@ -518,7 +521,7 @@ final class TLSState: @unchecked Sendable {
     }
 
     func updateKeys<W: AsyncWriter & ~Copyable>(_ request: Bool, _ transport: borrowing W) async throws(IOError) {
-        guard cv_tls_version(tls) == Int32(TLSConfiguration.Version.v1_3.rawValue) else {
+        guard cv_tls_version(tls) == Int32(TLSVersion.v1_3.rawValue) else {
             throw IOError(code: IOError.tls.code, message: "key update: TLS 1.3 only")
         }
         #if os(Linux)

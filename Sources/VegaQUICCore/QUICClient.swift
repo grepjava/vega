@@ -52,7 +52,7 @@ public enum QUICCertificateVerification: Sendable {
     private static func check(_ verifier: CertificateVerifier) -> ([[UInt8]], String) -> String? {
         { chain, name in
             do throws(CryptoError) {
-                try verifier.verify(chain: chain, hostname: name)
+                try verifier.verify(chain: chain, serverName: name)
                 return nil
             } catch {
                 if error.code == .failed, let reason = error.message { return reason }

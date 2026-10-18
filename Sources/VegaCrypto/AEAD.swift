@@ -97,7 +97,7 @@ public struct AEAD: ~Copyable {
     /// Seals plaintext into out, which takes plaintext.count + 16 bytes and
     /// may be plaintext's own memory (in place). The bytes written, or -1.
     @inlinable
-    public func seal(nonce: UnsafeRawPointer, aad: UnsafeRawBufferPointer, plaintext: UnsafeRawBufferPointer,
+    package func seal(nonce: UnsafeRawPointer, aad: UnsafeRawBufferPointer, plaintext: UnsafeRawBufferPointer,
                      into out: UnsafeMutableRawPointer) -> Int {
         cv_aead_seal(ctx, nonce.assumingMemoryBound(to: UInt8.self), aad.baseAddress, aad.count,
                      plaintext.baseAddress, plaintext.count, out.assumingMemoryBound(to: UInt8.self))
@@ -107,7 +107,7 @@ public struct AEAD: ~Copyable {
     /// ciphertext.count - 16 bytes and may be ciphertext's own memory. The
     /// plaintext's length, or -1 if the tag doesn't verify.
     @inlinable
-    public func open(nonce: UnsafeRawPointer, aad: UnsafeRawBufferPointer, ciphertext: UnsafeRawBufferPointer,
+    package func open(nonce: UnsafeRawPointer, aad: UnsafeRawBufferPointer, ciphertext: UnsafeRawBufferPointer,
                      into out: UnsafeMutableRawPointer) -> Int {
         cv_aead_open(ctx, nonce.assumingMemoryBound(to: UInt8.self), aad.baseAddress, aad.count,
                      ciphertext.baseAddress, ciphertext.count, out.assumingMemoryBound(to: UInt8.self))
@@ -143,7 +143,7 @@ public struct HeaderProtection: ~Copyable {
 
     /// Five bytes of mask into out, from the 16 bytes at sample.
     @inlinable
-    public func mask(sample: UnsafeRawPointer, into out: UnsafeMutableRawPointer) -> Bool {
+    package func mask(sample: UnsafeRawPointer, into out: UnsafeMutableRawPointer) -> Bool {
         cv_hp_mask(ctx, sample.assumingMemoryBound(to: UInt8.self), out.assumingMemoryBound(to: UInt8.self)) == 0
     }
 }
