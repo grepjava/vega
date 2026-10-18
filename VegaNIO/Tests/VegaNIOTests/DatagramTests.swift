@@ -59,10 +59,12 @@ private final class DatagramCollector: ChannelInboundHandler, @unchecked Sendabl
         #expect(client.remoteAddress == nil)
         // Datagrams keep their bounds, up to a large one.
         let payloads = ["one", "two", String(repeating: "x", count: 60_000)]
-        for p in payloads {
-            client.write(AddressedEnvelope(remoteAddress: serverAddress, data: ByteBuffer(string: p)), promise: nil)
+        let sent = payloads.map {
+            client.write(AddressedEnvelope(remoteAddress: serverAddress, data: ByteBuffer(string: $0)))
         }
         client.flush()
+        // A send that fails fails here, not as a reply that never comes.
+        for s in sent { try s.wait() }
         let replies = try done.futureResult.wait()
         #expect(replies.map { String(buffer: $0.data) }.sorted() == payloads.sorted())
         #expect(replies.allSatisfy { $0.remoteAddress == serverAddress })
@@ -230,10 +232,12 @@ private func temporaryDatagramPath() -> String {
             .channelInitializer { $0.pipeline.addHandler(collector) }
             .bind(unixDomainSocketPath: clientPath).wait()
         let payloads = ["one", "two", String(repeating: "y", count: 50_000)]
-        for p in payloads {
-            client.write(AddressedEnvelope(remoteAddress: serverAddress, data: ByteBuffer(string: p)), promise: nil)
+        let sent = payloads.map {
+            client.write(AddressedEnvelope(remoteAddress: serverAddress, data: ByteBuffer(string: $0)))
         }
         client.flush()
+        // A send that fails fails here, not as a reply that never comes.
+        for s in sent { try s.wait() }
         let replies = try done.futureResult.wait()
         #expect(replies.map { String(buffer: $0.data) }.sorted() == payloads.sorted())
         #expect(replies.allSatisfy { $0.remoteAddress.pathname == serverPath })

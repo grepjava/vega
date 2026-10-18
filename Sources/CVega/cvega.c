@@ -2865,6 +2865,17 @@ intptr_t cv_send(int fd, const void *buf, intptr_t len) {
     return n >= 0 ? (long)n : -(long)errno;
 }
 
+/// Darwin sends no UDP datagram longer than SO_SNDBUF, 9 KiB by default
+/// (net.inet.udp.maxdgram), where Linux sends up to 64 KiB: room for that.
+static void udp_room(int fd) {
+#if defined(__APPLE__)
+    int size = 65536;
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof size);
+#else
+    (void)fd;
+#endif
+}
+
 int cv_udp_bind(const char *host, int port, int reuse, int *err) {
     struct addrinfo *res = resolve(host, port, 1, SOCK_DGRAM, err);
     if (!res) return -1;
@@ -2881,6 +2892,7 @@ int cv_udp_bind(const char *host, int port, int reuse, int *err) {
         if (reuse & CV_UDP_REUSEPORT) setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
 #endif
         if (reuse & CV_UDP_REUSEADDR) setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        udp_room(fd);
         if (bind(fd, a->ai_addr, a->ai_addrlen) == 0) {
             *err = 0;
             break;
@@ -2964,9 +2976,8 @@ int cv_unix_accept(int fd, int *err) { return accept_nb(fd, err); }
 /// about that much.
 static void unix_dgram_room(int fd) {
 #if defined(__APPLE__)
-    int size = 65536;
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof size);
-    size = 4 * 65536;
+    udp_room(fd);
+    int size = 4 * 65536;
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof size);
 #else
     (void)fd;
