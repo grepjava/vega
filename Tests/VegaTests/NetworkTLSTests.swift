@@ -118,12 +118,12 @@ nonisolated(unsafe) private let certificate = SecCertificateCreateWithData(nil, 
             var out = IOBuffer(capacity: 16)
             out.append("ping")
             try await stream.write(out)
-            // The echo ends when the server sees this end of stream: a
-            // close_notify under TLS.
-            try stream.shutdownWrite()
+            // No half-close under Network.framework's TLS: the echo ends
+            // when this stream goes, once it has the four bytes back.
+            #expect(throws: IOError.unsupported) { try stream.shutdownWrite() }
             var back = IOBuffer(capacity: 16)
             try await Runtime.withIODeadline(.seconds(10)) { () async throws(IOError) in
-                while try await stream.read(into: &back) > 0 {}
+                while back.count < 4, try await stream.read(into: &back) > 0 {}
             }
             return (.success(session), back.string)
         } catch {

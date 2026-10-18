@@ -9,7 +9,9 @@ import Security
 /// `.network` or `VEGA_DRIVER=network` on macOS), as NIOTransportServices'
 /// `tlsOptions` does: no TLS library in the process, and the system's trust
 /// store, certificate checks and session cache. A stream made with it reads
-/// and writes plaintext.
+/// and writes plaintext. It can't half-close: Network.framework's TLS holds
+/// a final send back from the peer until the connection closes, so
+/// `shutdownWrite()` throws `.unsupported`; close the stream instead.
 ///
 /// ```swift
 /// let stream = try await TCPStream.connect(host: "example.com", port: 443,

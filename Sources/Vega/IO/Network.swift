@@ -472,11 +472,18 @@ final class NetworkStream: NetworkHandle, @unchecked Sendable {
         return known
     }
 
-    /// Send end of stream after what was sent before: FIN, and under TLS a
-    /// close_notify first. `.finalMessage`, as NIOTransportServices sends
-    /// for output closed: on `.defaultStream`, TLS sends nothing at all.
-    func shutdownWrite() {
+    /// Send end of stream (FIN) after what was sent before. Not under TLS:
+    /// Network.framework's TLS takes a final send and says it went, but the
+    /// peer sees no end of stream until the connection is closed, so a
+    /// half-close there would leave both ends waiting. `.unsupported`.
+    func shutdownWrite() throws(IOError) {
+        if isTLS { throw .unsupported }
         connection.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .idempotent)
+    }
+
+    /// Whether Network.framework runs TLS on this connection.
+    var isTLS: Bool {
+        connection.parameters.defaultProtocolStack.applicationProtocols.contains { $0 is NWProtocolTLS.Options }
     }
 }
 
@@ -643,8 +650,8 @@ extension IORegistration {
         (NetworkIO.handle(nw) as? NetworkStream)?.hasPendingInput ?? false
     }
 
-    func nwShutdownWrite(_ nw: UnsafeRawPointer) {
-        (NetworkIO.handle(nw) as? NetworkStream)?.shutdownWrite()
+    func nwShutdownWrite(_ nw: UnsafeRawPointer) throws(IOError) {
+        try (NetworkIO.handle(nw) as? NetworkStream)?.shutdownWrite()
     }
 
     func nwAddress(_ nw: UnsafeRawPointer, local: Bool) throws(IOError) -> SocketAddress {

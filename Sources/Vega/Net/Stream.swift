@@ -821,7 +821,7 @@ extension IORegistration {
 
     func shutdownWrite() throws(IOError) {
         #if canImport(Network)
-        if let nw { return nwShutdownWrite(nw) }
+        if let nw { return try nwShutdownWrite(nw) }
         #endif
         #if os(Windows)
         let e = cv_shutdown_write(fd)
