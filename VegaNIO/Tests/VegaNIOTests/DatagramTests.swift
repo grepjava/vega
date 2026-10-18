@@ -132,20 +132,26 @@ private final class DatagramCollector: ChannelInboundHandler, @unchecked Sendabl
     }
 
     /// SO_REUSEADDR set on the bootstrap applies before binding: two
-    /// sockets can share a port only with it.
+    /// sockets can share a port only with it. On Darwin, as on the BSDs,
+    /// UDP sockets share a unicast port only with SO_REUSEPORT.
     @Test func reuseAddress() throws {
+        #if canImport(Darwin)
+        let sharing = ChannelOptions.socketOption(.so_reuseport)
+        #else
+        let sharing = ChannelOptions.socketOption(.so_reuseaddr)
+        #endif
         let group = VegaEventLoopGroup(loops: 1)
         defer { try? group.syncShutdownGracefully() }
         let first = try VegaDatagramBootstrap(group: group)
-            .channelOption(.socketOption(.so_reuseaddr), value: 1)
+            .channelOption(sharing, value: 1)
             .bind(host: "127.0.0.1", port: 0).wait()
         let port = try #require(first.localAddress?.port)
-        #expect(try first.getOption(.socketOption(.so_reuseaddr)).wait() != 0)
+        #expect(try first.getOption(sharing).wait() != 0)
         #expect(throws: (any Error).self) {
             try VegaDatagramBootstrap(group: group).bind(host: "127.0.0.1", port: port).wait()
         }
         let second = try VegaDatagramBootstrap(group: group)
-            .channelOption(.socketOption(.so_reuseaddr), value: 1)
+            .channelOption(sharing, value: 1)
             .bind(host: "127.0.0.1", port: port).wait()
         #expect(second.localAddress?.port == port)
         // Other options go on the socket once it exists.
