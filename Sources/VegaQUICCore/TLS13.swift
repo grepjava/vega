@@ -23,10 +23,10 @@
 // rather than as something subtler later.
 //===----------------------------------------------------------------------===//
 
-import VegaWire
+@_spi(Garuda) import VegaWire
 import VegaCrypto
 
-public enum TLSAlert {
+package enum TLSAlert {
     public static let closeNotify: UInt8 = 0
     public static let unexpectedMessage: UInt8 = 10
     public static let handshakeFailure: UInt8 = 40
@@ -93,7 +93,7 @@ extension ByteBuffer {
 
 // MARK: - The handshake
 
-public final class TLSServerHandshake {
+package final class TLSServerHandshake {
     public enum State {
         case waitingClientHello
         case waitingFinished

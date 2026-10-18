@@ -12,8 +12,8 @@
 //===----------------------------------------------------------------------===//
 
 import Testing
-@testable import VegaWire
-@testable import VegaQUICCore
+@_spi(Garuda) @testable import VegaWire
+@_spi(Garuda) @testable import VegaQUICCore
 
 // MARK: - What an acknowledgement means
 

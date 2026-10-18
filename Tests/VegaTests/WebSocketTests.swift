@@ -2,10 +2,10 @@ import Testing
 import Vega
 import VegaIO
 import VegaHTTP1
-@testable import VegaWebSocket
-import VegaWire
+@_spi(Garuda) @testable import VegaWebSocket
+@_spi(Garuda) import VegaWire
 import VegaTest
-import VegaWebSocketCore
+@_spi(Garuda) import VegaWebSocketCore
 
 private func hexString(_ bytes: [UInt8]) -> String {
     bytes.map { String($0, radix: 16).count == 1 ? "0" + String($0, radix: 16) : String($0, radix: 16) }.joined()

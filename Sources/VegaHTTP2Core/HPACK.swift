@@ -25,11 +25,11 @@ import Glibc
 import Darwin
 #elseif os(Windows)
 import ucrt
-import VegaWire
+@_spi(Garuda) import VegaWire
 #endif
 
 
-public enum HPACKError: Error, Equatable {
+package enum HPACKError: Error, Equatable {
     /// The block ended in the middle of a field.
     case truncated
     /// An index that names no entry, or index 0 where one is required.
@@ -45,7 +45,7 @@ public enum HPACKError: Error, Equatable {
 }
 
 /// A name/value pair as borrowed bytes.
-public struct HPACKSpan {
+@_spi(Garuda) public struct HPACKSpan {
     public var name: UnsafePointer<UInt8>
     public var nameLength: Int
     public var value: UnsafePointer<UInt8>
@@ -64,7 +64,7 @@ public struct HPACKSpan {
 
 /// The static table with its strings copied once into stable C memory, so a
 /// lookup is a pointer rather than a `String.withUTF8` dance per field.
-public enum HPACKStatic {
+package enum HPACKStatic {
     nonisolated(unsafe) private static var storage: UnsafeMutablePointer<UInt8>! = nil
     nonisolated(unsafe) private static var spans: UnsafeMutablePointer<HPACKSpan>! = nil
     public static var count: Int { HPACKTables.staticTable.count }
@@ -117,7 +117,7 @@ public enum HPACKStatic {
 
 // MARK: - Huffman
 
-public enum HPACKHuffman {
+package enum HPACKHuffman {
 
     /// Canonical decoding tables, derived once from the code lengths.
     ///
@@ -344,7 +344,7 @@ public enum HPACKHuffman {
 
 /// Reads an RFC 7541 variable-length integer with a `prefixBits`-bit prefix,
 /// advancing `cursor` past it.
-public func hpackReadInteger(_ p: UnsafePointer<UInt8>, _ n: Int, _ cursor: inout Int,
+package func hpackReadInteger(_ p: UnsafePointer<UInt8>, _ n: Int, _ cursor: inout Int,
                              prefixBits: Int) throws -> Int {
     if cursor >= n { throw HPACKError.truncated }
     let mask = (1 << prefixBits) - 1
@@ -365,7 +365,7 @@ public func hpackReadInteger(_ p: UnsafePointer<UInt8>, _ n: Int, _ cursor: inou
     return value
 }
 
-public func hpackWriteInteger(_ value: Int, prefixBits: Int, flags: UInt8,
+package func hpackWriteInteger(_ value: Int, prefixBits: Int, flags: UInt8,
                               into out: inout ByteBuffer) {
     let mask = (1 << prefixBits) - 1
     if value < mask {
@@ -383,7 +383,7 @@ public func hpackWriteInteger(_ value: Int, prefixBits: Int, flags: UInt8,
 
 // MARK: - Decoder
 
-public struct HPACKDecoder {
+@_spi(Garuda) public struct HPACKDecoder {
     /// One dynamic table entry, as offsets into `arena`.
     struct Entry {
         var nameOffset: Int
@@ -592,7 +592,7 @@ public struct HPACKDecoder {
 
 /// Response header encoding. Stateless: every field goes out as a literal
 /// without indexing, with a static name index where one exists.
-public struct HPACKEncoder {
+@_spi(Garuda) public struct HPACKEncoder {
     public init() {}
 
     /// `:status` values that have their own static table entry.

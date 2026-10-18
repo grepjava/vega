@@ -1,9 +1,9 @@
 import CVegaCompress
 import Vega
 import VegaIO
-import VegaWire
+@_spi(Garuda) import VegaWire
 import VegaHTTP1
-import VegaWebSocketCore
+@_spi(Garuda) import VegaWebSocketCore
 
 /// A whole message: fragments are joined before it's handed on.
 public enum WebSocketMessage: Sendable, Equatable {

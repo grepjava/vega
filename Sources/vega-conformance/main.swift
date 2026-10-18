@@ -23,7 +23,7 @@ import VegaCrypto
 import VegaHTTP1
 import VegaHTTP2
 import VegaHTTP3
-import VegaQUICCore
+@_spi(Garuda) import VegaQUICCore
 import VegaQUIC
 import VegaTLS
 import VegaWebSocket

@@ -19,11 +19,11 @@
 // hundred bytes rather than the whole stream.
 //===----------------------------------------------------------------------===//
 
-import VegaWire
+@_spi(Garuda) import VegaWire
 
 /// An ascending set of byte ranges, used for what has been acknowledged and
 /// for what has to be sent again. Half-open: [low, high).
-public struct QUICByteRanges {
+@_spi(Garuda) public struct QUICByteRanges {
     public private(set) var ranges: [(low: UInt64, high: UInt64)] = []
 
     public init() {}
@@ -125,7 +125,7 @@ public struct QUICByteRanges {
 }
 
 /// One direction's receive side: reassembly plus the limit we granted.
-public struct QUICReceiveStream {
+@_spi(Garuda) public struct QUICReceiveStream {
     /// Bytes in order and ready to be read.
     public var ready = ByteBuffer()
     /// The offset one past the last byte in `ready`; everything below has
@@ -260,7 +260,7 @@ public struct QUICReceiveStream {
 }
 
 /// One direction's send side.
-public struct QUICSendStream {
+@_spi(Garuda) public struct QUICSendStream {
     /// Unacknowledged bytes, starting at `base`.
     public var data = ByteBuffer()
     /// Offset of the first byte in `data`.
@@ -348,7 +348,7 @@ public struct QUICSendStream {
 }
 
 /// A stream as the connection sees it.
-public final class QUICStreamState {
+@_spi(Garuda) public final class QUICStreamState {
     public let id: UInt64
     public var receive = QUICReceiveStream()
     public var send = QUICSendStream()

@@ -20,10 +20,10 @@
 // squeezes out the last few percent.
 //===----------------------------------------------------------------------===//
 
-import VegaWire
+@_spi(Garuda) import VegaWire
 
 /// What a packet carried, so it can be sent again if it is lost.
-public struct QUICSentFrames {
+package struct QUICSentFrames {
     public var crypto: (low: UInt64, high: UInt64)?
     public var streams: [(id: UInt64, low: UInt64, high: UInt64, fin: Bool)] = []
     /// Control frames that carry state rather than data. Each is re-queued
@@ -50,7 +50,7 @@ public struct QUICSentFrames {
     }
 }
 
-public struct QUICSentPacket {
+package struct QUICSentPacket {
     public var packetNumber: UInt64
     public var sentAtMs: UInt64
     public var size: Int
@@ -64,7 +64,7 @@ public struct QUICSentPacket {
 
 /// One packet number space: Initial, Handshake or application data. Each has
 /// its own numbering, its own acknowledgements and its own loss detection.
-public struct QUICPacketSpace {
+package struct QUICPacketSpace {
     public var nextPacketNumber: UInt64 = 0
     public var largestReceived: Int64 = -1
     public var largestReceivedAtMs: UInt64 = 0
@@ -141,7 +141,7 @@ public struct QUICPacketSpace {
 
 /// Round-trip estimation and NewReno, shared across the three spaces because
 /// the path is one path however many key sets are in use on it.
-public struct QUICRecovery {
+package struct QUICRecovery {
     // RFC 9002 constants.
     public static let packetThreshold = 3
     public static let timeThresholdNumerator: UInt64 = 9
@@ -284,7 +284,7 @@ public struct QUICRecovery {
 
 /// Takes the packets an ACK frame covers out of a space, and works out which
 /// of the rest are now old enough to call lost.
-public enum QUICLossDetection {
+package enum QUICLossDetection {
     public struct Result {
         public var acked: [QUICSentPacket] = []
         public var lost: [QUICSentPacket] = []

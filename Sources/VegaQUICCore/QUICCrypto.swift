@@ -27,11 +27,11 @@
 // a class here would put an atomic retain on every datagram.
 //===----------------------------------------------------------------------===//
 
-import VegaWire
+@_spi(Garuda) import VegaWire
 import VegaCrypto
 
 /// The three TLS 1.3 cipher suites QUIC permits.
-public enum QUICCipher: UInt16 {
+@_spi(Garuda) public enum QUICCipher: UInt16 {
     case aes128GCMSHA256 = 0x1301
     case aes256GCMSHA384 = 0x1302
     case chacha20Poly1305SHA256 = 0x1303
@@ -58,17 +58,17 @@ public enum QUICCipher: UInt16 {
 }
 
 /// The AEAD tag is 16 bytes for every suite QUIC allows.
-public let quicAEADTagLength = 16
+@_spi(Garuda) public let quicAEADTagLength = 16
 /// Header protection samples 16 bytes, starting four bytes past the packet
 /// number field -- four because that is the longest a packet number can be, so
 /// the sample's position does not depend on the length being protected.
-public let quicHPSampleLength = 16
+package let quicHPSampleLength = 16
 
 // MARK: - Key schedule
 
 /// HKDF-Expand-Label from TLS 1.3, which QUIC uses unchanged.
 @discardableResult
-public func quicExpandLabel(hash: HashAlgorithm,
+@_spi(Garuda) public func quicExpandLabel(hash: HashAlgorithm,
                             secret: UnsafePointer<UInt8>, secretLen: Int,
                             label: StaticString,
                             context: UnsafePointer<UInt8>? = nil, contextLen: Int = 0,
@@ -106,7 +106,7 @@ func quicScrub(_ bytes: inout [UInt8]) {
 }
 
 /// One AEAD generation: the key, the IV and the secret it came from.
-public struct QUICKeys {
+@_spi(Garuda) public struct QUICKeys {
     /// VegaCrypto's AEAD, which is ~Copyable and frees its context on
     /// deinit, held out of line so that this struct stays a trivial,
     /// copyable value with an explicit destroy() -- copies are borrowed
@@ -213,7 +213,7 @@ public struct QUICKeys {
 }
 
 /// The header protection key, which lives as long as the encryption level.
-public struct QUICHeaderKey {
+@_spi(Garuda) public struct QUICHeaderKey {
     /// Out of line for the same reason as QUICKeys.aead.
     @usableFromInline var hp: UnsafeMutablePointer<HeaderProtection>?
     public init() {}
@@ -257,7 +257,7 @@ public struct QUICHeaderKey {
 }
 
 /// One direction of one encryption level.
-public struct QUICDirection {
+@_spi(Garuda) public struct QUICDirection {
     public var header = QUICHeaderKey()
     public var keys = QUICKeys()
     public init() {}
@@ -268,7 +268,7 @@ public struct QUICDirection {
     }
 }
 
-public struct QUICKeyPair {
+@_spi(Garuda) public struct QUICKeyPair {
     public var send = QUICDirection()
     public var receive = QUICDirection()
     public init() {}
@@ -279,7 +279,7 @@ public struct QUICKeyPair {
 }
 
 /// Builds both halves of a direction from a traffic secret.
-public func quicDirection(secret: UnsafePointer<UInt8>, secretLen: Int,
+@_spi(Garuda) public func quicDirection(secret: UnsafePointer<UInt8>, secretLen: Int,
                           cipher: QUICCipher, version: UInt32) -> QUICDirection? {
     guard let keys = QUICKeys.derive(secret: secret, secretLen: secretLen,
                                      cipher: cipher, version: version),
@@ -308,7 +308,7 @@ private let initialSaltV2: [UInt8] = [
 
 /// Derives both directions of Initial keys from the connection ID the client
 /// chose for its first packet.
-public func quicInitialKeys(destinationCID: QUICConnectionID,
+@_spi(Garuda) public func quicInitialKeys(destinationCID: QUICConnectionID,
                             version: UInt32,
                             isServer: Bool) -> QUICKeyPair? {
     let salt = version == QUICVersion.v2 ? initialSaltV2 : initialSaltV1
@@ -359,7 +359,7 @@ public func quicInitialKeys(destinationCID: QUICConnectionID,
 
 // MARK: - Packet protection
 
-public enum QUICProtect {
+@_spi(Garuda) public enum QUICProtect {
     /// Seals a packet that has been written out whole -- header and plaintext
     /// payload -- and masks its header.
     ///

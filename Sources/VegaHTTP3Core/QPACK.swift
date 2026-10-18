@@ -17,7 +17,7 @@
 // remove, cannot come back in through the compressor.
 //===----------------------------------------------------------------------===//
 
-import VegaWire
+@_spi(Garuda) import VegaWire
 
 #if canImport(Glibc)
 import Glibc
@@ -25,11 +25,11 @@ import Glibc
 import Darwin
 #elseif os(Windows)
 import ucrt
-import VegaHTTP2Core
+@_spi(Garuda) import VegaHTTP2Core
 #endif
 
 
-public enum QPACKError: Error {
+@_spi(Garuda) public enum QPACKError: Error {
     case truncated
     case badIndex
     case badPrefix
@@ -44,7 +44,7 @@ public enum QPACKError: Error {
 
 /// The static table, copied once into stable C memory so that a lookup yields
 /// a pointer rather than a `String.withUTF8` dance per field.
-public enum QPACKStatic {
+package enum QPACKStatic {
     nonisolated(unsafe) private static var storage: UnsafeMutablePointer<UInt8>! = nil
     nonisolated(unsafe) private static var spans: UnsafeMutablePointer<HPACKSpan>! = nil
     public static var count: Int { QPACKTables.staticTable.count }
@@ -109,7 +109,7 @@ public enum QPACKStatic {
 
 // MARK: - Decoding
 
-public struct QPACKDecoder {
+@_spi(Garuda) public struct QPACKDecoder {
     /// Somewhere to put decoded literals, which have to outlive the block they
     /// came from only until the caller has copied what it wants.
     @usableFromInline var scratch = ByteBuffer()
@@ -255,7 +255,7 @@ public struct QPACKDecoder {
 
 // MARK: - Encoding
 
-public struct QPACKEncoder {
+@_spi(Garuda) public struct QPACKEncoder {
     public init() {}
 
     /// Opens a field section. With no dynamic table there is nothing to depend

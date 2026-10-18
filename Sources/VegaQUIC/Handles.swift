@@ -3,7 +3,7 @@
 import Synchronization
 import Vega
 import VegaIO
-import VegaQUICCore
+@_spi(Garuda) import VegaQUICCore
 
 /// Why a QUIC connection or stream stopped.
 public enum QUICConnectionError: Error, Hashable, Sendable, CustomStringConvertible {

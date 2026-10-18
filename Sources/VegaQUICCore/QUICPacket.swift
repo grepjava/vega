@@ -15,10 +15,10 @@
 // connection ID in the packet rather than by the four-tuple it arrived on.
 //===----------------------------------------------------------------------===//
 
-import VegaWire
+@_spi(Garuda) import VegaWire
 import VegaCrypto
 
-public enum QUICVersion {
+@_spi(Garuda) public enum QUICVersion {
     /// RFC 9000.
     public static let v1: UInt32 = 0x0000_0001
     /// RFC 9369. Different salts and labels, same protocol.
@@ -31,14 +31,14 @@ public enum QUICVersion {
 }
 
 /// The maximum a connection ID may be in QUIC v1.
-public let quicMaxCIDLength = 20
+@_spi(Garuda) public let quicMaxCIDLength = 20
 /// The length this server issues. Eight bytes is enough to make guessing
 /// hopeless and leaves room in the header for a short first byte.
-public let quicLocalCIDLength = 8
+@_spi(Garuda) public let quicLocalCIDLength = 8
 
 /// A connection ID: up to 20 bytes, held inline so that routing a datagram
 /// touches no allocation and the value can live in a flat table.
-public struct QUICConnectionID: Equatable, Hashable {
+@_spi(Garuda) public struct QUICConnectionID: Equatable, Hashable {
     @usableFromInline var words: (UInt64, UInt64, UInt64) = (0, 0, 0)
     public var length: UInt8 = 0
 
@@ -95,7 +95,7 @@ public struct QUICConnectionID: Equatable, Hashable {
 /// sends the connection's datagrams. Held inline, up to 32 bytes (an IPv6
 /// address, port and scope fit; so do the raw bytes of a sockaddr_in6), so a
 /// connection carries no allocation for it and copying it is free.
-public struct QUICAddress: Equatable, Hashable, Sendable {
+@_spi(Garuda) public struct QUICAddress: Equatable, Hashable, Sendable {
     public static let capacity = 32
     @usableFromInline var words: (UInt64, UInt64, UInt64, UInt64) = (0, 0, 0, 0)
     public private(set) var length: UInt8 = 0
@@ -144,7 +144,7 @@ public struct QUICAddress: Equatable, Hashable, Sendable {
     }
 }
 
-public enum QUICPacketType: UInt8 {
+@_spi(Garuda) public enum QUICPacketType: UInt8 {
     case initial = 0
     case zeroRTT = 1
     case handshake = 2
@@ -155,7 +155,7 @@ public enum QUICPacketType: UInt8 {
 
 /// Which set of keys protects a packet. Each level has its own packet number
 /// space, its own acknowledgements and its own loss recovery.
-public enum QUICLevel: Int {
+@_spi(Garuda) public enum QUICLevel: Int {
     case initial = 0
     case handshake = 1
     case application = 2
@@ -171,7 +171,7 @@ public enum QUICLevel: Int {
 }
 
 /// What can be read from a packet before its keys are known.
-public struct QUICPacketHeader {
+@_spi(Garuda) public struct QUICPacketHeader {
     public var type: QUICPacketType = .oneRTT
     public var version: UInt32 = 0
     public var dcid = QUICConnectionID()
@@ -190,7 +190,7 @@ public struct QUICPacketHeader {
     @inlinable public var isLong: Bool { type != .oneRTT }
 }
 
-public enum QUICPacket {
+@_spi(Garuda) public enum QUICPacket {
     /// Reads as much of a packet's header as is legible without keys.
     ///
     /// `localCIDLength` is how long this server's own connection IDs are,
@@ -297,7 +297,7 @@ public enum QUICPacket {
 /// The encoding is a truncation, so it only has to carry enough bits to be
 /// unambiguous against every packet that might still be in flight.
 @inlinable
-public func quicPacketNumberLength(_ full: UInt64, largestAcked: UInt64?) -> Int {
+package func quicPacketNumberLength(_ full: UInt64, largestAcked: UInt64?) -> Int {
     let range: UInt64
     if let acked = largestAcked {
         range = (full &- acked) &* 2
@@ -313,7 +313,7 @@ public func quicPacketNumberLength(_ full: UInt64, largestAcked: UInt64?) -> Int
 /// RFC 9000 appendix A: recovers the full packet number from its truncated
 /// form by choosing the candidate closest to what is expected next.
 @inlinable
-public func quicDecodePacketNumber(largestReceived: Int64, truncated: UInt64,
+package func quicDecodePacketNumber(largestReceived: Int64, truncated: UInt64,
                                    bits: Int) -> UInt64 {
     let expected = largestReceived &+ 1
     let window = Int64(1) << bits

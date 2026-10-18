@@ -20,7 +20,7 @@
 // sending half -- deciding what goes in the next datagram -- is in QUICSend.
 //===----------------------------------------------------------------------===//
 
-import VegaWire
+@_spi(Garuda) import VegaWire
 import VegaCrypto
 
 public struct QUICServerConfiguration {
@@ -61,7 +61,7 @@ public struct QUICServerConfiguration {
     package var maxIdleTimeoutMs: UInt64 { milliseconds(maxIdleTimeout) }
 }
 
-public struct QUICEvent {
+@_spi(Garuda) public struct QUICEvent {
     public enum Kind: UInt8 {
         case handshakeComplete
         case streamReadable
@@ -88,7 +88,7 @@ public struct QUICEvent {
     }
 }
 
-public final class QUICConnectionState {
+@_spi(Garuda) public final class QUICConnectionState {
     // MARK: Identity
 
     public let version: UInt32
@@ -1565,7 +1565,7 @@ extension QUICConnectionState {
 /// Retry packets' integrity (RFC 9001 section 5.8, RFC 9369 section 3.3.3):
 /// a tag a client checks and a server writes, and a Retry for a server that
 /// sends one.
-public enum QUICRetry {
+package enum QUICRetry {
     /// Fixed, and public: the tag proves only that whoever sent the Retry
     /// saw the Initial it answers.
     static let keyV1: [UInt8] = [0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a,

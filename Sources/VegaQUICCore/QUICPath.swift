@@ -28,7 +28,7 @@
 // of the path in use.
 //===----------------------------------------------------------------------===//
 
-import VegaWire
+@_spi(Garuda) import VegaWire
 import VegaCrypto
 
 /// What the connection keeps about one address other than the one it sends

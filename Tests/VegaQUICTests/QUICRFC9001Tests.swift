@@ -11,7 +11,7 @@
 
 import Testing
 import VegaCrypto
-@testable import VegaQUICCore
+@_spi(Garuda) @testable import VegaQUICCore
 
 private func rfcHex(_ s: String) -> [UInt8] {
     var out: [UInt8] = []

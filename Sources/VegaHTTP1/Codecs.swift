@@ -1,7 +1,7 @@
 import Vega
 import VegaIO
-import VegaHTTP1Core
-import VegaWire
+@_spi(Garuda) import VegaHTTP1Core
+@_spi(Garuda) import VegaWire
 
 /// Limits on what a decoder will buffer for one message.
 public struct HTTP1Limits: Sendable {

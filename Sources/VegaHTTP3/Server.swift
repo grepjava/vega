@@ -4,8 +4,8 @@ import Synchronization
 import Vega
 import VegaIO
 import VegaHTTP
-import VegaHTTP3Core
-import VegaQUICCore
+@_spi(Garuda) import VegaHTTP3Core
+@_spi(Garuda) import VegaQUICCore
 import VegaQUIC
 import VegaCrypto
 

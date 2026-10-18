@@ -1,6 +1,6 @@
 import Testing
-@testable import VegaWire
-import VegaHTTP2Core
+@_spi(Garuda) @testable import VegaWire
+@_spi(Garuda) import VegaHTTP2Core
 
 /// Decodes a hex string into bytes, so the RFC 7541 examples can be pasted in
 /// the shape they appear in the document.

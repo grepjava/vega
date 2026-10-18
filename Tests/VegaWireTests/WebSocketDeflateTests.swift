@@ -3,8 +3,8 @@
 //===----------------------------------------------------------------------===//
 
 import Testing
-@testable import VegaWire
-import VegaWebSocketCore
+@_spi(Garuda) @testable import VegaWire
+@_spi(Garuda) import VegaWebSocketCore
 
 /// The response header value for these Sec-WebSocket-Extensions values, or nil.
 private func answer(_ values: String...) -> String? {

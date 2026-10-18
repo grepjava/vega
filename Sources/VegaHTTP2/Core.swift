@@ -1,8 +1,8 @@
 import Vega
 import VegaIO
 import VegaHTTP
-import VegaWire
-import VegaHTTP2Core
+@_spi(Garuda) import VegaWire
+@_spi(Garuda) import VegaHTTP2Core
 
 /// Limits and windows for one HTTP/2 connection.
 public struct HTTP2Configuration: Sendable {
@@ -20,7 +20,7 @@ public struct HTTP2Configuration: Sendable {
     public var maxBodySize: Int
 
     public init(maxConcurrentStreams: Int = 100, initialWindowSize: Int = 1 << 20,
-                connectionWindowSize: Int = 4 << 20, maxFrameSize: Int = HTTP2FrameHeader.defaultMaxFrameSize,
+                connectionWindowSize: Int = 4 << 20, maxFrameSize: Int = 16_384,
                 maxHeaderListSize: Int = 64 * 1024, maxBodySize: Int = 8 << 20) {
         self.maxConcurrentStreams = maxConcurrentStreams
         self.initialWindowSize = initialWindowSize

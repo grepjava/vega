@@ -24,7 +24,7 @@ import Darwin
 import ucrt
 #endif
 
-public struct ByteBuffer {
+@_spi(Garuda) public struct ByteBuffer {
     @usableFromInline package var storage: UnsafeMutablePointer<UInt8>?
     @usableFromInline var capacity: Int
     /// Index of the first unread byte.

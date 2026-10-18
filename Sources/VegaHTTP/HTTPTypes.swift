@@ -1,4 +1,4 @@
-import VegaWire
+@_spi(Garuda) import VegaWire
 
 /// An HTTP method: a token such as `GET`.
 public struct HTTPMethod: RawRepresentable, Hashable, Sendable, CustomStringConvertible, ExpressibleByStringLiteral {

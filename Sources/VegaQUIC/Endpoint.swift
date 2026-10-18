@@ -30,8 +30,8 @@ import CVega
 import Synchronization
 import Vega
 import VegaIO
-import VegaQUICCore
-import VegaWire
+@_spi(Garuda) @_exported import VegaQUICCore
+@_spi(Garuda) import VegaWire
 
 /// A UDP socket speaking QUIC: a server (`bind` with a configuration, then
 /// `accept`) or a client (`bind` without one, then `connect`).

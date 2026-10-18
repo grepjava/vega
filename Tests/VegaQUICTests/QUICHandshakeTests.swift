@@ -11,8 +11,8 @@ import Testing
 import VegaCrypto
 import VegaTLS
 import QUICTestPeer
-@testable import VegaWire
-@testable import VegaQUICCore
+@_spi(Garuda) @testable import VegaWire
+@_spi(Garuda) @testable import VegaQUICCore
 
 private func deliver(_ datagram: [UInt8], to server: QUICConnectionState, nowMs: UInt64) {
     var datagram = datagram

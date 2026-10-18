@@ -5,7 +5,7 @@ import Vega
 import VegaCrypto
 import VegaTLS
 import VegaHTTP1
-import VegaQUICCore
+@_spi(Garuda) import VegaQUICCore
 import VegaQUIC
 import VegaHTTP3
 

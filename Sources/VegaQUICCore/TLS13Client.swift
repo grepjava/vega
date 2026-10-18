@@ -22,11 +22,11 @@
 // and decides for itself. No session resumption, no 0-RTT.
 //===----------------------------------------------------------------------===//
 
-import VegaWire
+@_spi(Garuda) import VegaWire
 import VegaCrypto
 
 /// A traffic secret pair, as either side's handshake produces it.
-public typealias TLSSecrets = TLSServerHandshake.Secrets
+package typealias TLSSecrets = TLSServerHandshake.Secrets
 
 /// What a QUICConnectionState needs of its TLS handshake, whichever side of it
 /// the connection is.
@@ -46,7 +46,7 @@ extension TLSServerHandshake: QUICHandshake {
     var isComplete: Bool { state == .complete }
 }
 
-public final class TLSClientHandshake: QUICHandshake {
+package final class TLSClientHandshake: QUICHandshake {
     public enum State {
         case start
         case waitingServerHello

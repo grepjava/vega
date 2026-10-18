@@ -3,9 +3,10 @@
 import Vega
 import VegaIO
 import VegaHTTP
-import VegaHTTP3Core
-import VegaQUICCore
-import VegaWire
+@_spi(Garuda) import VegaHTTP2Core
+@_spi(Garuda) import VegaHTTP3Core
+@_spi(Garuda) import VegaQUICCore
+@_spi(Garuda) import VegaWire
 
 /// One HTTP/3 frame (RFC 9114 section 7): its type and payload.
 struct HTTP3RawFrame {

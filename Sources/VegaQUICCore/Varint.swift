@@ -15,10 +15,10 @@
 // routine, not exceptional.
 //===----------------------------------------------------------------------===//
 
-import VegaWire
+@_spi(Garuda) import VegaWire
 
 @inlinable
-public func quicVarintLength(_ value: UInt64) -> Int {
+@_spi(Garuda) public func quicVarintLength(_ value: UInt64) -> Int {
     if value < 0x40 { return 1 }
     if value < 0x4000 { return 2 }
     if value < 0x4000_0000 { return 4 }
@@ -26,10 +26,10 @@ public func quicVarintLength(_ value: UInt64) -> Int {
 }
 
 /// The largest value a varint can carry.
-public let quicVarintMax: UInt64 = 0x3FFF_FFFF_FFFF_FFFF
+package let quicVarintMax: UInt64 = 0x3FFF_FFFF_FFFF_FFFF
 
 @inlinable
-public func quicWriteVarint(_ value: UInt64, _ out: UnsafeMutablePointer<UInt8>) -> Int {
+@_spi(Garuda) public func quicWriteVarint(_ value: UInt64, _ out: UnsafeMutablePointer<UInt8>) -> Int {
     if value < 0x40 {
         out[0] = UInt8(truncatingIfNeeded: value)
         return 1
@@ -61,7 +61,7 @@ public func quicWriteVarint(_ value: UInt64, _ out: UnsafeMutablePointer<UInt8>)
 /// encoded longer than it needs to be, which is what makes it possible to
 /// reserve room for a length before knowing what it will be.
 @inlinable
-public func quicWriteVarint(_ value: UInt64, width: Int,
+@_spi(Garuda) public func quicWriteVarint(_ value: UInt64, width: Int,
                             _ out: UnsafeMutablePointer<UInt8>) {
     switch width {
     case 1:
@@ -87,7 +87,7 @@ public func quicWriteVarint(_ value: UInt64, width: Int,
 }
 
 /// A cursor over borrowed bytes. Reads return nil when the input runs out.
-public struct QUICReader {
+@_spi(Garuda) public struct QUICReader {
     public let base: UnsafePointer<UInt8>
     public let count: Int
     public var offset: Int
@@ -252,7 +252,7 @@ extension ByteBuffer {
 }
 
 @inlinable
-public func quicWriteUInt32BE(_ value: UInt32, _ p: UnsafeMutablePointer<UInt8>) {
+package func quicWriteUInt32BE(_ value: UInt32, _ p: UnsafeMutablePointer<UInt8>) {
     p[0] = UInt8(truncatingIfNeeded: value >> 24)
     p[1] = UInt8(truncatingIfNeeded: value >> 16)
     p[2] = UInt8(truncatingIfNeeded: value >> 8)
@@ -260,7 +260,7 @@ public func quicWriteUInt32BE(_ value: UInt32, _ p: UnsafeMutablePointer<UInt8>)
 }
 
 @inlinable
-public func quicWriteUInt64BE(_ value: UInt64, _ p: UnsafeMutablePointer<UInt8>) {
+package func quicWriteUInt64BE(_ value: UInt64, _ p: UnsafeMutablePointer<UInt8>) {
     var i = 0
     while i < 8 {
         p[i] = UInt8(truncatingIfNeeded: value >> (56 &- 8 &* i))

@@ -1,6 +1,6 @@
 import Vega
 import VegaIO
-import VegaHTTP2Core
+@_spi(Garuda) import VegaHTTP2Core
 
 /// One HTTP/2 frame. Padding is removed when reading and never added when
 /// writing; PRIORITY information is read and ignored (RFC 9113 deprecates it).

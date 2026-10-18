@@ -13,7 +13,7 @@ import VegaCrypto
 import VegaTLS
 import QUICTestPeer
 import VegaQUIC
-@testable import VegaQUICCore
+@_spi(Garuda) @testable import VegaQUICCore
 
 /// The test peer's datagrams over a socket.
 final class Wire {

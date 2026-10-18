@@ -1,6 +1,6 @@
 import Vega
 import VegaIO
-import VegaHTTP1Core
+@_spi(Garuda) import VegaHTTP1Core
 @_exported import VegaHTTP
 
 /// One piece of a message as it streams: the head, body bytes (any number

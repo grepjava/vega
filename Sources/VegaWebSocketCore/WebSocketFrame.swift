@@ -1,4 +1,4 @@
-import VegaWire
+@_spi(Garuda) import VegaWire
 //===----------------------------------------------------------------------===//
 // RFC 6455 framing.
 //
@@ -69,7 +69,7 @@ public struct WebSocketCloseCode: RawRepresentable, Hashable, Sendable, CustomSt
     public var description: String { String(rawValue) }
 }
 
-public struct WebSocketFrameHeader {
+@_spi(Garuda) public struct WebSocketFrameHeader {
     public var fin = false
     /// permessage-deflate: this message is compressed.
     public var rsv1 = false
@@ -84,19 +84,19 @@ public struct WebSocketFrameHeader {
     @inlinable public var totalLength: Int { headerLength &+ payloadLength }
 }
 
-public enum WebSocketDecodeError: Sendable {
+@_spi(Garuda) public enum WebSocketDecodeError: Sendable {
     case protocolError
     case messageTooBig
     case unmaskedClientFrame
 }
 
-public enum WebSocketDecodeResult {
+@_spi(Garuda) public enum WebSocketDecodeResult {
     case needMore
     case header(WebSocketFrameHeader)
     case failure(WebSocketDecodeError)
 }
 
-public enum WebSocketCodec {
+@_spi(Garuda) public enum WebSocketCodec {
 
     /// Parses a frame header. The payload is not required to be present yet:
     /// the caller compares `totalLength` against what it has buffered.
@@ -245,7 +245,7 @@ public enum WebSocketCodec {
 /// A server that forwards invalid UTF-8 as `str` either raises deep inside the
 /// application or silently substitutes replacement characters; RFC 6455 says to
 /// fail the connection with 1007 instead.
-public struct UTF8Validator {
+@_spi(Garuda) public struct UTF8Validator {
     @usableFromInline var state: UInt32 = 0
     @usableFromInline var codepoint: UInt32 = 0
     /// Smallest value the sequence in progress is allowed to encode, which is

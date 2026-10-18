@@ -11,10 +11,10 @@
 // first slot for a name and the caller decides whether the value matches.
 //===----------------------------------------------------------------------===//
 
-import VegaWire
-import VegaHTTP2Core
+@_spi(Garuda) import VegaWire
+@_spi(Garuda) import VegaHTTP2Core
 
-public enum QPACKTables {
+package enum QPACKTables {
     /// name, value
     public static let staticTable: [(String, String)] = [
         (":authority", ""),

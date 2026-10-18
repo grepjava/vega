@@ -12,11 +12,11 @@ import VegaIO
 import VegaCrypto
 import VegaTLS
 import VegaHTTP1
-import VegaHTTP3Core
+@_spi(Garuda) import VegaHTTP3Core
 import QUICTestPeer
 import VegaQUIC
 @testable import VegaHTTP3
-@testable import VegaQUICCore
+@_spi(Garuda) @testable import VegaQUICCore
 
 /// The frames in `bytes`, in order.
 private func frames(_ bytes: [UInt8]) throws -> [HTTP3RawFrame] {

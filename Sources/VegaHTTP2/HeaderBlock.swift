@@ -1,6 +1,6 @@
-import VegaWire
+@_spi(Garuda) import VegaWire
 import VegaHTTP
-import VegaHTTP2Core
+@_spi(Garuda) import VegaHTTP2Core
 
 /// A header block to send, encoded with VegaWire's HPACK.
 ///

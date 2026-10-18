@@ -1,4 +1,4 @@
-import VegaWire
+@_spi(Garuda) import VegaWire
 //===----------------------------------------------------------------------===//
 // HPACK tables (RFC 7541 appendices A and B).
 //
@@ -10,7 +10,7 @@ import VegaWire
 // lengths alone to prove the table still has the property.
 //===----------------------------------------------------------------------===//
 
-public enum HPACKTables {
+package enum HPACKTables {
 
     /// Huffman code per symbol, right-aligned in a UInt32. Index 256 is EOS.
     public static let huffmanCodes: [UInt32] = [

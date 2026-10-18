@@ -1,4 +1,4 @@
-import VegaWire
+@_spi(Garuda) import VegaWire
 
 /// A message's fields (headers or trailers), in order, with names matched
 /// ignoring case.

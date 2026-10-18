@@ -1,4 +1,4 @@
-import VegaWire
+@_spi(Garuda) import VegaWire
 //===----------------------------------------------------------------------===//
 // HTTP/2 framing (RFC 9113).
 //
@@ -8,7 +8,7 @@ import VegaWire
 //===----------------------------------------------------------------------===//
 
 
-public enum HTTP2FrameType: UInt8 {
+@_spi(Garuda) public enum HTTP2FrameType: UInt8 {
     case data = 0x0
     case headers = 0x1
     case priority = 0x2
@@ -21,7 +21,7 @@ public enum HTTP2FrameType: UInt8 {
     case continuation = 0x9
 }
 
-public struct HTTP2Flags: OptionSet, Sendable {
+@_spi(Garuda) public struct HTTP2Flags: OptionSet, Sendable {
     public let rawValue: UInt8
     @inlinable public init(rawValue: UInt8) { self.rawValue = rawValue }
 
@@ -82,7 +82,7 @@ public struct HTTP2Setting: RawRepresentable, Hashable, Sendable {
     public static let enableConnectProtocol = HTTP2Setting(rawValue: 0x8)
 }
 
-public struct HTTP2FrameHeader {
+@_spi(Garuda) public struct HTTP2FrameHeader {
     public var length: Int
     public var type: UInt8
     public var flags: HTTP2Flags
@@ -138,7 +138,7 @@ public struct HTTP2FrameHeader {
     }
 }
 
-public enum HTTP2 {
+@_spi(Garuda) public enum HTTP2 {
     /// The client connection preface, RFC 9113 section 3.4.
     public static let preface: [UInt8] = Array("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".utf8)
 

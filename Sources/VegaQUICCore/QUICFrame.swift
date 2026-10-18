@@ -15,9 +15,9 @@
 // what is worth keeping.
 //===----------------------------------------------------------------------===//
 
-import VegaWire
+@_spi(Garuda) import VegaWire
 
-public enum QUICFrameType {
+package enum QUICFrameType {
     public static let padding: UInt64 = 0x00
     public static let ping: UInt64 = 0x01
     public static let ack: UInt64 = 0x02
@@ -130,13 +130,13 @@ public struct QUICErrorCode: RawRepresentable, Hashable, Sendable, CustomStringC
 
 /// A TLS alert reported as a transport error: 0x0100 plus the alert code.
 @inlinable
-public func quicCryptoError(_ alert: UInt8) -> UInt64 { 0x0100 | UInt64(alert) }
+package func quicCryptoError(_ alert: UInt8) -> UInt64 { 0x0100 | UInt64(alert) }
 
 // MARK: - Stream identifiers
 
 /// The low two bits of a stream ID say who opened it and whether it is
 /// bidirectional, so a stream needs no other state to be classified.
-public enum QUICStreamKind {
+@_spi(Garuda) public enum QUICStreamKind {
     @inlinable public static func isClientInitiated(_ id: UInt64) -> Bool { id & 0x01 == 0 }
     @inlinable public static func isServerInitiated(_ id: UInt64) -> Bool { id & 0x01 == 1 }
     @inlinable public static func isBidirectional(_ id: UInt64) -> Bool { id & 0x02 == 0 }
@@ -156,7 +156,7 @@ public enum QUICStreamKind {
 /// descending ranges because that is the shape an ACK frame is written in and
 /// because arrivals are mostly contiguous -- a run of packets collapses into
 /// one range rather than a thousand entries.
-public struct QUICAckRanges {
+@_spi(Garuda) public struct QUICAckRanges {
     /// Ranges, highest first, each inclusive.
     public private(set) var ranges: [(low: UInt64, high: UInt64)] = []
     /// Ranges older than this are dropped: an ACK that reaches back forever
@@ -260,7 +260,7 @@ extension ByteBuffer {
 /// Reads the ranges out of an ACK frame, after its type byte. The callback is
 /// given each acknowledged range, highest first.
 @inlinable
-public func quicReadAckFrame(_ r: inout QUICReader, hasECN: Bool,
+@_spi(Garuda) public func quicReadAckFrame(_ r: inout QUICReader, hasECN: Bool,
                              _ range: (UInt64, UInt64) -> Void) -> UInt64? {
     guard let largest = r.varint(),
           let delay = r.varint(),

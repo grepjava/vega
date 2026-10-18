@@ -2,8 +2,8 @@
 #if (os(Linux) || os(macOS) || os(Windows)) && (OpenSSL || BoringSSL)
 import Testing
 import VegaCrypto
-@testable import VegaWire
-@testable import VegaQUICCore
+@_spi(Garuda) @testable import VegaWire
+@_spi(Garuda) @testable import VegaQUICCore
 
 /// Hex, so vectors can be pasted in the shape the RFC prints them.
 private func qhex(_ s: String) -> [UInt8] {

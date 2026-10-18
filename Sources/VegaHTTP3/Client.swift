@@ -3,9 +3,9 @@
 import Vega
 import VegaIO
 @_exported import VegaHTTP
-import VegaHTTP3Core
-import VegaQUICCore
-import VegaQUIC
+@_spi(Garuda) @_exported import VegaHTTP3Core
+@_spi(Garuda) import VegaQUICCore
+@_exported import VegaQUIC
 
 /// Why an HTTP/3 request failed.
 public enum HTTP3ClientError: Error, Hashable, Sendable, CustomStringConvertible {

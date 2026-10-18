@@ -12,7 +12,7 @@ import VegaIO
 import VegaCrypto
 import VegaTLS
 import VegaQUIC
-@testable import VegaQUICCore
+@_spi(Garuda) @testable import VegaQUICCore
 
 private func identity() throws -> (pem: String, key: CertificateKey) {
     let identity = try TLSIdentity.selfSigned(names: ["localhost"])

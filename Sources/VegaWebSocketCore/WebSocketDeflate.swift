@@ -1,4 +1,4 @@
-import VegaWire
+@_spi(Garuda) import VegaWire
 //===----------------------------------------------------------------------===//
 // permessage-deflate negotiation (RFC 7692 section 7.1).
 //
@@ -18,7 +18,7 @@ import VegaWire
 //===----------------------------------------------------------------------===//
 
 
-public enum WebSocketDeflate {
+@_spi(Garuda) public enum WebSocketDeflate {
     /// The window the server compresses with, and asks clients for.
     public static let preferredWindowBits = 12
     public static let memoryLevel: Int32 = 5
@@ -140,7 +140,7 @@ public enum WebSocketDeflate {
 }
 
 /// What was agreed with one client.
-public struct WebSocketDeflateAgreement: Sendable, Equatable {
+@_spi(Garuda) public struct WebSocketDeflateAgreement: Sendable, Equatable {
     public var serverNoContextTakeover = false
     public var clientNoContextTakeover = false
     /// The largest window the client lets the server compress with.

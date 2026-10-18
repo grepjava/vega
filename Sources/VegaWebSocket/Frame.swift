@@ -9,8 +9,8 @@
 
 import Vega
 import VegaIO
-import VegaWire
-@_exported import VegaWebSocketCore
+@_spi(Garuda) import VegaWire
+@_spi(Garuda) @_exported import VegaWebSocketCore
 
 /// One frame, payload unmasked.
 public struct WebSocketFrame: Sendable, Equatable {
