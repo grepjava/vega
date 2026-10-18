@@ -45,7 +45,7 @@ private func pattern(_ i: Int) -> UInt8 { UInt8(truncatingIfNeeded: i &* 31 &+ i
                 var out = IOBuffer(capacity: 32 * 1024)
                 while let chunk = try? await rx.receive() {
                     out.clear()
-                    chunk.withUnsafeBytes { out.write($0) }
+                    chunk.withUnsafeBytes { out.append($0) }
                     guard (try? await halves.writer.write(out)) != nil else { return }
                 }
                 try? await halves.writer.close()

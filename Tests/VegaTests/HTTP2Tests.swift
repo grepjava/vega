@@ -433,14 +433,14 @@ private struct RawPeer: ~Copyable {
 
     func send(_ frames: [HTTP2Frame], preface: Bool = false) async throws {
         var out = IOBuffer(capacity: 1024)
-        if preface { HTTP2Frame.preface.withUnsafeBytes { out.write($0) } }
+        if preface { HTTP2Frame.preface.withUnsafeBytes { out.append($0) } }
         for f in frames { f.write(into: &out) }
         try await stream.write(out)
     }
 
     func sendBytes(_ bytes: [UInt8]) async throws {
         var out = IOBuffer(capacity: max(bytes.count, 1))
-        bytes.withUnsafeBytes { out.write($0) }
+        bytes.withUnsafeBytes { out.append($0) }
         try await stream.write(out)
     }
 

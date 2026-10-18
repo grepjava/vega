@@ -190,7 +190,7 @@ struct H2Core {
     /// The opening frames: the client's preface, then this end's SETTINGS
     /// and the connection window raised to the configured size.
     mutating func start(into out: inout IOBuffer) {
-        if !isServer { HTTP2Frame.preface.withUnsafeBytes { out.write($0) } }
+        if !isServer { HTTP2Frame.preface.withUnsafeBytes { out.append($0) } }
         var settings: [(HTTP2Setting, UInt32)] = [
             (.initialWindowSize, UInt32(config.initialWindowSize)),
             (.maxFrameSize, UInt32(config.maxFrameSize)),

@@ -158,7 +158,7 @@ private func echo(_ ws: inout WebSocket<DuplexStream>) async throws {
             bytes += wire(WebSocketFrame(fin: true, opcode: .continuation, payload: [0xAC, 0x21]), from: .client)
             bytes += wire(WebSocketFrame(opcode: .close, payload: [0x03, 0xE8] + Array("done".utf8)), from: .client)
             var out = IOBuffer(capacity: bytes.count)
-            bytes.withUnsafeBytes { out.write($0) }
+            bytes.withUnsafeBytes { out.append($0) }
             try await pair.first.write(out)
             var reply = IOBuffer(capacity: 1024)
             while reply.count < 8, try await pair.first.read(into: &reply) > 0 {}
@@ -197,7 +197,7 @@ private func echo(_ ws: inout WebSocket<DuplexStream>) async throws {
                     }
                 }
                 var out = IOBuffer(capacity: bytes.count)
-                bytes.withUnsafeBytes { out.write($0) }
+                bytes.withUnsafeBytes { out.append($0) }
                 try await pair.first.write(out)
                 let error = await server.value
                 var reply = IOBuffer(capacity: 64)
@@ -264,7 +264,7 @@ private func echo(_ ws: inout WebSocket<DuplexStream>) async throws {
                 + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
             let bytes = Array(request.utf8) + wire(WebSocketFrame(opcode: .text, payload: Array("early".utf8)), from: .client)
             var out = IOBuffer(capacity: bytes.count)
-            bytes.withUnsafeBytes { out.write($0) }
+            bytes.withUnsafeBytes { out.append($0) }
             try await pair.first.write(out)
             return await server.value
         }

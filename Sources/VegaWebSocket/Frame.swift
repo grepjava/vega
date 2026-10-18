@@ -112,11 +112,11 @@ public struct WebSocketFrameCodec: FrameDecoder, FrameEncoder, Sendable {
             header += [mask.0, mask.1, mask.2, mask.3]
             var payload = frame.payload
             applyMask(mask, to: &payload)
-            header.withUnsafeBytes { buffer.write($0) }
-            payload.withUnsafeBytes { buffer.write($0) }
+            header.withUnsafeBytes { buffer.append($0) }
+            payload.withUnsafeBytes { buffer.append($0) }
         } else {
-            header.withUnsafeBytes { buffer.write($0) }
-            frame.payload.withUnsafeBytes { buffer.write($0) }
+            header.withUnsafeBytes { buffer.append($0) }
+            frame.payload.withUnsafeBytes { buffer.append($0) }
         }
     }
 }

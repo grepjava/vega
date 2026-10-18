@@ -184,7 +184,7 @@ extension HTTP2Frame {
         case .data(let bytes, let end, _):
             // The common case, without copying the payload into `body`.
             writeHeader(length: bytes.count, type: 0, flags: end ? 0x1 : 0, into: &buffer)
-            bytes.withUnsafeBytes { buffer.write($0) }
+            bytes.withUnsafeBytes { buffer.append($0) }
             return
         case .headers(let block, let endStream, let endHeaders):
             type = 0x1
@@ -231,7 +231,7 @@ extension HTTP2Frame {
             type = t
         }
         writeHeader(length: body.count, type: type, flags: flags, into: &buffer)
-        body.withUnsafeBytes { buffer.write($0) }
+        body.withUnsafeBytes { buffer.append($0) }
     }
 
     private func writeHeader(length: Int, type: UInt8, flags: UInt8, into buffer: inout IOBuffer) {
@@ -241,6 +241,6 @@ extension HTTP2Frame {
             UInt8(truncatingIfNeeded: streamID >> 24) & 0x7F, UInt8(truncatingIfNeeded: streamID >> 16),
             UInt8(truncatingIfNeeded: streamID >> 8), UInt8(truncatingIfNeeded: streamID),
         ]
-        header.withUnsafeBytes { buffer.write($0) }
+        header.withUnsafeBytes { buffer.append($0) }
     }
 }

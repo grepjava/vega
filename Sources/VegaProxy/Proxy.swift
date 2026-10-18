@@ -336,6 +336,6 @@ private func readExactly<Stream: AsyncReader & ~Copyable>(_ n: Int, from stream:
 
 private func send<Stream: AsyncWriter & ~Copyable>(_ bytes: [UInt8], on stream: borrowing Stream) async throws(ProxyError) {
     var buffer = IOBuffer(capacity: max(bytes.count, 1))
-    bytes.withUnsafeBytes { buffer.write($0) }
+    bytes.withUnsafeBytes { buffer.append($0) }
     do throws(IOError) { try await stream.write(buffer) } catch { throw .io(error) }
 }

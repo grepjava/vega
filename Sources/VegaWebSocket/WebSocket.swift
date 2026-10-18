@@ -168,7 +168,7 @@ public struct WebSocket<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~Copyabl
         codec = WebSocketFrameCodec(role: role, maxFrameSize: configuration.maxFrameSize,
                                     acceptsCompressed: compressor != nil)
         buffer = IOBuffer(capacity: max(16 * 1024, leftover.count))
-        leftover.withUnsafeBytes { buffer.write($0) }
+        leftover.withUnsafeBytes { buffer.append($0) }
     }
 
     // MARK: - Handshakes

@@ -51,19 +51,26 @@ public struct IOBuffer: ~Copyable, @unchecked Sendable {
     /// Forget the readable bytes.
     @inlinable public mutating func clear() { readable = 0 }
 
-    /// Append `bytes`, up to the capacity. Returns how many fitted.
+    /// Append `bytes`, growing the buffer if they don't fit.
+    public mutating func append(_ bytes: UnsafeRawBufferPointer) {
+        if bytes.count > spareCapacity { reserveCapacity(Swift.max(capacity * 2, count + bytes.count)) }
+        appendWithinCapacity(bytes)
+    }
+
+    /// Append `string`'s UTF-8, growing the buffer if it doesn't fit.
+    public mutating func append(_ string: String) {
+        var s = string
+        s.withUTF8 { append(UnsafeRawBufferPointer($0)) }
+    }
+
+    /// Append as much of `bytes` as fits in the spare capacity, without
+    /// growing. Returns how many fitted.
     @discardableResult
-    public mutating func append(_ bytes: UnsafeRawBufferPointer) -> Int {
+    public mutating func appendWithinCapacity(_ bytes: UnsafeRawBufferPointer) -> Int {
         let n = min(bytes.count, spareCapacity)
         if n > 0 { (base + count).copyMemory(from: bytes.baseAddress!, byteCount: n) }
         readable += n
         return n
-    }
-
-    @discardableResult
-    public mutating func append(_ string: String) -> Int {
-        var s = string
-        return s.withUTF8 { append(UnsafeRawBufferPointer($0)) }
     }
 
     /// Drop the first `n` readable bytes, moving the rest to the front.

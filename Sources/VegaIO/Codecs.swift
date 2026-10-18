@@ -43,9 +43,9 @@ public struct LengthDelimitedCodec: FrameDecoder, FrameEncoder, Sendable {
                 let shift = 8 * (bigEndian ? lengthFieldSize - 1 - i : i)
                 field[i] = UInt8(truncatingIfNeeded: n >> UInt64(shift))
             }
-            buffer.write(UnsafeRawBufferPointer(field))
+            buffer.append(UnsafeRawBufferPointer(field))
         }
-        item.withUnsafeBytes { buffer.write($0) }
+        item.withUnsafeBytes { buffer.append($0) }
     }
 }
 
@@ -83,8 +83,8 @@ public struct LinesCodec: FrameDecoder, FrameEncoder, Sendable {
     public mutating func encode(_ item: String, into buffer: inout IOBuffer) throws(CodecError) {
         var line = item
         guard line.utf8.count <= maxLength else { throw .frameTooLong(line.utf8.count) }
-        line.withUTF8 { buffer.write(UnsafeRawBufferPointer($0)) }
-        withUnsafeBytes(of: UInt8(ascii: "\n")) { buffer.write($0) }
+        line.withUTF8 { buffer.append(UnsafeRawBufferPointer($0)) }
+        withUnsafeBytes(of: UInt8(ascii: "\n")) { buffer.append($0) }
     }
 }
 
@@ -99,7 +99,7 @@ public struct BytesCodec: FrameDecoder, FrameEncoder, Sendable {
     }
 
     public mutating func encode(_ item: [UInt8], into buffer: inout IOBuffer) throws(CodecError) {
-        item.withUnsafeBytes { buffer.write($0) }
+        item.withUnsafeBytes { buffer.append($0) }
     }
 }
 
@@ -151,8 +151,8 @@ public struct ContentLengthCodec: FrameDecoder, FrameEncoder, Sendable {
 
     public mutating func encode(_ item: [UInt8], into buffer: inout IOBuffer) throws(CodecError) {
         guard item.count <= maxLength else { throw .malformed("a message of \(item.count) bytes") }
-        Array("Content-Length: \(item.count)\r\n\r\n".utf8).withUnsafeBytes { buffer.write($0) }
-        item.withUnsafeBytes { buffer.write($0) }
+        Array("Content-Length: \(item.count)\r\n\r\n".utf8).withUnsafeBytes { buffer.append($0) }
+        item.withUnsafeBytes { buffer.append($0) }
     }
 }
 

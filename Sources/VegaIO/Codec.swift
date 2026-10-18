@@ -128,11 +128,3 @@ public struct FramedError: Error, Hashable, Sendable, CustomStringConvertible {
         }
     }
 }
-
-extension IOBuffer {
-    /// Append `bytes`, growing the buffer if they don't fit.
-    public mutating func write(_ bytes: UnsafeRawBufferPointer) {
-        if bytes.count > spareCapacity { reserveCapacity(Swift.max(capacity * 2, count + bytes.count)) }
-        append(bytes)
-    }
-}

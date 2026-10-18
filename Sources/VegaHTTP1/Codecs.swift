@@ -231,15 +231,15 @@ private enum BodyWriter: Sendable {
         case .fixed(let n):
             guard bytes.count <= n else { throw .contentLengthMismatch }
             self = .fixed(n - bytes.count)
-            bytes.withUnsafeBytes { buffer.write($0) }
+            bytes.withUnsafeBytes { buffer.append($0) }
         case .chunked:
             guard !bytes.isEmpty else { return }
-            buffer.writeHex(bytes.count)
-            buffer.write("\r\n")
-            bytes.withUnsafeBytes { buffer.write($0) }
-            buffer.write("\r\n")
+            buffer.appendHex(bytes.count)
+            buffer.append("\r\n")
+            bytes.withUnsafeBytes { buffer.append($0) }
+            buffer.append("\r\n")
         case .raw:
-            bytes.withUnsafeBytes { buffer.write($0) }
+            bytes.withUnsafeBytes { buffer.append($0) }
         }
     }
 
@@ -248,9 +248,9 @@ private enum BodyWriter: Sendable {
         case .fixed(let n) where n != 0:
             throw .contentLengthMismatch
         case .chunked:
-            buffer.write("0\r\n")
-            if let trailers { try buffer.write(trailers, final: false) }
-            buffer.write("\r\n")
+            buffer.append("0\r\n")
+            if let trailers { try buffer.appendFields(trailers, final: false) }
+            buffer.append("\r\n")
         default:
             break
         }
@@ -283,13 +283,13 @@ public struct HTTP1ResponseEncoder: FrameEncoder, Sendable {
             let interim = status < 200 && status != 101
             let method = interim ? (methods.first ?? .get) : (methods.isEmpty ? .get : methods.removeFirst())
             guard (100...999).contains(status), head.reason.utf8.allSatisfy(isFieldValueChar) else { throw .invalidField }
-            buffer.write(head.version.description)
-            buffer.write(" ")
-            buffer.writeDecimal(status)
-            buffer.write(" ")
-            buffer.write(head.reason)
-            buffer.write("\r\n")
-            try buffer.write(head.fields, final: false)
+            buffer.append(head.version.description)
+            buffer.append(" ")
+            buffer.appendDecimal(status)
+            buffer.append(" ")
+            buffer.append(head.reason)
+            buffer.append("\r\n")
+            try buffer.appendFields(head.fields, final: false)
             if interim || status == 204 || status == 304 || method == .head {
                 body = .none
             } else if status == 101 || (method == .connect && status / 100 == 2) {
@@ -297,7 +297,7 @@ public struct HTTP1ResponseEncoder: FrameEncoder, Sendable {
             } else {
                 body = try framing(head.fields, head.version, &buffer, response: true)
             }
-            buffer.write("\r\n")
+            buffer.append("\r\n")
         case .body(let bytes):
             try body.body(bytes, into: &buffer)
         case .end(let trailers):
@@ -328,13 +328,13 @@ public struct HTTP1RequestEncoder: FrameEncoder, Sendable {
             guard !head.method.rawValue.isEmpty, head.method.rawValue.utf8.allSatisfy(isTokenChar),
                   !head.target.isEmpty, head.target.utf8.allSatisfy({ $0 > cSP && $0 != 0x7F })
             else { throw .invalidField }
-            buffer.write(head.method.rawValue)
-            buffer.write(" ")
-            buffer.write(head.target)
-            buffer.write(" ")
-            buffer.write(head.version.description)
-            buffer.write("\r\n")
-            try buffer.write(head.fields, final: false)
+            buffer.append(head.method.rawValue)
+            buffer.append(" ")
+            buffer.append(head.target)
+            buffer.append(" ")
+            buffer.append(head.version.description)
+            buffer.append("\r\n")
+            try buffer.appendFields(head.fields, final: false)
             let bodiless: [HTTPMethod] = [.get, .head, .delete, .options, .trace, .connect]
             if !head.fields.contains("content-length") && !head.fields.contains("transfer-encoding")
                 && bodiless.contains(head.method) {
@@ -342,7 +342,7 @@ public struct HTTP1RequestEncoder: FrameEncoder, Sendable {
             } else {
                 body = try framing(head.fields, head.version, &buffer, response: false)
             }
-            buffer.write("\r\n")
+            buffer.append("\r\n")
         case .body(let bytes):
             try body.body(bytes, into: &buffer)
         case .end(let trailers):
@@ -372,12 +372,12 @@ private func framing(_ fields: HTTPFields, _ version: HTTPVersion, _ buffer: ino
         return .fixed(n)
     }
     if version.minor >= 1 {
-        buffer.write("transfer-encoding: chunked\r\n")
+        buffer.append("transfer-encoding: chunked\r\n")
         return .chunked
     }
     if response {
         // An HTTP/1.0 response: its end is the close.
-        if !fields.containsToken("close", in: "connection") { buffer.write("connection: close\r\n") }
+        if !fields.containsToken("close", in: "connection") { buffer.append("connection: close\r\n") }
         return .raw
     }
     throw .lengthRequired
@@ -393,36 +393,31 @@ extension Substring {
 }
 
 extension IOBuffer {
-    mutating func write(_ string: String) {
-        var s = string
-        s.withUTF8 { write(UnsafeRawBufferPointer($0)) }
+    mutating func appendDecimal(_ n: Int) {
+        append(String(n))
     }
 
-    mutating func writeDecimal(_ n: Int) {
-        write(String(n))
-    }
-
-    mutating func writeHex(_ n: Int) {
-        write(String(n, radix: 16))
+    mutating func appendHex(_ n: Int) {
+        append(String(n, radix: 16))
     }
 
     /// Field lines, checked so no name or value can end the field early,
     /// then the empty line if `final`.
-    mutating func write(_ fields: HTTPFields, final: Bool = true) throws(HTTP1Error) {
+    mutating func appendFields(_ fields: HTTPFields, final: Bool = true) throws(HTTP1Error) {
         for i in 0..<fields.count {
             let ok = fields.withRaw(i) { name, value in
                 guard !name.isEmpty, name.allSatisfy(isTokenChar), value.allSatisfy(isFieldValueChar),
                       value.first != cSP, value.first != cHT, value.last != cSP, value.last != cHT
                 else { return false }
-                write(name)
-                write(": ")
-                write(value)
-                write("\r\n")
+                append(name)
+                append(": ")
+                append(value)
+                append("\r\n")
                 return true
             }
             if !ok { throw .invalidField }
         }
-        if final { write("\r\n") }
+        if final { append("\r\n") }
     }
 }
 
