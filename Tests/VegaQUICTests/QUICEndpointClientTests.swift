@@ -114,7 +114,59 @@ struct QUICEndpointClientTests {
             await serving.value
             return failure
         }
-        #expect(error == .connectionClosed(code: quicCryptoError(TLSAlert.badCertificate), application: false))
+        #expect(error == .handshakeFailed(code: quicCryptoError(TLSAlert.badCertificate)))
+    }
+
+    /// A server that never answers: given up on after the idle timeout (at
+    /// least three probe timeouts, a few seconds).
+    @Test func aSilentServerTimesOut() throws {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let error = try rt.block { () async throws -> QUICConnectionError? in
+            let silent = try UDPSocket.bind(host: "127.0.0.1", port: 0)
+            let port = try silent.localAddress.port!
+            let client = try QUICEndpoint.bind(host: "127.0.0.1", runtime: rt)
+            var config = QUICClientConfiguration(serverName: "localhost", applicationProtocols: ["echo"])
+            config.maxIdleTimeout = .milliseconds(100)
+            var failure: QUICConnectionError?
+            do throws(QUICConnectionError) {
+                _ = try await client.connect(host: "127.0.0.1", port: port, configuration: config)
+            } catch {
+                failure = error
+            }
+            await client.close(grace: .zero)
+            _ = consume silent
+            return failure
+        }
+        #expect(error == .idleTimeout)
+    }
+
+    /// Cancelling a connect that waits on a silent server throws
+    /// `.cancelled` at once.
+    @Test func aCancelledConnectThrowsCancelled() throws {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let error = try rt.block { () async throws -> QUICConnectionError? in
+            let silent = try UDPSocket.bind(host: "127.0.0.1", port: 0)
+            let port = try silent.localAddress.port!
+            let client = try QUICEndpoint.bind(host: "127.0.0.1", runtime: rt)
+            let config = QUICClientConfiguration(serverName: "localhost", applicationProtocols: ["echo"])
+            let connecting = rt.spawn { () async -> QUICConnectionError? in
+                do throws(QUICConnectionError) {
+                    _ = try await client.connect(host: "127.0.0.1", port: port, configuration: config)
+                    return nil
+                } catch {
+                    return error
+                }
+            }
+            try? await Runtime.sleep(for: .milliseconds(50))
+            connecting.cancel()
+            let failure = await connecting.value
+            await client.close(grace: .zero)
+            _ = consume silent
+            return failure
+        }
+        #expect(error == .cancelled)
     }
 
     @Test func insecureNoVerificationConnects() throws {

@@ -22,9 +22,9 @@ public struct QUICConnectionError: Error, Hashable, Sendable, CustomStringConver
     public struct Code: Hashable, Sendable, CustomStringConvertible {
         let rawValue: UInt8
 
-        /// The connection is closed: by either side, with `errorCode`
-        /// (`isApplicationError` says whose code it is: the protocol above QUIC's,
-        /// or QUIC's own), or because the peer went quiet past the idle timeout.
+        /// The connection is closed by either side, with `errorCode`
+        /// (`isApplicationError` says whose code it is: the protocol above
+        /// QUIC's, or QUIC's own).
         public static let connectionClosed = Code(rawValue: 0)
         /// The peer reset the stream, with `errorCode`: it won't send the rest.
         public static let streamReset = Code(rawValue: 1)
@@ -34,9 +34,19 @@ public struct QUICConnectionError: Error, Hashable, Sendable, CustomStringConver
         public static let endpointClosed = Code(rawValue: 3)
         /// The socket under the endpoint failed.
         public static let io = Code(rawValue: 4)
+        /// The peer went quiet past the idle timeout (or, connecting, never
+        /// answered).
+        public static let idleTimeout = Code(rawValue: 5)
+        /// The handshake failed, and QUIC closed the connection with
+        /// `errorCode`: 0x100 plus the TLS alert, 0x12a when the certificate
+        /// was refused.
+        public static let handshakeFailed = Code(rawValue: 6)
+        /// The waiting task was cancelled.
+        public static let cancelled = Code(rawValue: 7)
 
         public var description: String {
-            let names = ["connectionClosed", "streamReset", "stopSending", "endpointClosed", "io"]
+            let names = ["connectionClosed", "streamReset", "stopSending", "endpointClosed", "io",
+                         "idleTimeout", "handshakeFailed", "cancelled"]
             return Int(rawValue) < names.count ? names[Int(rawValue)] : "code \(rawValue)"
         }
     }
@@ -48,9 +58,9 @@ public struct QUICConnectionError: Error, Hashable, Sendable, CustomStringConver
         self.ioError = ioError
     }
 
-    /// The connection is closed: by either side, with `errorCode`
-    /// (`isApplicationError` says whose code it is: the protocol above QUIC's,
-    /// or QUIC's own), or because the peer went quiet past the idle timeout.
+    /// The connection is closed by either side, with `errorCode`
+    /// (`isApplicationError` says whose code it is: the protocol above
+    /// QUIC's, or QUIC's own).
     public static func connectionClosed(code errorCode: UInt64, application isApplicationError: Bool) -> QUICConnectionError { QUICConnectionError(.connectionClosed, errorCode: errorCode, isApplicationError: isApplicationError) }
     /// The peer reset the stream, with `errorCode`: it won't send the rest.
     public static func streamReset(code errorCode: UInt64) -> QUICConnectionError { QUICConnectionError(.streamReset, errorCode: errorCode) }
@@ -60,6 +70,14 @@ public struct QUICConnectionError: Error, Hashable, Sendable, CustomStringConver
     public static let endpointClosed = QUICConnectionError(.endpointClosed)
     /// The socket under the endpoint failed.
     public static func io(_ ioError: IOError) -> QUICConnectionError { QUICConnectionError(.io, ioError: ioError) }
+    /// The peer went quiet past the idle timeout (or, connecting, never
+    /// answered).
+    public static let idleTimeout = QUICConnectionError(.idleTimeout)
+    /// The handshake failed, and QUIC closed the connection with `errorCode`:
+    /// 0x100 plus the TLS alert, 0x12a when the certificate was refused.
+    public static func handshakeFailed(code errorCode: UInt64) -> QUICConnectionError { QUICConnectionError(.handshakeFailed, errorCode: errorCode) }
+    /// The waiting task was cancelled.
+    public static let cancelled = QUICConnectionError(.cancelled)
 
     public var description: String {
         switch code {
@@ -68,6 +86,9 @@ public struct QUICConnectionError: Error, Hashable, Sendable, CustomStringConver
         case .stopSending: "the peer asked to stop sending (code \(errorCode!))"
         case .endpointClosed: "the endpoint is closed"
         case .io: "\(ioError!)"
+        case .idleTimeout: "the connection timed out, idle"
+        case .handshakeFailed: "the handshake failed (code \(errorCode!))"
+        case .cancelled: "cancelled"
         default: "\(code)"
         }
     }
@@ -77,7 +98,8 @@ public struct QUICConnectionError: Error, Hashable, Sendable, CustomStringConver
         switch code {
         case .connectionClosed, .streamReset: .connectionReset
         case .stopSending: .brokenPipe
-        case .endpointClosed: .cancelled
+        case .endpointClosed, .cancelled: .cancelled
+        case .idleTimeout: .timedOut
         default: ioError ?? .connectionReset
         }
     }
@@ -86,10 +108,16 @@ public struct QUICConnectionError: Error, Hashable, Sendable, CustomStringConver
 /// One QUIC connection, server or client side, as its tasks see it. The
 /// endpoint's task owns the transport; this hands work to it.
 public final class QUICConnection: Sendable {
+    typealias Open = (id: UInt64, unidirectional: Bool, waiter: UnsafeContinuation<Result<QUICStream, QUICConnectionError>, Never>)
+
     struct State {
         var incoming: [QUICStream] = []
         var acceptWaiter: UnsafeContinuation<QUICStream?, Never>?
-        var opens: [(unidirectional: Bool, waiter: UnsafeContinuation<Result<QUICStream, QUICConnectionError>, Never>)] = []
+        var opens: [Open] = []
+        var nextOpen: UInt64 = 0
+        /// Opens cancelled while the endpoint held them: failed when it
+        /// gives them back.
+        var cancelledOpens: Set<UInt64> = []
         var closed: QUICConnectionError?
         var alpn: [UInt8] = []
         var serverName = ""
@@ -134,15 +162,35 @@ public final class QUICConnection: Sendable {
         }
     }
 
-    /// Open a stream, waiting while the peer allows no more.
+    /// Open a stream, waiting while the peer allows no more. Throws
+    /// `.cancelled` if the task is cancelled first.
     public func openStream(unidirectional: Bool = false) async throws(QUICConnectionError) -> QUICStream {
-        let result = await withUnsafeContinuation { (c: UnsafeContinuation<Result<QUICStream, QUICConnectionError>, Never>) in
-            let failed = state.withLock { s -> QUICConnectionError? in
-                if let closed = s.closed { return closed }
-                s.opens.append((unidirectional, c))
-                return nil
+        let id = state.withLock { s in
+            defer { s.nextOpen &+= 1 }
+            return s.nextOpen
+        }
+        let result = await withTaskCancellationHandler {
+            await withUnsafeContinuation { (c: UnsafeContinuation<Result<QUICStream, QUICConnectionError>, Never>) in
+                let failed = state.withLock { s -> QUICConnectionError? in
+                    // Checked under the lock: either the cancel handler runs
+                    // after this and finds the open, or the flag is visible.
+                    if Task.isCancelled { return .cancelled }
+                    if let closed = s.closed { return closed }
+                    s.opens.append((id, unidirectional, c))
+                    return nil
+                }
+                if let failed { c.resume(returning: .failure(failed)) } else { endpoint.post(.open(self)) }
             }
-            if let failed { c.resume(returning: .failure(failed)) } else { endpoint.post(.open(self)) }
+        } onCancel: {
+            let waiter = state.withLock { s -> UnsafeContinuation<Result<QUICStream, QUICConnectionError>, Never>? in
+                guard let i = s.opens.firstIndex(where: { $0.id == id }) else {
+                    // The endpoint has it, or it is done: fail it if it comes back.
+                    s.cancelledOpens.insert(id)
+                    return nil
+                }
+                return s.opens.remove(at: i).waiter
+            }
+            waiter?.resume(returning: .failure(.cancelled))
         }
         return try result.get()
     }
@@ -193,15 +241,27 @@ public final class QUICConnection: Sendable {
     }
 
     /// Opens waiting for the peer's stream limit, for the endpoint to try.
-    func takeOpens() -> [(unidirectional: Bool, waiter: UnsafeContinuation<Result<QUICStream, QUICConnectionError>, Never>)] {
+    func takeOpens() -> [Open] {
         state.withLock { s in
             defer { s.opens.removeAll() }
             return s.opens
         }
     }
 
-    func requeue(_ open: (unidirectional: Bool, waiter: UnsafeContinuation<Result<QUICStream, QUICConnectionError>, Never>)) {
-        state.withLock { $0.opens.append(open) }
+    func requeue(_ open: Open) {
+        let cancelled = state.withLock { s -> Bool in
+            if s.cancelledOpens.remove(open.id) != nil { return true }
+            s.opens.append(open)
+            return false
+        }
+        if cancelled { open.waiter.resume(returning: .failure(.cancelled)) }
+    }
+
+    /// An open the endpoint has answered: no longer cancellable.
+    func opened(_ open: Open) {
+        state.withLock { s in
+            if !s.cancelledOpens.isEmpty { s.cancelledOpens.remove(open.id) }
+        }
     }
 
     func fail(_ error: QUICConnectionError) {

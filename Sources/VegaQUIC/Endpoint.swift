@@ -171,9 +171,10 @@ public final class QUICEndpoint: @unchecked Sendable {
     /// at `acceptStream`.
     ///
     /// A server that never answers is given up on after the configuration's
-    /// idle timeout. A refused handshake throws `.connectionClosed` with the
-    /// code QUIC closed it with: 0x100 plus the TLS alert, 0x12a when the
-    /// certificate was refused.
+    /// idle timeout, with `.idleTimeout`. A refused handshake throws
+    /// `.handshakeFailed` with the code QUIC closed it with: 0x100 plus the
+    /// TLS alert, 0x12a when the certificate was refused. A cancelled task
+    /// throws `.cancelled`, and the connection is closed.
     public func connect(host: String, port: Int,
                         configuration: QUICClientConfiguration) async throws(QUICConnectionError) -> QUICConnection {
         let addresses: [SocketAddress]
@@ -186,7 +187,7 @@ public final class QUICEndpoint: @unchecked Sendable {
             throw .io(IOError(code: EADDRNOTAVAIL, message: "\(host) has no \(localIsIPv6 ? "IPv6" : "IPv4") address for this endpoint"))
         }
         guard let quic = QUICConnectionState(client: configuration, nowMs: Self.nowMs()) else {
-            throw .connectionClosed(code: QUICErrorCode.internalError.rawValue, application: false)
+            throw .handshakeFailed(code: QUICErrorCode.internalError.rawValue)
         }
         let connection = EndpointConnection(endpoint: self, quic: quic, isServer: false, peer: peer, local: nil,
                                             localCID: quic.localCID, originalDCID: quic.originalDCID)
@@ -194,7 +195,18 @@ public final class QUICEndpoint: @unchecked Sendable {
         // weak reference outlives the wait.
         let handle = connection.handle!
         post(.connect(handle))
-        try await handle.handshake()
+        let failure = await withTaskCancellationHandler { () async -> QUICConnectionError? in
+            do throws(QUICConnectionError) {
+                try await handle.handshake()
+                return nil
+            } catch {
+                return error
+            }
+        } onCancel: {
+            handle.fail(.cancelled)
+            handle.close()
+        }
+        if let failure { throw failure }
         return handle
     }
 
@@ -838,6 +850,7 @@ final class EndpointConnection {
             let stream = QUICStream(id: id, connection: handle)
             if open.unidirectional { stream.state.withLock { $0.readEnd = .fin } }
             streams[id] = stream
+            handle.opened(open)
             open.waiter.resume(returning: .success(stream))
         }
     }
@@ -846,7 +859,16 @@ final class EndpointConnection {
     func abandon(_ error: QUICConnectionError?) {
         guard !abandoned else { return }
         abandoned = true
-        let reason = error ?? .connectionClosed(code: quic.closeError, application: quic.closeIsApplication)
+        let reason: QUICConnectionError
+        if let error {
+            reason = error
+        } else if quic.closedIdle {
+            reason = .idleTimeout
+        } else if !quic.handshakeComplete {
+            reason = .handshakeFailed(code: quic.closeError)
+        } else {
+            reason = .connectionClosed(code: quic.closeError, application: quic.closeIsApplication)
+        }
         for stream in streams.values { stream.fail(reason) }
         streams.removeAll()
         handle?.fail(reason)

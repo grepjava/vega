@@ -210,6 +210,8 @@ public struct QUICServerConfiguration {
     public internal(set) var status: Status = .handshaking
     public private(set) var closeError: UInt64 = 0
     public private(set) var closeIsApplication = false
+    /// Whether the connection ended by going quiet past the idle timeout.
+    public internal(set) var closedIdle = false
     var closeReason: [UInt8] = []
     var closeFramePending = false
     var closeSentAtMs: UInt64 = 0
@@ -1486,7 +1488,9 @@ public struct QUICServerConfiguration {
         if idleTimeoutMs == 0 { return false }
         // RFC 9000 section 10.1: the timeout is at least three probe timeouts,
         // so a connection is never dropped while a probe could still land.
-        let floor = 3 * recovery.ptoMs(includeMaxAckDelay: true)
+        // Without the backoff: with it, the floor doubles with every probe to
+        // a silent peer and stays ahead of the clock forever.
+        let floor = 3 * recovery.ptoMs(includeMaxAckDelay: true, backedOff: false)
         return nowMs > lastActivityMs + max(idleTimeoutMs, floor)
     }
 }

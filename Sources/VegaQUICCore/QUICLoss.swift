@@ -232,11 +232,12 @@ package struct QUICRecovery {
     }
 
     /// The probe timeout: how long to wait before assuming something was lost
-    /// when there is nothing else to tell us.
-    public func ptoMs(includeMaxAckDelay: Bool) -> UInt64 {
+    /// when there is nothing else to tell us. `backedOff`: doubled for each
+    /// probe already sent unanswered, as the probe timer is.
+    public func ptoMs(includeMaxAckDelay: Bool, backedOff: Bool = true) -> UInt64 {
         var pto = smoothedRTTMs + max(4 * rttVarianceMs, QUICRecovery.granularityMs)
         if includeMaxAckDelay { pto += peerMaxAckDelayMs }
-        return pto << UInt64(min(ptoCount, 20))
+        return backedOff ? pto << UInt64(min(ptoCount, 20)) : pto
     }
 
     public mutating func onPacketsAcked(_ packets: [QUICSentPacket], nowMs: UInt64) {

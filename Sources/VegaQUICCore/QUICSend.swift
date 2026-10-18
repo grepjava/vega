@@ -773,7 +773,7 @@ extension QUICConnectionState {
         pathTimeout(consider)
 
         if idleTimeoutMs > 0 {
-            let floor = 3 * recovery.ptoMs(includeMaxAckDelay: true)
+            let floor = 3 * recovery.ptoMs(includeMaxAckDelay: true, backedOff: false)
             consider(lastActivityMs + max(idleTimeoutMs, floor))
         }
         return deadline
@@ -790,6 +790,7 @@ extension QUICConnectionState {
         }
         if isIdle(nowMs: nowMs) {
             status = .drained
+            closedIdle = true
             events.append(QUICEvent(.closed, code: QUICErrorCode.noError.rawValue))
             return
         }
