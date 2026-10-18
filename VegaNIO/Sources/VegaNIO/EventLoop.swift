@@ -236,6 +236,32 @@ private final class CancelFlag: Sendable {
     let value = Atomic<Bool>(false)
 }
 
+/// Run `body` on a new, detached thread.
+private func detachThread(_ body: @escaping @Sendable () -> Void) {
+    final class Box { let body: @Sendable () -> Void; init(_ body: @escaping @Sendable () -> Void) { self.body = body } }
+    let context = Unmanaged.passRetained(Box(body)).toOpaque()
+    #if canImport(Darwin)
+    var thread: pthread_t?
+    #else
+    var thread = pthread_t()
+    #endif
+    let result = pthread_create(&thread, nil, { context in
+        #if canImport(Darwin)
+        let box = Unmanaged<Box>.fromOpaque(context).takeRetainedValue()
+        #else
+        let box = Unmanaged<Box>.fromOpaque(context!).takeRetainedValue()
+        #endif
+        box.body()
+        return nil
+    }, context)
+    precondition(result == 0, "pthread_create failed: \(result)")
+    #if canImport(Darwin)
+    pthread_detach(thread!)
+    #else
+    pthread_detach(thread)
+    #endif
+}
+
 /// Which loop the calling thread is running, if any.
 enum CurrentLoop {
     private static let key: pthread_key_t = {
@@ -318,18 +344,41 @@ public final class VegaEventLoopGroup: EventLoopGroup, Sendable {
     /// Close every channel, stop the loops, and shut down the runtime if the
     /// group made it.
     public func shutdownGracefully(queue: DispatchQueue, _ callback: @escaping @Sendable (Error?) -> Void) {
+        shutdown { error in queue.async { callback(error) } }
+    }
+
+    /// NIO's `syncShutdownGracefully`, without Dispatch: NIO's waits for a
+    /// callback on `DispatchQueue.global()`, which on Darwin doesn't come
+    /// while every thread of Swift's cooperative pool is blocked the same way
+    /// (as when more tests shut a group down at once than there are CPUs).
+    @available(*, noasync, message: "this can end up blocking the calling thread", renamed: "shutdownGracefully()")
+    public func syncShutdownGracefully() throws {
+        _preconditionSafeToSyncShutdown(file: #fileID, line: #line)
+        let failure = NIOLockedValueBox<Error?>(nil)
+        let semaphore = DispatchSemaphore(value: 0)
+        shutdown { error in
+            failure.withLockedValue { $0 = error }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        if let error = failure.withLockedValue({ $0 }) { throw error }
+    }
+
+    /// Shut down, then call `done` from a thread of its own.
+    private func shutdown(_ done: @escaping @Sendable (Error?) -> Void) {
         guard !shutDown.exchange(true, ordering: .acquiringAndReleasing) else {
-            queue.async { callback(EventLoopError.shutdown) }
+            done(EventLoopError.shutdown)
             return
         }
         let closed = loops.map { loop in loop.flatSubmit { loop.closeChannels() } }
         let loops = self.loops, runtime = self.runtime, ownsRuntime = self.ownsRuntime
-        // Wait off the loops: the runtime can't be shut down from a worker.
-        DispatchQueue.global().async {
+        // Wait off the loops (the runtime can't be shut down from a worker)
+        // and off Dispatch's pool (see syncShutdownGracefully).
+        detachThread {
             for future in closed { _ = try? future.wait() }
             for loop in loops { loop.stop() }
             if ownsRuntime { runtime.shutdown() }
-            queue.async { callback(nil) }
+            done(nil)
         }
     }
 
