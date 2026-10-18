@@ -23,7 +23,7 @@ final class Worker: @unchecked Sendable {
     /// How long a worker with nothing to do spins before sleeping in the
     /// kernel, by default. Work that arrives meanwhile wakes it with a plain
     /// store instead of a futex syscall on both sides. A runtime may be
-    /// given its own (`Runtime(idleSpin:)`); `VEGA_SPIN_NS` overrides both.
+    /// given its own (`Runtime(idleSpin:)`); where it isn't, `VEGA_SPIN_NS` sets it.
     static let defaultSpinNanos: Int64 = {
         #if canImport(Darwin)
         // Apple machines usually share cores with whatever drives them, where

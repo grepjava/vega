@@ -39,8 +39,8 @@ public final class Runtime: Sendable {
     ///     sleeps in the kernel; nil for the platform's default (50 µs on
     ///     Linux, none on Darwin). While work keeps coming, a spin saves
     ///     the syscalls of a wake; it takes the CPU from whatever shares
-    ///     it, a load generator or another server. `VEGA_SPIN_NS`
-    ///     overrides it.
+    ///     it, a load generator or another server. Left nil,
+    ///     `VEGA_SPIN_NS` sets it when present.
     public init(workers: Int? = nil, name: String = "vega", pinThreads: Bool = false,
                 io: IOBackend = .automatic,
                 blockingThreads: Int = 512, blockingQueue: Int? = nil,
@@ -282,34 +282,30 @@ public final class Runtime: Sendable {
     /// handler that computes from one that waits.
     ///
     /// ```swift
-    /// let stamp = Runtime.currentJobStamp, start = ContinuousClock.now
+    /// let stamp = Runtime.currentPollStamp, start = ContinuousClock.now
     /// try await handler()
-    /// if Runtime.currentJobStamp == stamp { heldFor(ContinuousClock.now - start) }
+    /// if Runtime.currentPollStamp == stamp { heldFor(ContinuousClock.now - start) }
     /// ```
     ///
-    /// Off a Vega worker the stamp is `JobStamp.none`, equal to every other
-    /// one taken off a worker.
+    /// Off a Vega worker it is nil.
     @inlinable
-    public static var currentJobStamp: JobStamp { JobStamp.current() }
+    public static var currentPollStamp: PollStamp? { PollStamp.current() }
 }
 
-/// A job on a Vega worker: see `Runtime.currentJobStamp`.
-public struct JobStamp: Sendable, Hashable {
+/// One poll on a Vega worker: see `Runtime.currentPollStamp`.
+public struct PollStamp: Sendable, Hashable {
     @usableFromInline let worker: UInt
-    @usableFromInline let jobs: UInt64
+    @usableFromInline let polls: UInt64
 
-    @usableFromInline init(worker: UInt, jobs: UInt64) {
+    @usableFromInline init(worker: UInt, polls: UInt64) {
         self.worker = worker
-        self.jobs = jobs
+        self.polls = polls
     }
 
-    /// The stamp off a Vega worker.
-    public static let none = JobStamp(worker: 0, jobs: 0)
-
-    @usableFromInline static func current() -> JobStamp {
-        guard let w = Worker.current else { return .none }
-        return JobStamp(worker: UInt(bitPattern: w.toOpaque()),
-                        jobs: w._withUnsafeGuaranteedRef { $0.jobsRun.load(ordering: .relaxed) })
+    @usableFromInline static func current() -> PollStamp? {
+        guard let w = Worker.current else { return nil }
+        return PollStamp(worker: UInt(bitPattern: w.toOpaque()),
+                         polls: w._withUnsafeGuaranteedRef { $0.jobsRun.load(ordering: .relaxed) })
     }
 }
 

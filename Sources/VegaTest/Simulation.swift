@@ -15,7 +15,7 @@ import ucrt
 /// ```swift
 /// @Test func handoffNeverLosesAValue() throws {
 ///     try Simulation.run(seeds: 0..<500) { rt in
-///         let ch = Channel<Int>(capacity: 1)
+///         let ch = MPSCChannel<Int>(capacity: 1)
 ///         ...
 ///         #expect(...)   // or throw
 ///     }

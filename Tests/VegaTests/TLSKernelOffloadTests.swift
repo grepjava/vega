@@ -215,7 +215,7 @@ private func withFile<R>(_ count: Int, _ body: (Int32) throws -> R) throws -> R 
 /// A read half and where to send what it reads, for one task.
 private struct Pump<Reader: AsyncReader & ~Copyable & Sendable>: ~Copyable, Sendable {
     var reader: Reader
-    var sender: Channel<[UInt8]>.Sender
+    var sender: MPSCChannel<[UInt8]>.Sender
 }
 
 private let sizes = [1, 100, 5000, 16 * 1024, 16 * 1024 + 1, 40_000, 64 * 1024, 200_000]
@@ -303,7 +303,7 @@ private let sizes = [1, 100, 5000, 16 * 1024, 16 * 1024 + 1, 40_000, 64 * 1024, 
                 guard let conn = try? await l.accept(),
                       let tls = try? await TLSStream.accept(conn, context: server) else { return .off }
                 let halves = tls.halves()
-                let channel = Channel<[UInt8]>(capacity: 4)
+                let channel = MPSCChannel<[UInt8]>(capacity: 4)
                 rt.spawn(with: Pump(reader: halves.reader, sender: channel.sender)) { pump async in
                     var buf = IOBuffer(capacity: 64 * 1024)
                     while let n = try? await pump.reader.read(into: &buf), n > 0 {

@@ -4,7 +4,7 @@ This guide is for code written against SwiftNIO (`NIOCore`, `NIOPosix`, `NIOExtr
 
 Vega has no channel pipeline and no futures. A connection is a value you `await` on, protocol logic is a codec or a plain async function, and the runtime is a work-stealing scheduler that every task runs on. Most NIO code gets shorter in the move, because the state that handlers kept between callbacks becomes local variables in one async function.
 
-If you need to keep NIO handlers running unchanged during a migration, the [`VegaNIO`](../VegaNIO/README.md) package provides NIO's `EventLoopGroup`, `Channel` and bootstraps on top of Vega's I/O. This guide covers the native API.
+If you need to keep NIO handlers running unchanged during a migration, the [`VegaNIO`](../VegaNIO/README.md) package provides NIO's `EventLoopGroup`, `MPSCChannel` and bootstraps on top of Vega's I/O. This guide covers the native API.
 
 The Vega snippets below compile and run against Vega at the commit that added this guide; they were checked in a scratch package that depends on `Vega`, `VegaIO`, `VegaFS` and `VegaTest`. The NIO snippets show the usual pattern and are not compiled here.
 
@@ -14,7 +14,7 @@ The Vega snippets below compile and run against Vega at the commit that added th
 |---|---|---|
 | `MultiThreadedEventLoopGroup` | `Runtime(workers:)` | `Vega` |
 | `EventLoop.execute`, `submit` | `runtime.spawn { ... }` | `Vega` |
-| `Channel` | `TCPStream` (or `UnixStream`), with `FramedRead` / `FramedWrite` on top | `Vega`, `VegaIO` |
+| `MPSCChannel` | `TCPStream` (or `UnixStream`), with `FramedRead` / `FramedWrite` on top | `Vega`, `VegaIO` |
 | `ChannelHandler`, `ChannelPipeline` | A `Decoder` / `Encoder`, or a plain async function | `VegaIO` |
 | `ByteToMessageDecoder`, `MessageToByteEncoder` | `Decoder`, `Encoder` | `VegaIO` |
 | `LineBasedFrameDecoder`, `LengthFieldBasedFrameDecoder` | `LinesCodec`, `LengthDelimitedCodec` | `VegaIO` |
@@ -27,7 +27,7 @@ The Vega snippets below compile and run against Vega at the commit that added th
 | `NIOFileSystem`, `NIOFileHandle` | `FileSystem`, `File` | `VegaFS` |
 | `NIOPipeBootstrap` | `makePipe()`, `PipeReader(adopting:)`, `PipeWriter(adopting:)` | `Vega` |
 | `EmbeddedChannel`, `NIOAsyncTestingChannel` | `duplex()` in-memory streams, `MockClock` | `VegaTest` |
-| `ServerQuiescingHelper` | `ShutdownSignal`, which `TCPServer.shutdown` triggers and the HTTP servers take | `Vega` |
+| `ServerQuiescingHelper` | `ShutdownToken`, which `TCPServer.shutdown` triggers and the HTTP servers take | `Vega` |
 | `HTTPResponseCompressor`, `NIOHTTPRequestDecompressor` | `HTTPCompression` (`wrap(_:)` a handler; `decompress(_:)`), `Compressor`, `Decompressor` | `VegaCompression` |
 
 ## The event loop group becomes a runtime
@@ -107,7 +107,7 @@ await server.waitForShutdown()
 
 - Call `TCPServer.bind` from a task on the runtime. Each connection runs the handler in its own task, and the connection closes when the handler returns.
 - `TCPServer.Configuration` holds what the bootstrap's options held: `backlog`, `acceptors` (several accept loops sharing the port with `SO_REUSEPORT`), `maxConnections`, and socket options for the listener and for each connection.
-- `server.shutdown(gracePeriod:)` stops accepting, lets open connections finish for the grace period, then cancels the rest: NIO's quiescing helper, built in. It first triggers the server's `ShutdownSignal`, which you can supply through `Configuration.shutdownSignal`. Pass the same signal to `HTTP1Server.serve(_:shutdown:)` or `HTTP2Server.serve(_:shutdown:)`. HTTP/1 then closes idle keep-alive connections at once, and answers a request already in progress with `connection: close`. HTTP/2 sends GOAWAY and finishes its open streams. Your own handlers can await `signal.wait()`, or wrap their wait for more input in `signal.cancelOnTrigger { }`.
+- `server.shutdown(gracePeriod:)` stops accepting, lets open connections finish for the grace period, then cancels the rest: NIO's quiescing helper, built in. It first triggers the server's `ShutdownToken`, which you can supply through `Configuration.shutdownToken`. Pass the same signal to `HTTP1Server.serve(_:shutdown:)` or `HTTP2Server.serve(_:shutdown:)`. HTTP/1 then closes idle keep-alive connections at once, and answers a request already in progress with `connection: close`. HTTP/2 sends GOAWAY and finishes its open streams. Your own handlers can await `signal.wait()`, or wrap their wait for more input in `signal.cancelOnTrigger { }`.
 - Backpressure needs no `isWritable` or `channelWritabilityChanged`. `send` returns once the bytes are written, so a slow peer slows the loop that writes to it. `FramedWrite.feed` buffers items, and `flush` writes them out, as with NIO's `write` and `flush`.
 - `stream.split()` gives a read half and a write half that separate tasks can use at once.
 

@@ -2,7 +2,7 @@
 /// class, no ARC of its own: elements are moved in and out, so it works for
 /// closures, trivial values and `~Copyable` values. The owner calls `destroy()`.
 ///
-/// Inlinable so that generic users (`Channel`) specialize in client modules.
+/// Inlinable so that generic users (`MPSCChannel`) specialize in client modules.
 @usableFromInline
 struct RawRing<Element: ~Copyable> {
     @usableFromInline var buffer: UnsafeMutablePointer<Element>

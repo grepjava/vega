@@ -459,7 +459,7 @@ private func encoded(_ body: (inout IOBuffer) throws -> Void) rethrows -> String
     @Test func gracefulShutdown() throws {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
-        let signal = ShutdownSignal()
+        let signal = ShutdownToken()
         let entered = Notify(), release = Notify()
         try rt.block {
             let handler: @Sendable (HTTPRequest) async throws -> HTTPResponse = { request in
@@ -506,9 +506,9 @@ private func encoded(_ body: (inout IOBuffer) throws -> Void) rethrows -> String
         let rt = Runtime(workers: 4)
         defer { rt.shutdown() }
         let (elapsed, after) = try rt.block { () async throws -> (Duration, HTTPResponse?) in
-            let signal = ShutdownSignal()
+            let signal = ShutdownToken()
             let server = try TCPServer.bind(host: "127.0.0.1", port: 0,
-                                            configuration: .init(shutdownSignal: signal)) { conn in
+                                            configuration: .init(shutdownToken: signal)) { conn in
                 try? await HTTP1Server.serve(conn, shutdown: signal) { _ in HTTPResponse(body: "ok") }
             }
             var client = HTTP1Connection(try await TCPStream.connect(host: "127.0.0.1", port: server.port))

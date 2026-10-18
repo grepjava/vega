@@ -58,12 +58,12 @@ struct AsyncSequenceTests {
         #expect(error != nil)
     }
 
-    /// `Channel.Receiver.values()`, ending once the senders are gone.
+    /// `MPSCChannel.Receiver.values()`, ending once the senders are gone.
     @Test func channelValues() throws {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
         let sum = rt.block { () async -> Int in
-            let ch = Channel<Int>(capacity: 8)
+            let ch = MPSCChannel<Int>(capacity: 8)
             for p in 0..<4 {
                 rt.spawn(with: ch.sender.clone()) { tx in
                     for i in 1...250 { try? await tx.send(p * 1000 + i) }
@@ -84,7 +84,7 @@ struct AsyncSequenceTests {
         defer { rt.shutdown() }
         let produced = Produced()
         let maxAhead = rt.block { () async -> Int in
-            let ch = Channel<Int>(capacity: 4)
+            let ch = MPSCChannel<Int>(capacity: 4)
             rt.spawn(with: ch.sender) { tx in
                 for i in 0..<100 {
                     try? await tx.send(i)
@@ -108,7 +108,7 @@ struct AsyncSequenceTests {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
         let (got, ended) = rt.block { () async -> (Int, Bool) in
-            let ch = Channel<Int>(capacity: 4)
+            let ch = MPSCChannel<Int>(capacity: 4)
             try? ch.sender.trySend(1)
             let values = ch.receiver.values()
             let consumer = rt.spawn { () async -> (Int, Bool) in

@@ -8,14 +8,14 @@ import Synchronization
 /// open streams.
 ///
 /// ```swift
-/// let shutdown = ShutdownSignal()
-/// let server = try TCPServer.bind(port: 8080, configuration: .init(shutdownSignal: shutdown)) { conn in
+/// let shutdown = ShutdownToken()
+/// let server = try TCPServer.bind(port: 8080, configuration: .init(shutdownToken: shutdown)) { conn in
 ///     try? await HTTP1Server.serve(conn, shutdown: shutdown) { request in HTTPResponse(body: "hi") }
 /// }
 /// // ...
 /// await server.shutdown(gracePeriod: .seconds(10))   // triggers `shutdown`
 /// ```
-public final class ShutdownSignal: Sendable {
+public final class ShutdownToken: Sendable {
     private struct State {
         var triggered = false
         var nextID: UInt64 = 0

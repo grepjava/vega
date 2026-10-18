@@ -1,4 +1,4 @@
-extension Channel.Receiver where Element: Copyable {
+extension MPSCChannel.Receiver where Element: Copyable {
     /// The values as an `AsyncSequence`, for `for await` and the sequence
     /// algorithms. It ends once every sender is gone and the buffer is
     /// drained, or when the task iterating is cancelled.
@@ -9,29 +9,29 @@ extension Channel.Receiver where Element: Copyable {
     /// of the consumer.
     ///
     /// ```swift
-    /// var channel = Channel<Event>(capacity: 64)
+    /// var channel = MPSCChannel<Event>(capacity: 64)
     /// rt.spawn(with: channel.sender) { tx in for e in source { try? await tx.send(e) } }
     /// for await event in channel.receiver.values() { ... }
     /// ```
-    public consuming func values() -> ChannelValues<Element> {
-        ChannelValues(self)
+    public consuming func values() -> MPSCChannelValues<Element> {
+        MPSCChannelValues(self)
     }
 }
 
 /// A channel receiver's values as an `AsyncSequence`
-/// (`Channel.Receiver.values()`). Every iterator takes from the one
+/// (`MPSCChannel.Receiver.values()`). Every iterator takes from the one
 /// receiver: two at the same time trap.
-public struct ChannelValues<Element: Sendable>: AsyncSequence {
+public struct MPSCChannelValues<Element: Sendable>: AsyncSequence {
     public typealias Failure = Never
 
     final class Box {
-        var receiver: Channel<Element>.Receiver
-        init(_ receiver: consuming Channel<Element>.Receiver) { self.receiver = receiver }
+        var receiver: MPSCChannel<Element>.Receiver
+        init(_ receiver: consuming MPSCChannel<Element>.Receiver) { self.receiver = receiver }
     }
 
     let box: Box
 
-    init(_ receiver: consuming Channel<Element>.Receiver) {
+    init(_ receiver: consuming MPSCChannel<Element>.Receiver) {
         box = Box(receiver)
     }
 

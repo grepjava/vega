@@ -14,7 +14,7 @@ You want a Swift networking engine that **fully replaces SwiftNIO**, has **featu
 3. **I/O backends:** readiness and completion are both first-class.
 4. **First milestone (v0.1):** runtime, TCP/UDP and timers.
 5. **API:** its own native async API with full feature parity. **It is also swappable with SwiftNIO** through `VegaNIO`, a separate package that depends on swift-nio's `NIOCore`.
-   - It provides `VegaEventLoopGroup` and `VegaEventLoop` (serial executors pinned to Vega workers) and Vega-backed `Channel`s and bootstraps. These channels use NIO's own `ChannelPipeline`, the same way NIOTransportServices does.
+   - It provides `VegaEventLoopGroup` and `VegaEventLoop` (serial executors pinned to Vega workers) and Vega-backed `MPSCChannel`s and bootstraps. These channels use NIO's own `ChannelPipeline`, the same way NIOTransportServices does.
    - Vapor, Hummingbird, AsyncHTTPClient and grpc-swift then run on Vega just by swapping the `EventLoopGroup`.
    - VegaNIO is an API adapter, not a second engine: Vega does the I/O underneath.
    - NIO promises that a channel's handlers always run on one thread (lock-free handler state, `assertInEventLoop`, `EventLoopFuture` callbacks), so **pipeline handlers stay pinned**.
@@ -46,7 +46,7 @@ You want a Swift networking engine that **fully replaces SwiftNIO**, has **featu
 | **IO traits/codecs** | `AsyncRead/Write`, `BufReader/Writer`, `copy`, `split`, `Framed`, `LengthDelimited`, `Lines`, `ByteToMessageDecoder`, `MessageToByteEncoder`, `NIOExtras` (line-based, length-field, JSON-RPC framing, PCAP, write-coalescing) | `VegaIO`: `AsyncReader/Writer` protocols, `FramedRead/FramedWrite`, `BufferedReader/Writer`, `copy`, `copyBidirectional`, lines, length-delimited and Content-Length (JSON-RPC) codecs |
 | **Sync** | `Mutex`, `RwLock`, `Semaphore`, `Notify`, `Barrier`, `oneshot`, `mpsc`, `broadcast`, `watch`, `OnceCell` | `Vega/Sync` |
 | **Process / signal / fs** | `tokio::process`, `tokio::signal`, `tokio::fs`, `NIOFileSystem`, `NIOFileHandle` | `VegaProcess`, `VegaFS` (io_uring/IOCP native; blocking pool on other drivers); signals are `Runtime.signals` in `Vega` itself (a self-pipe and one thread, no driver involved), not a module of their own |
-| **Streams** | `tokio-stream`, `AsyncSequence` bridging, backpressure | `AsyncSequence` adapters (`FramedRead.items()`, `Channel.Receiver.values()`); a bounded `Channel` is the `NIOAsyncSequenceProducer` equivalent |
+| **Streams** | `tokio-stream`, `AsyncSequence` bridging, backpressure | `AsyncSequence` adapters (`FramedRead.items()`, `MPSCChannel.Receiver.values()`); a bounded `MPSCChannel` is the `NIOAsyncSequenceProducer` equivalent |
 | **TLS** | `tokio-rustls`, `swift-nio-ssl`, ALPN, SNI, mTLS, session resumption, kTLS | `VegaTLS` (vendored BoringSSL, already in `CAvianSSL`); on Apple's `IOBackend.network`, `NetworkTLS`: Network.framework's own TLS for clients and servers (`TCPStream.connect(host:port:tls:)`, `TCPListener.bind(...tls:)`, ALPN, SNI, system or anchored trust, mutual TLS), as NIOTransportServices' `tlsOptions`. kTLS: `TLSConfiguration.kernelOffload` (`.transmit` / `.transmitAndReceive`) hands records to Linux's kernel TLS after the handshake, with OpenSSL or BoringSSL. Keys come from the key log (TLS 1.3) or the master secret (TLS 1.2), since both libraries run over Vega's own BIO. `sendFile` over TLS uses sendfile(2). close_notify and KeyUpdate are sent as typed records; on receive, alerts, tickets and KeyUpdate are handled, with rekey on Linux 6.14+. Falls back to userspace silently |
 | **HTTP** | `swift-nio-http2`, `NIOHTTP1`, `NIOWebSocket`, `hyper` (h1/h2), `h3` | `VegaHTTP1`, `VegaHTTP2`, `VegaHTTP3`, `VegaWebSocket` over `VegaQUIC` (UDP endpoint); each protocol's sans-I/O logic in its `Core` module (`VegaHTTP2Core`, `VegaHTTP3Core`, `VegaWebSocketCore`, `VegaQUICCore`) |
 | **Extras** | `NIOExtras` (quiescing, debug handlers), SOCKS, HTTP proxy, compression | `Quiesce` (graceful shutdown) in `Vega`; `VegaProxy` (SOCKS5, CONNECT); `VegaCompression` (gzip, deflate, brotli, zstd) |
@@ -181,7 +181,7 @@ Not on Windows: `Runtime.sharded` (it needs `fork`); brotli and zstd (gzip and d
   - `VegaCompression`, `VegaProxy`, `VegaMetrics`, `VegaTest`
   - `AvianCore`, `AvianHTTP` and `AvianQUIC` stay as the sans-I/O protocol layers the `Vega*` modules sit on.
 - **Docs and releases.**
-  - `docs/VEGA.md` (design), `docs/MIGRATING-FROM-NIO.md` (concept mapping: `Channel` → `TCPStream` + `Framed`, `ChannelHandler` → `Codec`/async function, `EventLoopFuture` → `async`).
+  - `docs/VEGA.md` (design), `docs/MIGRATING-FROM-NIO.md` (concept mapping: `MPSCChannel` → `TCPStream` + `Framed`, `ChannelHandler` → `Codec`/async function, `EventLoopFuture` → `async`).
   - `RELEASE.md` entries.
 - `D:\code\vega` stays empty unless you'd rather keep the design docs there.
 
@@ -226,7 +226,7 @@ Spike: `scratchpad/spike` (built in WSL, run on the bench box 192.168.100.100: i
 | **v0.2** | sharded runtime and topology; `VegaIO` codecs and `Framed`; `Resolver`; Happy Eyeballs; bootstraps; `VegaFS`, `VegaProcess`, `VegaSignal`; metrics | 0.9.0 |
 | **v0.3** | IOCP driver (Windows CI); Network.framework driver (iOS simulator CI) | 0.10.0 |
 | **v0.4** | `VegaTLS`; `VegaHTTP1/2`; `VegaWebSocket`; `VegaExtras` (quiesce, proxy, SOCKS, compression) | 0.11.0 |
-| **v0.4b** | `VegaNIO` (separate package): `EventLoopGroup`/`EventLoop`/`Channel`/bootstraps over Vega; runs swift-nio's own channel test suite plus Hummingbird and Vapor hello-world against it | VegaNIO 0.1 |
+| **v0.4b** | `VegaNIO` (separate package): `EventLoopGroup`/`EventLoop`/`MPSCChannel`/bootstraps over Vega; runs swift-nio's own channel test suite plus Hummingbird and Vapor hello-world against it | VegaNIO 0.1 |
 | **v0.5** | `VegaHTTP3`/QUIC on Vega; Garuda's `Worker` migrated to Vega behind a flag | 0.12.0 |
 | **1.0** | parity matrix all green; Garuda on Vega by default; API frozen | 1.0.0 |
 

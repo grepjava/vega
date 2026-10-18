@@ -1,7 +1,7 @@
 /// A multi-producer, single-consumer queue: Tokio's `mpsc`.
 ///
 /// ```swift
-/// let ch = Channel<Job>(capacity: 64)
+/// let ch = MPSCChannel<Job>(capacity: 64)
 /// for _ in 0..<4 { rt.spawn(with: ch.sender.clone()) { tx in try? await tx.send(work()) } }
 /// var rx = ch.receiver
 /// while let job = try? await rx.receive() { ... }
@@ -10,7 +10,7 @@
 /// - A bounded channel holds up to `capacity` values; `send` waits for room.
 ///   Waiting senders are served in order: each receive moves the oldest
 ///   parked value into the buffer and wakes its sender.
-/// - `Channel.unbounded()` never waits for room. Use `trySend` to send
+/// - `MPSCChannel.unbounded()` never waits for room. Use `trySend` to send
 ///   without `await`.
 /// - Senders are `~Copyable`; make more with `clone()`. When the last one
 ///   drops, the receiver drains what is buffered, then gets `.closed`.
@@ -19,7 +19,7 @@
 /// Values may be `~Copyable` (sockets, buffers). A send that fails drops its
 /// value. Handles hold the channel without per-operation reference counting.
 @frozen
-public struct Channel<Element: ~Copyable & Sendable>: ~Copyable, Sendable {
+public struct MPSCChannel<Element: ~Copyable & Sendable>: ~Copyable, Sendable {
     public var sender: Sender
     public var receiver: Receiver
 
@@ -27,21 +27,21 @@ public struct Channel<Element: ~Copyable & Sendable>: ~Copyable, Sendable {
     @inlinable
     public init(capacity: Int) {
         precondition(capacity > 0, "capacity must be positive")
-        let core = ChannelCore<Element>(capacity: capacity)
+        let core = MPSCChannelCore<Element>(capacity: capacity)
         sender = Sender(core)
         receiver = Receiver(core)
     }
 
     /// A channel without a bound: sends never wait.
     @inlinable
-    public static func unbounded() -> Channel { Channel(capacity: .max) }
+    public static func unbounded() -> MPSCChannel { MPSCChannel(capacity: .max) }
 
     @frozen
     public struct Sender: ~Copyable, Sendable {
-        @usableFromInline unowned(unsafe) let core: ChannelCore<Element>
+        @usableFromInline unowned(unsafe) let core: MPSCChannelCore<Element>
 
         @inlinable
-        init(_ core: ChannelCore<Element>) {
+        init(_ core: MPSCChannelCore<Element>) {
             self.core = core
             _ = Unmanaged.passRetained(core)
         }
@@ -91,10 +91,10 @@ public struct Channel<Element: ~Copyable & Sendable>: ~Copyable, Sendable {
 
     @frozen
     public struct Receiver: ~Copyable, Sendable {
-        @usableFromInline unowned(unsafe) let core: ChannelCore<Element>
+        @usableFromInline unowned(unsafe) let core: MPSCChannelCore<Element>
 
         @inlinable
-        init(_ core: ChannelCore<Element>) {
+        init(_ core: MPSCChannelCore<Element>) {
             self.core = core
             _ = Unmanaged.passRetained(core)
         }
@@ -136,7 +136,7 @@ public struct Channel<Element: ~Copyable & Sendable>: ~Copyable, Sendable {
 }
 
 @usableFromInline
-final class ChannelCore<Element: ~Copyable & Sendable>: @unchecked Sendable {
+final class MPSCChannelCore<Element: ~Copyable & Sendable>: @unchecked Sendable {
     /// A sender waiting for room, with the value it will send.
     @usableFromInline
     struct Parked: ~Copyable {

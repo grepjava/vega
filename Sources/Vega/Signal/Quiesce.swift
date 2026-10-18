@@ -26,7 +26,7 @@ public final class Quiesce: Sendable {
     private let signals: [Int32]
     private let shutdowns = Mutex<[Shutdown]>([])
     /// Set by `trigger()` or a signal; `run()` waits on it.
-    public let signal = ShutdownSignal()
+    public let token = ShutdownToken()
 
     /// - Parameters:
     ///   - gracePeriod: how long the servers get to finish, all together.
@@ -49,7 +49,7 @@ public final class Quiesce: Sendable {
 
     /// Start shutting down, as a signal would.
     public func trigger() {
-        signal.trigger()
+        token.trigger()
     }
 
     /// Wait for a signal or `trigger()`, then shut everything registered
@@ -58,12 +58,12 @@ public final class Quiesce: Sendable {
         let watchers = try signals.map { s throws(IOError) in try Runtime.signals(s) }
         await withTaskGroup(of: Void.self) { group in
             for stream in watchers {
-                group.addTask { [signal] in
+                group.addTask { [token] in
                     var it = stream.makeAsyncIterator()
-                    if await it.next() != nil { signal.trigger() }
+                    if await it.next() != nil { token.trigger() }
                 }
             }
-            await signal.wait()
+            await token.wait()
             group.cancelAll()
         }
         let all = shutdowns.withLock { $0 }

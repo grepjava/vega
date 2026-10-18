@@ -358,8 +358,8 @@ public struct ShardWatchAction: Sendable, Hashable, CaseIterable {
 public struct ShardOptions: Sendable {
     /// Shard processes; nil: one per last-level cache domain (L3, read from
     /// sysfs on Linux), else one. 0: no shards, `body` runs once in this
-    /// process (see `Runtime.sharded`). The environment variable
-    /// `VEGA_SHARDS`, when set, overrides it.
+    /// process (see `Runtime.sharded`). Left nil, the environment variable
+    /// `VEGA_SHARDS` sets it when present: code wins over the environment.
     public var shards: Int?
     /// Workers in each shard; nil: as many as the shard has CPUs.
     public var workersPerShard: Int?
@@ -468,8 +468,8 @@ extension Runtime {
     /// one: a plain `Task {}` in a shard runs on its workers too, and no
     /// task needs an executor preference to stay there.
     ///
-    /// With `shards` 0 (or `VEGA_SHARDS=0` in the environment, which
-    /// overrides `shards`), there is no supervisor and no shard process:
+    /// With `shards` 0 (or nil and `VEGA_SHARDS=0` in the environment),
+    /// there is no supervisor and no shard process:
     /// `body` runs once, in this process, as shard 0 of 1, with a plain
     /// multi-threaded runtime (`workersPerShard` workers, else one per CPU,
     /// never pinned) and the listeners bound here. The same `main` then
@@ -487,7 +487,7 @@ extension Runtime {
                                 listeners: launched.listeners, body: body)
         }
         var options = options
-        if let shards = shardsFromEnvironment() { options.shards = shards }
+        if options.shards == nil, let shards = shardsFromEnvironment() { options.shards = shards }
         if options.shards == 0 {
             runInProcess(options, body)
             exit(0)

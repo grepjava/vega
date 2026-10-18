@@ -180,7 +180,7 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
             #endif
         }
         let me = Unmanaged.passUnretained(self).toOpaque()
-        let spin = Worker.environmentSpinNanos ?? idleSpin.map { Scheduler.nanoseconds($0) } ?? Worker.defaultSpinNanos
+        let spin = idleSpin.map { Scheduler.nanoseconds($0) } ?? Worker.environmentSpinNanos ?? Worker.defaultSpinNanos
         for w in workers {
             w.scheduler = self
             w.owner = me

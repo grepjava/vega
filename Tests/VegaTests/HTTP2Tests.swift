@@ -324,7 +324,7 @@ private func get(_ path: String) -> HTTPRequest {
     @Test func gracefulShutdown() throws {
         let rt = Runtime(workers: 4)
         defer { rt.shutdown() }
-        let signal = ShutdownSignal()
+        let signal = ShutdownToken()
         let entered = Notify(), release = Notify()
         let (slow, late, served) = try rt.block { () async throws -> (String, Bool, Bool) in
             let pair = duplex(capacity: 256 * 1024)

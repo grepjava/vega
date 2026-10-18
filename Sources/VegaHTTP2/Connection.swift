@@ -33,13 +33,13 @@ public enum HTTP2Server {
         reader: consuming Reader,
         writer: consuming Writer,
         configuration: HTTP2Configuration = .init(),
-        shutdown: ShutdownSignal? = nil,
+        shutdown: ShutdownToken? = nil,
         _ handler: @escaping @Sendable (HTTPRequest) async throws -> HTTPResponse
     ) async throws(HTTP2Error) {
         let readerBox = Handoff(reader)
         let writerBox = Handoff(writer)
         let failure = await withTaskGroup(of: Void.self) { group -> HTTP2Error? in
-            let channel = Channel<LoopEvent>(capacity: 1024)
+            let channel = MPSCChannel<LoopEvent>(capacity: 1024)
             let mailbox = Mailbox(channel.sender)
             var inbox = channel.receiver
             group.addTask {
@@ -162,7 +162,7 @@ public enum HTTP2Server {
     /// Serve the halves of a split stream (`stream.halves()`).
     public static func serve<Reader: AsyncReader & ~Copyable & Sendable, Writer: AsyncWriter & ~Copyable>(
         _ halves: consuming StreamHalves<Reader, Writer>, configuration: HTTP2Configuration = .init(),
-        shutdown: ShutdownSignal? = nil,
+        shutdown: ShutdownToken? = nil,
         _ handler: @escaping @Sendable (HTTPRequest) async throws -> HTTPResponse
     ) async throws(HTTP2Error) {
         try await serve(reader: halves.reader, writer: halves.writer, configuration: configuration,
@@ -171,7 +171,7 @@ public enum HTTP2Server {
 
     /// Serve a TCP connection.
     public static func serve(_ stream: consuming TCPStream, configuration: HTTP2Configuration = .init(),
-                             shutdown: ShutdownSignal? = nil,
+                             shutdown: ShutdownToken? = nil,
                              _ handler: @escaping @Sendable (HTTPRequest) async throws -> HTTPResponse) async throws(HTTP2Error) {
         try await serve(stream.halves(), configuration: configuration, shutdown: shutdown, handler)
     }
@@ -216,7 +216,7 @@ public final class HTTP2Client: Sendable {
         let readerBox = Handoff(reader)
         let writerBox = Handoff(writer)
         let result: Result<T, any Error> = await withTaskGroup(of: Bool.self) { group in
-            let channel = Channel<LoopEvent>(capacity: 1024)
+            let channel = MPSCChannel<LoopEvent>(capacity: 1024)
             let mailbox = Mailbox(channel.sender)
             let inboxBox = Handoff(channel.receiver)
             group.addTask {
@@ -258,7 +258,7 @@ public final class HTTP2Client: Sendable {
     }
 
     private static func clientLoop<Writer: AsyncWriter & ~Copyable>(
-        _ writer: consuming Writer, _ inbox: consuming Channel<LoopEvent>.Receiver,
+        _ writer: consuming Writer, _ inbox: consuming MPSCChannel<LoopEvent>.Receiver,
         scheme: String, authority: String?, configuration: HTTP2Configuration
     ) async {
         var core = H2Core(isServer: false, configuration: configuration)
@@ -384,9 +384,9 @@ enum LoopEvent: Sendable {
 
 /// The sending side of a loop's channel, shared by the tasks that feed it.
 final class Mailbox: Sendable {
-    private let sender: Channel<LoopEvent>.Sender
+    private let sender: MPSCChannel<LoopEvent>.Sender
 
-    init(_ sender: consuming Channel<LoopEvent>.Sender) {
+    init(_ sender: consuming MPSCChannel<LoopEvent>.Sender) {
         self.sender = sender
     }
 

@@ -12,7 +12,7 @@ private let identity = try! TLSIdentity.selfSigned(names: ["vega.test", "127.0.0
 /// A read half and where to send what it reads, for one task.
 private struct Pump<Reader: AsyncReader & ~Copyable & Sendable>: ~Copyable, Sendable {
     var reader: Reader
-    var sender: Channel<[UInt8]>.Sender
+    var sender: MPSCChannel<[UInt8]>.Sender
 }
 
 private func pattern(_ i: Int) -> UInt8 { UInt8(truncatingIfNeeded: i &* 31 &+ i >> 9) }
@@ -32,7 +32,7 @@ private func pattern(_ i: Int) -> UInt8 { UInt8(truncatingIfNeeded: i &* 31 &+ i
             rt.spawn(with: pair.second) { t async in
                 guard let tls = try? await TLSStream.accept(t, context: server) else { return }
                 let halves = tls.split { $0.halves() }
-                let channel = Channel<[UInt8]>(capacity: 4)
+                let channel = MPSCChannel<[UInt8]>(capacity: 4)
                 rt.spawn(with: Pump(reader: halves.reader, sender: channel.sender)) { pump async in
                     var buf = IOBuffer(capacity: 32 * 1024)
                     while let n = try? await pump.reader.read(into: &buf), n > 0 {

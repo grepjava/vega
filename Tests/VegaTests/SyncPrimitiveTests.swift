@@ -315,7 +315,7 @@ import Testing
     @Test func triggers() throws {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
-        let signal = ShutdownSignal()
+        let signal = ShutdownToken()
         let (woke, cut, leftAlone, late) = try rt.block { () async throws -> (Bool, Bool, Bool, Bool) in
             let waiter = rt.spawn { () async -> Bool in
                 await signal.wait()

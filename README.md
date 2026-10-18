@@ -25,7 +25,7 @@ a server as supervised shard processes.
 
 SwiftNIO is the foundation most server-side Swift stands on, and Vega owes a
 great deal to it. NIO was designed before Swift had async/await: its unit of
-work is a `Channel` bound to one event loop thread for life, and its API is
+work is a `MPSCChannel` bound to one event loop thread for life, and its API is
 `EventLoopFuture` and the channel pipeline, with async bridges added later.
 Tokio, on the Rust side, showed another shape: tasks that any worker thread may
 run, with idle threads stealing work from busy ones.
@@ -61,7 +61,7 @@ mature, widely deployed and far more proven than Vega.
 | | Vega | SwiftNIO | Tokio |
 |---|---|---|---|
 | Language | Swift 6.2+ (tuned for 6.3) | Swift | Rust |
-| Programming model | Swift concurrency: tasks, `async`/`await`, structured concurrency | `Channel`, `ChannelPipeline` and `EventLoopFuture`; async bridges (`NIOAsyncChannel`) | `async`/`await` on Rust futures |
+| Programming model | Swift concurrency: tasks, `async`/`await`, structured concurrency | `MPSCChannel`, `ChannelPipeline` and `EventLoopFuture`; async bridges (`NIOAsyncChannel`) | `async`/`await` on Rust futures |
 | Scheduling | work stealing across worker threads; current-thread runtime | an event loop per thread; a channel stays on its loop | work stealing (multi-thread runtime); current-thread runtime |
 | Multi-process | `Runtime.sharded`: supervised shard processes | none built in | none built in |
 | Linux I/O | io_uring (default), epoll | epoll | epoll (io_uring through `tokio-uring`) |

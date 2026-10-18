@@ -373,7 +373,7 @@ So on macOS, kqueue stays the default for servers. `.network` is for iOS, tvOS, 
 | mpsc_fan_in | 3,459 | 784 | 473 | **227** |
 | semaphore | 3,684 | 548 | **348** | 463 |
 
-**Specialization.** At first `Channel` and `Oneshot` were ordinary generic code. Called from another module they ran unspecialized, through value witnesses for every push and pop. That made mpsc_ping_pong 2,160 ns and mpsc_fan_in 1,090 ns on the patched runtime. Building with `-cross-module-optimization` cut those to 892 and 456, which showed that missed specialization was nearly all of the cost. Apps shouldn't need an unsafe flag to get that speed, so the channel types, their cores, `RawRing` and `RawLock` are now `@inlinable`/`@usableFromInline`. A plain release build matches the CMO numbers.
+**Specialization.** At first `MPSCChannel` and `Oneshot` were ordinary generic code. Called from another module they ran unspecialized, through value witnesses for every push and pop. That made mpsc_ping_pong 2,160 ns and mpsc_fan_in 1,090 ns on the patched runtime. Building with `-cross-module-optimization` cut those to 892 and 456, which showed that missed specialization was nearly all of the cost. Apps shouldn't need an unsafe flag to get that speed, so the channel types, their cores, `RawRing` and `RawLock` are now `@inlinable`/`@usableFromInline`. A plain release build matches the CMO numbers.
 
 **What is left against Tokio:**
 - **mpsc_ping_pong.** Every operation parks one side and wakes the other. It costs about what two `Notify` round trips cost (ping_pong_notify: 776 ns), so the time is in park and wake, not in the channel. The status record from `withTaskCancellationHandler` is the largest part.

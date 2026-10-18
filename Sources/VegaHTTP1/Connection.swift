@@ -43,7 +43,7 @@ public enum HTTP1Server {
     public static func serve<Stream: AsyncReader & AsyncWriter & ~Copyable>(
         _ stream: borrowing Stream,
         configuration: Configuration = .init(),
-        shutdown: ShutdownSignal? = nil,
+        shutdown: ShutdownToken? = nil,
         _ handler: (HTTPRequest) async throws -> HTTPResponse
     ) async throws(IOError) {
         var reading = Reading(HTTP1RequestDecoder(limits: configuration.limits), capacity: configuration.bufferSize)

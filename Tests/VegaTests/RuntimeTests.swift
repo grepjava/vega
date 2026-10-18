@@ -36,20 +36,20 @@ func spin(microseconds: UInt64) {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
         let (still, afterYield, afterSleep, onWorker) = rt.block { () async -> (Bool, Bool, Bool, Bool) in
-            let first = Runtime.currentJobStamp
+            let first = Runtime.currentPollStamp
             spin(microseconds: 200)
-            let still = Runtime.currentJobStamp == first
+            let still = Runtime.currentPollStamp == first
             await Runtime.yield()
-            let afterYield = Runtime.currentJobStamp != first
-            let second = Runtime.currentJobStamp
+            let afterYield = Runtime.currentPollStamp != first
+            let second = Runtime.currentPollStamp
             try? await Runtime.sleep(for: .milliseconds(1))
-            return (still, afterYield, Runtime.currentJobStamp != second, first != .none)
+            return (still, afterYield, Runtime.currentPollStamp != second, first != nil)
         }
         #expect(still)
         #expect(afterYield)
         #expect(afterSleep)
         #expect(onWorker)
-        #expect(Runtime.currentJobStamp == .none)
+        #expect(Runtime.currentPollStamp == nil)
     }
 
     @Test func aStaticSpawnRunsOnTheCallersRuntime() {

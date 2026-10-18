@@ -30,7 +30,7 @@ import ucrt
 ///   sees none of the task-locals of the code that started the server.
 /// - `shutdown(gracePeriod:)` stops accepting, lets open connections finish
 ///   for the grace period, then cancels the rest. It triggers
-///   `shutdownSignal` first: give that to `HTTP1Server` and `HTTP2Server`
+///   `shutdownToken` first: give that to `HTTP1Server` and `HTTP2Server`
 ///   (or watch it) to close keep-alive connections between requests.
 public final class TCPServer: Sendable {
     public struct Configuration: Sendable {
@@ -47,14 +47,14 @@ public final class TCPServer: Sendable {
         /// fails drops the connection.
         public var connectionOptions: [SocketOption: Int] = [:]
         /// Triggered when `shutdown` begins; nil for one of the server's own.
-        public var shutdownSignal: ShutdownSignal?
+        public var shutdownToken: ShutdownToken?
 
         public init(acceptors: Int = 1, maxConnections: Int? = nil,
-                    connectionOptions: [SocketOption: Int] = [:], shutdownSignal: ShutdownSignal? = nil) {
+                    connectionOptions: [SocketOption: Int] = [:], shutdownToken: ShutdownToken? = nil) {
             self.acceptors = acceptors
             self.maxConnections = maxConnections
             self.connectionOptions = connectionOptions
-            self.shutdownSignal = shutdownSignal
+            self.shutdownToken = shutdownToken
         }
     }
 
@@ -86,9 +86,9 @@ public final class TCPServer: Sendable {
     private let scheduler: Scheduler
     private let permits: Semaphore?
     private let state = Watch(State())
-    /// Triggered when `shutdown` begins (`configuration.shutdownSignal`, if
+    /// Triggered when `shutdown` begins (`configuration.shutdownToken`, if
     /// given).
-    public let shutdownSignal: ShutdownSignal
+    public let shutdownToken: ShutdownToken
     private let nextID = Atomic<UInt64>(0)
     private let open = Atomic<Int>(0)
 
@@ -170,7 +170,7 @@ public final class TCPServer: Sendable {
         self.configuration = configuration
         self.handler = handler
         self.scheduler = scheduler
-        shutdownSignal = configuration.shutdownSignal ?? ShutdownSignal()
+        shutdownToken = configuration.shutdownToken ?? ShutdownToken()
         permits = configuration.maxConnections.map { Semaphore(permits: max($0, 1)) }
     }
 
@@ -181,7 +181,7 @@ public final class TCPServer: Sendable {
     public var connectionCount: Int { open.load(ordering: .relaxed) }
 
     /// Whether `shutdown` has begun.
-    public var isShuttingDown: Bool { shutdownSignal.isTriggered }
+    public var isShuttingDown: Bool { shutdownToken.isTriggered }
 
     /// Why an accept loop stopped, if one stopped on an error it couldn't
     /// ride out.
@@ -189,7 +189,7 @@ public final class TCPServer: Sendable {
 
     /// Return once `shutdown` begins (or the task is cancelled).
     public func waitForShutdown() async {
-        await shutdownSignal.wait()
+        await shutdownToken.wait()
     }
 
     /// Return once the server has stopped: no accept loop running (after
@@ -217,7 +217,7 @@ public final class TCPServer: Sendable {
     }
 
     private func stopAccepting() {
-        shutdownSignal.trigger()
+        shutdownToken.trigger()
         var acceptors: [Task<Void, Never>] = []
         state.modify { acceptors = $0.acceptorTasks }
         for task in acceptors { task.cancel() }
@@ -246,7 +246,7 @@ public final class TCPServer: Sendable {
         state.modify { $0.acceptorTasks.append(task) }
         // stopAccepting sets the flag before reading the tasks: one of the
         // two sees the other.
-        if shutdownSignal.isTriggered { task.cancel() }
+        if shutdownToken.isTriggered { task.cancel() }
     }
 
     private func acceptLoop(_ listener: consuming TCPListener) async {

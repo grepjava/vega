@@ -310,7 +310,7 @@ struct Tracked: ~Copyable, Sendable {
         defer { rt.shutdown() }
         let producers = 8, each = 20_000
         let (sum, ordered) = rt.block { () async -> (Int, Bool) in
-            let ch = Channel<Int>(capacity: 16)
+            let ch = MPSCChannel<Int>(capacity: 16)
             for p in 0..<producers {
                 rt.spawn(with: ch.sender.clone()) { tx in
                     for i in 0..<each { try? await tx.send(p << 32 | i) }
@@ -337,7 +337,7 @@ struct Tracked: ~Copyable, Sendable {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
         let got = rt.block { () async -> [Int] in
-            let ch = Channel<Int>(capacity: 1)
+            let ch = MPSCChannel<Int>(capacity: 1)
             try? ch.sender.trySend(0)
             for i in 1...4 {
                 rt.spawn(with: ch.sender.clone()) { tx in try? await tx.send(i) }
@@ -353,7 +353,7 @@ struct Tracked: ~Copyable, Sendable {
     }
 
     @Test func trySendReportsFullAndClosed() throws {
-        let ch = Channel<Int>(capacity: 2)
+        let ch = MPSCChannel<Int>(capacity: 2)
         let tx = ch.sender
         func send(_ v: Int) -> TrySendError? {
             do throws(TrySendError) { try tx.trySend(v); return nil } catch { return error }
@@ -379,7 +379,7 @@ struct Tracked: ~Copyable, Sendable {
         defer { rt.shutdown() }
         let drops = DropCounter()
         let outcomes = rt.block { () async -> [ChannelError?] in
-            let ch = Channel<Tracked>(capacity: 2)
+            let ch = MPSCChannel<Tracked>(capacity: 2)
             try? ch.sender.trySend(Tracked(n: 0, drops: drops))
             try? ch.sender.trySend(Tracked(n: 1, drops: drops))
             var tasks: [Task<ChannelError?, Never>] = []
@@ -405,7 +405,7 @@ struct Tracked: ~Copyable, Sendable {
         defer { rt.shutdown() }
         let drops = DropCounter()
         let (outcome, first, second) = rt.block { () async -> (ChannelError?, Int, Int) in
-            let ch = Channel<Tracked>(capacity: 1)
+            let ch = MPSCChannel<Tracked>(capacity: 1)
             try? ch.sender.trySend(Tracked(n: 1, drops: drops))
             let parked = rt.spawn(with: ch.sender.clone()) { tx -> ChannelError? in
                 do throws(ChannelError) { try await tx.send(Tracked(n: 2, drops: drops)); return nil }
@@ -434,7 +434,7 @@ struct Tracked: ~Copyable, Sendable {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
         let (first, value) = rt.block { () async -> (ChannelError?, Int) in
-            let ch = Channel<Int>(capacity: 4)
+            let ch = MPSCChannel<Int>(capacity: 4)
             let waiter = rt.spawn(with: ch.receiver) { rx -> (ChannelError?, Int) in
                 var rx = rx
                 var first: ChannelError? = nil
@@ -462,13 +462,13 @@ struct Tracked: ~Copyable, Sendable {
         defer { rt.shutdown() }
         let (received, sent) = rt.block { () async -> (Int, ChannelError?) in
             // Receiver side: waits on an empty channel.
-            let a = Channel<Int>(capacity: 1)
+            let a = MPSCChannel<Int>(capacity: 1)
             let receiver = rt.spawn(with: a.receiver) { rx -> Int in
                 var rx = rx
                 return (try? await rx.receiveIgnoringCancellation()) ?? -1
             }
             // Sender side: waits on a full channel.
-            let b = Channel<Int>(capacity: 1)
+            let b = MPSCChannel<Int>(capacity: 1)
             try? b.sender.trySend(1)
             let sender = rt.spawn(with: b.sender.clone()) { tx -> ChannelError? in
                 do throws(ChannelError) { try await tx.sendIgnoringCancellation(2); return nil }
@@ -491,7 +491,7 @@ struct Tracked: ~Copyable, Sendable {
     }
 
     @Test func unboundedNeverWaits() {
-        let ch = Channel<Int>.unbounded()
+        let ch = MPSCChannel<Int>.unbounded()
         for i in 0..<100_000 { try? ch.sender.trySend(i) }
         var rx = ch.receiver
         let queued = rx.count
@@ -507,8 +507,8 @@ struct Tracked: ~Copyable, Sendable {
         defer { rt.shutdown() }
         let rounds = 50_000
         let last = try rt.block { () async throws(ChannelError) -> Int in
-            let there = Channel<Int>(capacity: 1)
-            let back = Channel<Int>(capacity: 1)
+            let there = MPSCChannel<Int>(capacity: 1)
+            let back = MPSCChannel<Int>(capacity: 1)
             let echo = rt.spawn(with: Bounce(rx: there.receiver, tx: back.sender)) { b in
                 var rx = b.rx
                 while let v = try? await rx.receive() { try? await b.tx.send(v + 1) }
@@ -529,8 +529,8 @@ struct Tracked: ~Copyable, Sendable {
 }
 
 struct Bounce: ~Copyable, Sendable {
-    var rx: Channel<Int>.Receiver
-    let tx: Channel<Int>.Sender
+    var rx: MPSCChannel<Int>.Receiver
+    let tx: MPSCChannel<Int>.Sender
 }
 
 final class Gauge: Sendable {
