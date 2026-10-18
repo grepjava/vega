@@ -19,12 +19,12 @@ On a machine with one cache domain and a server whose code doesn't trap, one run
 ```swift
 import Vega
 
-var options = ShardOptions()            // one shard per cache domain
-options.listeners = [.tcp(port: 8080)]
-options.shutdownGracePeriod = .seconds(10)
-options.onEvent = { event in print("supervisor:", event) }
+var config = ShardConfiguration()            // one shard per cache domain
+config.listeners = [.tcp(port: 8080)]
+config.shutdownGracePeriod = .seconds(10)
+config.onEvent = { event in print("supervisor:", event) }
 
-Runtime.sharded(options) { shard in
+Runtime.sharded(config) { shard in
     do {
         try shard.runtime.block { () async throws(IOError) in
             var terminate = try Runtime.signals(SIGTERM)
@@ -43,13 +43,13 @@ Runtime.sharded(options) { shard in
 
 - Call `Runtime.sharded` first thing in a synchronous `main`, before any thread or task exists. The supervisor checks this: on Linux it reads `/proc/self/status`, on Darwin it uses `task_threads`.
 - The supervisor never runs the closure. Each shard runs it on its main thread with `shard.runtime`, and exits 0 when it returns.
-- `shard.listener(i)` gives a `TCPListener` for `options.listeners[i]` on the shard's runtime. Call it again for more accept loops. `shard.port(i)` is the port, which is useful when you asked for port 0.
+- `shard.listener(i)` gives a `TCPListener` for `config.listeners[i]` on the shard's runtime. Call it again for more accept loops. `shard.port(i)` is the port, which is useful when you asked for port 0.
 - `shard.index` (0 ..< `shard.count`) stays the same when a shard is restarted.
 - Shards get SIGTERM at its default action, which ends the process at once. To finish open connections first, catch it as above with `Runtime.signals(SIGTERM)` and shut the server down within `shutdownGracePeriod`.
 
 ## Options
 
-| `ShardOptions` | Default | Meaning |
+| `ShardConfiguration` | Default | Meaning |
 |---|---|---|
 | `shards` | one per cache domain | Number of shard processes; 0 runs in-process (see below). `VEGA_SHARDS` overrides it |
 | `workersPerShard` | the shard's CPU count | Workers in each shard's runtime |
@@ -69,17 +69,17 @@ Runtime.sharded(options) { shard in
 With `shards` 0, `Runtime.sharded` starts no supervisor and no shard processes. It runs the closure once, in the calling process, the way a plain Tokio-style runtime would:
 
 - The closure gets shard 0 of 1. `shard.runtime` is a multi-threaded runtime with `workersPerShard` workers, or one per CPU. Its threads are never pinned.
-- `options.listeners` are bound in this process, once each. `shard.listener(i)` works as in a shard, and every call shares the one socket.
+- `config.listeners` are bound in this process, once each. `shard.listener(i)` works as in a shard, and every call shares the one socket.
 - Nothing restarts the process, and the supervisor's signal handling doesn't apply. A `Runtime.signals(SIGTERM)` drain in the closure works the same as in a shard.
 - There is no single-thread check, so threads may already exist.
 - When the closure returns, the process exits 0.
 
-The environment variable `VEGA_SHARDS` overrides `options.shards`. One `main` therefore runs as one process or as K shards, chosen at deploy time:
+When code leaves `config.shards` nil, the environment variable `VEGA_SHARDS` sets it. One `main` therefore runs as one process or as K shards, chosen at deploy time:
 
 ```sh
 VEGA_SHARDS=0 ./server   # one process, one runtime
 VEGA_SHARDS=4 ./server   # a supervisor and 4 shards
-./server                 # whatever ShardOptions.shards says
+./server                 # whatever ShardConfiguration.shards says
 ```
 
 A value that isn't a count ends the process with exit code 1 and a message.
@@ -93,7 +93,7 @@ A value that isn't a count ends the process with exit code 1 and a message.
 
 **Why exec on Darwin.** After a `fork` without `exec`, a child may only make async-signal-safe calls. Some libsystem state the Swift runtime uses, such as os_log's preferences, isn't valid in the child. On an M1, 6 of 30 forked shards died with SIGSEGV in `_os_log_preferences_refresh` on their first protocol-conformance lookup. Exec-launched shards passed 10 out of 10 runs of `vega-shard-check` with no crashes. Linux libraries don't have this problem, so Linux keeps `fork` as the default, which is faster to start. `.exec` works on Linux too.
 
-**What exec mode requires.** Every shard runs `main` again up to the `Runtime.sharded` call, so the code before that call must be deterministic and free of side effects. Don't open files, log a banner, or read configuration that may change between shard starts. The shard then runs the closure with the options and closure that its own run of `main` built.
+**What exec mode requires.** Every shard runs `main` again up to the `Runtime.sharded` call, so the code before that call must be deterministic and free of side effects. Don't open files, log a banner, or read configuration that may change between shard starts. The shard then runs the closure with the configuration and closure that its own run of `main` built.
 
 How the supervisor hands an exec'd shard its state:
 

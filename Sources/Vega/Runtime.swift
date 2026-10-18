@@ -25,29 +25,72 @@ public final class Runtime: Sendable {
 
     public var workerCount: Int { scheduler.workers.count }
 
-    /// - Parameters:
-    ///   - workers: worker threads; defaults to the number of online CPUs.
-    ///   - name: thread name prefix.
-    ///   - pinThreads: pin worker *i* to CPU *i*.
-    ///   - io: the I/O driver; see ``IOBackend``.
-    ///   - blockingThreads: most threads ``blocking(_:)`` runs at once.
-    ///   - blockingQueue: most work ``tryBlocking(_:)`` lets wait for one of
-    ///     those threads; past it, it refuses (returns nil). ``blocking(_:)``
-    ///     always waits. nil: no bound.
-    ///   - blockingKeepAlive: how long an idle blocking thread lives.
-    ///   - idleSpin: how long a worker with nothing to do spins before it
-    ///     sleeps in the kernel; nil for the platform's default (50 µs on
-    ///     Linux, none on Darwin). While work keeps coming, a spin saves
-    ///     the syscalls of a wake; it takes the CPU from whatever shares
-    ///     it, a load generator or another server. Left nil,
-    ///     `VEGA_SPIN_NS` sets it when present.
-    public init(workers: Int? = nil, name: String = "vega", pinThreads: Bool = false,
-                io: IOBackend = .automatic,
-                blockingThreads: Int = 512, blockingQueue: Int? = nil,
-                blockingKeepAlive: Duration = .seconds(10), idleSpin: Duration? = nil) {
-        scheduler = Scheduler(workers: workers ?? Int(cv_cpu_count()), name: name, pin: pinThreads,
-                              io: io, idleSpin: idleSpin, blockingThreads: blockingThreads,
-                              blockingQueue: blockingQueue, blockingKeepAlive: blockingKeepAlive)
+    /// How a ``Runtime`` is set up: `Runtime(configuration:)`. The
+    /// defaults are a runtime with a worker per online CPU.
+    ///
+    /// ```swift
+    /// var config = Runtime.Configuration()
+    /// config.workers = 8
+    /// config.blockingQueue = 1024
+    /// let rt = Runtime(configuration: config)
+    /// ```
+    public struct Configuration: Sendable {
+        /// Worker threads; nil: the number of online CPUs.
+        public var workers: Int?
+        /// Thread name prefix.
+        public var name: String
+        /// Pin worker *i* to CPU *i*.
+        public var pinThreads: Bool
+        /// The I/O driver; see ``IOBackend``.
+        public var io: IOBackend
+        /// Most threads ``Runtime/blocking(_:)`` runs at once.
+        public var blockingThreads: Int
+        /// Most work ``Runtime/tryBlocking(_:)`` lets wait for one of those
+        /// threads; past it, it refuses (returns nil). ``Runtime/blocking(_:)``
+        /// always waits. nil: no bound.
+        public var blockingQueue: Int?
+        /// How long an idle blocking thread lives.
+        public var blockingKeepAlive: Duration
+        /// How long a worker with nothing to do spins before it sleeps in
+        /// the kernel; nil for the platform's default (50 µs on Linux, none
+        /// on Darwin). While work keeps coming, a spin saves the syscalls
+        /// of a wake; it takes the CPU from whatever shares it, a load
+        /// generator or another server. Left nil, `VEGA_SPIN_NS` sets it
+        /// when present: code wins over the environment.
+        public var idleSpin: Duration?
+
+        public init(workers: Int? = nil, name: String = "vega", pinThreads: Bool = false,
+                    io: IOBackend = .automatic,
+                    blockingThreads: Int = 512, blockingQueue: Int? = nil,
+                    blockingKeepAlive: Duration = .seconds(10), idleSpin: Duration? = nil) {
+            self.workers = workers
+            self.name = name
+            self.pinThreads = pinThreads
+            self.io = io
+            self.blockingThreads = blockingThreads
+            self.blockingQueue = blockingQueue
+            self.blockingKeepAlive = blockingKeepAlive
+            self.idleSpin = idleSpin
+        }
+    }
+
+    /// A runtime set up as `configuration` says.
+    public init(configuration: Configuration) {
+        let c = configuration
+        scheduler = Scheduler(workers: c.workers ?? Int(cv_cpu_count()), name: c.name, pin: c.pinThreads,
+                              io: c.io, idleSpin: c.idleSpin, blockingThreads: c.blockingThreads,
+                              blockingQueue: c.blockingQueue, blockingKeepAlive: c.blockingKeepAlive)
+    }
+
+    /// A runtime set up with ``Configuration``'s members as arguments:
+    /// `Runtime(workers: 4)`.
+    public convenience init(workers: Int? = nil, name: String = "vega", pinThreads: Bool = false,
+                            io: IOBackend = .automatic,
+                            blockingThreads: Int = 512, blockingQueue: Int? = nil,
+                            blockingKeepAlive: Duration = .seconds(10), idleSpin: Duration? = nil) {
+        self.init(configuration: Configuration(workers: workers, name: name, pinThreads: pinThreads, io: io,
+                                               blockingThreads: blockingThreads, blockingQueue: blockingQueue,
+                                               blockingKeepAlive: blockingKeepAlive, idleSpin: idleSpin))
     }
 
     /// A runtime with no threads of its own (Tokio's `current_thread`): its
@@ -381,14 +424,8 @@ extension Runtime {
         set { scheduler.slowPollLock.withLock { scheduler.slowPollHandler = newValue } }
     }
 
-    /// Enqueues since start: timed ones (sleeps and timeouts, and on Linux
-    /// `Task.sleep` too), and ones from threads outside the runtime.
-    public var enqueueCounts: (timed: UInt64, foreign: UInt64) {
-        (scheduler.timedEnqueues.load(ordering: .relaxed), scheduler.foreignEnqueues.load(ordering: .relaxed))
-    }
-
     /// I/O driver counters since start (zeros where there is no driver).
-    public var ioMetrics: IOMetrics {
+    var ioMetrics: IOMetrics {
         #if os(Linux)
         if scheduler.usesRings {
             var m = IOMetrics()

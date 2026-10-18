@@ -118,15 +118,19 @@ private func settle(to n: Int) async throws(IOError) -> Int {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
         let error = try rt.block { () async throws(IOError) -> IOError? in
-            // A port nothing listens on: bind one, note it, close it.
-            let port = try TCPListener.bind(host: "127.0.0.1", port: 0).localPort
-            do throws(IOError) {
-                _ = try await TCPStream.connect(
-                    to: [try SocketAddress(host: "127.0.0.1", port: port), try SocketAddress(host: "::1", port: port)])
-                return nil
-            } catch {
-                return error
+            // A port nothing listens on: bind one, note it, close it. A test
+            // running alongside may take the port in between, and then the
+            // connect succeeds; try another.
+            for _ in 0..<5 {
+                let port = try TCPListener.bind(host: "127.0.0.1", port: 0).localPort
+                do throws(IOError) {
+                    _ = try await TCPStream.connect(
+                        to: [try SocketAddress(host: "127.0.0.1", port: port), try SocketAddress(host: "::1", port: port)])
+                } catch {
+                    return error
+                }
             }
+            return nil
         }
         #expect(error == .connectionRefused)
     }

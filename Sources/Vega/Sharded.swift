@@ -24,7 +24,7 @@ public struct Shard: Sendable {
     public let runtime: Runtime
     let listeners: [PreparedListener]
 
-    /// A listener for `ShardOptions.listeners[index]`, on this shard's
+    /// A listener for `ShardConfiguration.listeners[index]`, on this shard's
     /// runtime: the supervisor's shared socket, or one bound here with
     /// `reusePort` (see `ShardListenerMode`). Each call gives a new one, for
     /// several accept loops. Call from a task on the shard's runtime.
@@ -35,7 +35,7 @@ public struct Shard: Sendable {
     /// ones do, have no TCP options to set, and name no peer address but the
     /// socket's. `unixListener(_:)` gives it as itself.
     public func listener(_ index: Int = 0) throws(IOError) -> TCPListener {
-        precondition(listeners.indices.contains(index), "no ShardOptions.listeners[\(index)]")
+        precondition(listeners.indices.contains(index), "no ShardConfiguration.listeners[\(index)]")
         let l = listeners[index]
         let driver = try IODriver.current()
         guard l.shared >= 0 else {
@@ -46,35 +46,35 @@ public struct Shard: Sendable {
         return TCPListener(reg: try IORegistration(fd: fd, driver: driver))
     }
 
-    /// A listener for the Unix socket `ShardOptions.listeners[index]`, on
+    /// A listener for the Unix socket `ShardConfiguration.listeners[index]`, on
     /// this shard's runtime: the supervisor's socket, which every shard
     /// shares. Each call gives a new one, for several accept loops. Call
     /// from a task on the shard's runtime.
     public func unixListener(_ index: Int) throws(IOError) -> UnixListener {
-        precondition(listeners.indices.contains(index), "no ShardOptions.listeners[\(index)]")
+        precondition(listeners.indices.contains(index), "no ShardConfiguration.listeners[\(index)]")
         let l = listeners[index]
-        precondition(l.path != nil && l.shared >= 0, "ShardOptions.listeners[\(index)] is not a Unix listener")
+        precondition(l.path != nil && l.shared >= 0, "ShardConfiguration.listeners[\(index)] is not a Unix listener")
         let driver = try IODriver.current()
         let fd = fcntl(l.shared, F_DUPFD_CLOEXEC, 0)
         guard fd >= 0 else { throw IOError(code: errno) }
         return UnixListener(reg: try IORegistration(fd: fd, driver: driver))
     }
 
-    /// `ShardOptions.sharedRegions[index]`, mapped into this shard: the same
+    /// `ShardConfiguration.sharedRegions[index]`, mapped into this shard: the same
     /// memory in every shard. At a page-aligned address that differs from
     /// shard to shard under exec launch, so it holds offsets, never pointers.
     public func sharedRegion(_ index: Int) -> UnsafeMutableRawBufferPointer {
         let regions = SharedRegions.mapped
-        precondition(regions.indices.contains(index), "no ShardOptions.sharedRegions[\(index)]")
+        precondition(regions.indices.contains(index), "no ShardConfiguration.sharedRegions[\(index)]")
         let r = regions[index]
         return UnsafeMutableRawBufferPointer(start: UnsafeMutableRawPointer(bitPattern: r.base), count: r.size)
     }
 
-    /// The port of `ShardOptions.listeners[index]` (the one picked, for port 0).
+    /// The port of `ShardConfiguration.listeners[index]` (the one picked, for port 0).
     public func port(_ index: Int = 0) -> Int { listeners[index].port }
 }
 
-/// A TCP listener the shards share (`ShardOptions.listeners`).
+/// A TCP listener the shards share (`ShardConfiguration.listeners`).
 @available(iOS, unavailable)
 @available(tvOS, unavailable)
 @available(watchOS, unavailable)
@@ -162,7 +162,7 @@ public enum ShardLaunch: Sendable, Hashable {
     }
 }
 
-/// `ShardOptions.sharedRegions` as this process has them mapped. Set once,
+/// `ShardConfiguration.sharedRegions` as this process has them mapped. Set once,
 /// before any thread starts (by the supervisor, or by an exec'd shard as it
 /// starts), and only read after: forked shards inherit it with the mappings.
 @available(iOS, unavailable)
@@ -316,7 +316,7 @@ public struct ShardEvent: Sendable, Hashable, CustomStringConvertible {
     }
 }
 
-/// What `ShardOptions.watch` asks of the supervisor.
+/// What `ShardConfiguration.watch` asks of the supervisor.
 @available(iOS, unavailable)
 @available(tvOS, unavailable)
 @available(watchOS, unavailable)
@@ -355,7 +355,7 @@ public struct ShardWatchAction: Sendable, Hashable, CaseIterable {
 @available(tvOS, unavailable)
 @available(watchOS, unavailable)
 @available(visionOS, unavailable)
-public struct ShardOptions: Sendable {
+public struct ShardConfiguration: Sendable {
     /// Shard processes; nil: one per last-level cache domain (L3, read from
     /// sysfs on Linux), else one. 0: no shards, `body` runs once in this
     /// process (see `Runtime.sharded`). Left nil, the environment variable
@@ -429,15 +429,15 @@ extension Runtime {
     /// runtime on its own CPUs, under a supervisor (the hybrid fault model:
     /// a trap in one shard takes down 1/K of the connections, and the
     /// shard comes back). Declare the server's ports in
-    /// `ShardOptions.listeners`, and each shard takes them with
+    /// `ShardConfiguration.listeners`, and each shard takes them with
     /// `Shard.listener(_:)` (see `ShardListenerMode` for how they're shared).
     ///
     /// ```swift
     /// @main struct Server {
     ///     static func main() {
-    ///         var options = ShardOptions(shards: 4)
-    ///         options.listeners = [.tcp(port: 8080)]
-    ///         Runtime.sharded(options) { shard in
+    ///         var config = ShardConfiguration(shards: 4)
+    ///         config.listeners = [.tcp(port: 8080)]
+    ///         Runtime.sharded(config) { shard in
     ///             try! shard.runtime.block { () async throws(IOError) in
     ///                 let server = try TCPServer.serve(try shard.listener()) { await serve($0) }
     ///                 await server.wait()
@@ -451,7 +451,7 @@ extension Runtime {
     /// task exists: a forked shard copies only the calling thread (this is
     /// checked). With `ShardLaunch.exec` (the default on Darwin) each shard
     /// runs `main` again up to this call, which then runs `body` at once
-    /// with the options and closure as that run builds them: code before
+    /// with the configuration and closure as that run builds them: code before
     /// the call must be deterministic and free of side effects. Events and
     /// restarts are the same in both modes. The calling process becomes the
     /// supervisor and never runs `body`: it starts the shards, restarts the
@@ -477,7 +477,7 @@ extension Runtime {
     /// restarts it and no signal is handled for it; `Runtime.signals` in
     /// `body` works as in a shard. It may be called after threads exist.
     /// When `body` returns, the process exits 0.
-    public static func sharded(_ options: ShardOptions = ShardOptions(),
+    public static func sharded(_ options: ShardConfiguration = ShardConfiguration(),
                                _ body: @escaping (Shard) -> Void) -> Never {
         // A supervisor trying a rebuilt executable: it runs this far. No
         // exit handler runs: they are the real server's.
@@ -536,7 +536,7 @@ extension Runtime {
     /// `shards` 0: `body` as shard 0 of 1 on a runtime of this process,
     /// with every listener bound here once and shared by its `listener()`
     /// calls. Returns when `body` does, with the runtime shut down.
-    static func runInProcess(_ options: ShardOptions, _ body: (Shard) -> Void) {
+    static func runInProcess(_ options: ShardConfiguration, _ body: (Shard) -> Void) {
         let cpus = Topology.cacheDomains().flatMap { $0 }
         let workers = options.workersPerShard ?? Int(cv_cpu_count())
         var local = options
@@ -554,7 +554,7 @@ extension Runtime {
 
     /// Bind the shared listeners, or hold the ports of per-shard ones that
     /// ask for port 0. A failure ends the process: nothing has started yet.
-    private static func prepareListeners(_ options: ShardOptions) -> [PreparedListener] {
+    private static func prepareListeners(_ options: ShardConfiguration) -> [PreparedListener] {
         let shared = options.listenerMode.resolved == .shared
         return options.listeners.map { spec in
             var err: Int32 = 0
@@ -597,7 +597,7 @@ extension Runtime {
 @available(watchOS, unavailable)
 @available(visionOS, unavailable)
 private struct Supervisor {
-    let options: ShardOptions
+    let options: ShardConfiguration
     let layout: [[Int]]
     let listeners: [PreparedListener]
     let body: (Shard) -> Void
@@ -626,7 +626,7 @@ private struct Supervisor {
     /// was found at start, before a rebuild could replace it.
     let executable: String?
 
-    init(options: ShardOptions, layout: [[Int]], listeners: [PreparedListener], body: @escaping (Shard) -> Void) {
+    init(options: ShardConfiguration, layout: [[Int]], listeners: [PreparedListener], body: @escaping (Shard) -> Void) {
         self.options = options
         self.layout = layout
         self.listeners = listeners
@@ -709,7 +709,7 @@ private struct Supervisor {
         options.onEvent?(.started(shard: i, pid: pid))
     }
 
-    static func runShard(_ options: ShardOptions, _ i: Int, count: Int, cpus: [Int],
+    static func runShard(_ options: ShardConfiguration, _ i: Int, count: Int, cpus: [Int],
                          listeners: [PreparedListener], body: (Shard) -> Void) -> Never {
         let workers = options.workersPerShard ?? cpus.count
         // The shard's runtime is its process's global executor: a shard
@@ -1058,7 +1058,7 @@ enum SupervisorRestart {
     /// A record this image cannot take -- the shards or listeners differ
     /// in number -- is let go of: its shards are stopped and waited for and
     /// its sockets closed, and the supervisor starts as a new one.
-    static func fromEnvironment(_ options: ShardOptions, shards count: Int) -> Restarted? {
+    static func fromEnvironment(_ options: ShardConfiguration, shards count: Int) -> Restarted? {
         guard let raw = getenv(keys[2]) else { return nil }
         func value(_ key: String) -> String { getenv(key).map { String(cString: $0) } ?? "" }
         let pids = String(cString: raw).split(separator: ",").map { Int32($0) }
@@ -1169,7 +1169,7 @@ enum ExecShard {
 
     /// In a shard: its settings, with the variables removed so the shard's
     /// own children don't see them. Nil in the supervisor.
-    static func fromEnvironment(_ options: ShardOptions) -> Launched? {
+    static func fromEnvironment(_ options: ShardConfiguration) -> Launched? {
         guard let raw = getenv("VEGA_SHARD") else { return nil }
         func value(_ key: String) -> String { getenv(key).map { String(cString: $0) } ?? "" }
         let index = Int(String(cString: raw)), count = Int(value("VEGA_SHARD_COUNT"))
@@ -1189,7 +1189,7 @@ enum ExecShard {
         guard let index, let count, index >= 0, index < count, let parent,
               fds.count == options.listeners.count, fds.allSatisfy({ $0 != nil }),
               regions.count == options.sharedRegions.count, regions.allSatisfy({ $0 != nil }) else {
-            fail("a shard's VEGA_SHARD settings don't match its ShardOptions")
+            fail("a shard's VEGA_SHARD settings don't match its ShardConfiguration")
         }
         // Gone already, or going: nobody would supervise this shard.
         if cv_shard_adopt(parent) != 0 { exit(1) }

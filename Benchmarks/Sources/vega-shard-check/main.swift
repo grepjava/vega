@@ -31,7 +31,7 @@ func fail(_ s: String) -> Never {
 // MARK: - Server
 
 func serve(port: Int) -> Never {
-    var options = ShardOptions(shards: shardCount, workersPerShard: 1)
+    var options = ShardConfiguration(shards: shardCount, workersPerShard: 1)
     options.pinThreads = false
     options.shutdownGracePeriod = .seconds(5)
     options.onEvent = { log("supervisor: \($0)") }

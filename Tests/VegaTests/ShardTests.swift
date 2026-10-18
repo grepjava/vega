@@ -99,7 +99,7 @@ import Testing
     }
 
     @Test func aRecordThatDoesNotFitIsLetGo() {
-        var options = ShardOptions(shards: 2)
+        var options = ShardConfiguration(shards: 2)
         options.listeners = [.tcp(port: 0)]
         setenv("VEGA_SUPERVISOR_FDS", "-1:8080", 1)
         setenv("VEGA_SUPERVISOR_REGIONS", "", 1)
@@ -122,7 +122,7 @@ import Testing
 /// regions into the process-wide table a shard reads them from.
 @Suite(.serialized) struct InProcessShardTests {
     @Test func runsTheBodyOnceInThisProcess() throws {
-        var options = ShardOptions(shards: 0, workersPerShard: 2)
+        var options = ShardConfiguration(shards: 0, workersPerShard: 2)
         options.listeners = [.tcp(host: "127.0.0.1", port: 0)]
         var runs = 0
         var replies: [String] = []
@@ -165,7 +165,7 @@ import Testing
         let stale = cv_unix_listen(path, 1, &err)
         if stale >= 0 { close(stale) }
         defer { unlink(path) }
-        var options = ShardOptions(shards: 0, workersPerShard: 2)
+        var options = ShardConfiguration(shards: 0, workersPerShard: 2)
         options.listeners = [.tcp(host: "127.0.0.1", port: 0), .unix(path: path)]
         var replies: [String] = []
         Runtime.runInProcess(options) { shard in
@@ -196,7 +196,7 @@ import Testing
     @Test func aUnixListenerServesAsATCPListener() throws {
         let path = "/tmp/vega-shard-tcp-\(getpid()).sock"
         defer { unlink(path) }
-        var options = ShardOptions(shards: 0, workersPerShard: 2)
+        var options = ShardConfiguration(shards: 0, workersPerShard: 2)
         options.listeners = [.unix(path: path)]
         var reply = ""
         Runtime.runInProcess(options) { shard in
@@ -218,7 +218,7 @@ import Testing
     }
 
     @Test func shardsHaveTheBlockingPoolTheyAreGiven() {
-        var options = ShardOptions(shards: 0, workersPerShard: 1)
+        var options = ShardConfiguration(shards: 0, workersPerShard: 1)
         options.blockingThreads = 3
         var threads = 0
         Runtime.runInProcess(options) { shard in threads = shard.runtime.scheduler.blocking.maxThreads }
@@ -226,7 +226,7 @@ import Testing
     }
 
     @Test func sharedRegionsAreZeroedAndSharedWithChildren() {
-        var options = ShardOptions(shards: 0, workersPerShard: 1)
+        var options = ShardConfiguration(shards: 0, workersPerShard: 1)
         options.sharedRegions = [4096, 3 * 65536]
         var sizes: [Int] = []
         var zeroed = false

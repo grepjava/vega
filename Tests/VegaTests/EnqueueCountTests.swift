@@ -7,13 +7,13 @@ import Testing
     @Test func countsTimedAndForeignEnqueues() {
         let rt = Runtime(workers: 1)
         defer { rt.shutdown() }
-        let before = rt.enqueueCounts
+        let before = rt.metrics
         rt.block {
             try? await Runtime.sleep(for: .milliseconds(1))
             try? await Runtime.sleep(for: .milliseconds(1))
         }
-        let after = rt.enqueueCounts
-        #expect(after.timed - before.timed == 2)
-        #expect(after.foreign > before.foreign)
+        let after = rt.metrics
+        #expect(after.timedEnqueues - before.timedEnqueues == 2)
+        #expect(after.foreignEnqueues > before.foreignEnqueues)
     }
 }

@@ -43,7 +43,7 @@ func uringRunsWhenAskedFor() {
             return try await reply
         }
         #expect(reply == "through the ring")
-        let m = rt.ioMetrics
+        let m = rt.metrics.io
         #expect(m.events > 0)
         #expect(m.wakes > 0)
     }
