@@ -5,7 +5,7 @@ import VegaIO
 import VegaHTTP1
 @testable import VegaHTTP2
 import VegaTest
-@_spi(Garuda) import VegaWire
+import VegaWire
 @_spi(Garuda) import VegaHTTP2Core
 
 /// Bytes from hex, spaces and newlines ignored: RFC examples as printed.

@@ -23,7 +23,7 @@
 // rather than as something subtler later.
 //===----------------------------------------------------------------------===//
 
-@_spi(Garuda) import VegaWire
+import VegaWire
 import VegaCrypto
 
 package enum TLSAlert {
@@ -69,7 +69,7 @@ enum NamedGroup {
 
 // MARK: - Length-prefixed writing
 
-extension ByteBuffer {
+@_spi(Garuda) extension ByteBuffer {
     /// Reserves a length field and returns where it went, so the value can be
     /// filled in once its contents exist.
     @inline(__always)

@@ -19,7 +19,7 @@
 //    packet would make this server an amplifier pointed at someone else.
 //===----------------------------------------------------------------------===//
 
-@_spi(Garuda) import VegaWire
+import VegaWire
 
 /// Writes frames into a fixed region, refusing anything that will not fit.
 struct QUICFrameWriter {

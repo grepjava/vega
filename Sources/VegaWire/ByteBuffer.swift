@@ -24,7 +24,10 @@ import Darwin
 import ucrt
 #endif
 
-@_spi(Garuda) public struct ByteBuffer {
+/// Bytes being built for the wire, or parsed off it: a header block, a frame,
+/// a response head. `IOBuffer` is what a socket reads into and writes from;
+/// a `ByteBuffer` is the protocol layer's own, managed by hand (see above).
+public struct ByteBuffer {
     @usableFromInline package var storage: UnsafeMutablePointer<UInt8>?
     @usableFromInline var capacity: Int
     /// Index of the first unread byte.

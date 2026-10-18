@@ -22,7 +22,7 @@
 // and decides for itself. No session resumption, no 0-RTT.
 //===----------------------------------------------------------------------===//
 
-@_spi(Garuda) import VegaWire
+import VegaWire
 import VegaCrypto
 
 /// A traffic secret pair, as either side's handshake produces it.

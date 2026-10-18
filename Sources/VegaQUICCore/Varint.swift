@@ -15,7 +15,7 @@
 // routine, not exceptional.
 //===----------------------------------------------------------------------===//
 
-@_spi(Garuda) import VegaWire
+import VegaWire
 
 @inlinable
 @_spi(Garuda) public func quicVarintLength(_ value: UInt64) -> Int {
@@ -201,7 +201,7 @@ package let quicVarintMax: UInt64 = 0x3FFF_FFFF_FFFF_FFFF
     public var rest: ByteSpan { ByteSpan(base + offset, count &- offset) }
 }
 
-extension ByteBuffer {
+@_spi(Garuda) extension ByteBuffer {
     @inlinable
     public mutating func writeVarint(_ value: UInt64) {
         reserve(8)

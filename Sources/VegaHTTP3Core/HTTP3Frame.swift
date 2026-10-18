@@ -13,7 +13,7 @@
 // an HTTP/3 connection is caught rather than half-understood.
 //===----------------------------------------------------------------------===//
 
-@_spi(Garuda) import VegaWire
+import VegaWire
 
 @_spi(Garuda) public enum HTTP3FrameType {
     public static let data: UInt64 = 0x00

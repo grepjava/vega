@@ -3,7 +3,7 @@ import Vega
 import VegaIO
 import VegaHTTP1
 @_spi(Garuda) @testable import VegaWebSocket
-@_spi(Garuda) import VegaWire
+import VegaWire
 import VegaTest
 @_spi(Garuda) import VegaWebSocketCore
 

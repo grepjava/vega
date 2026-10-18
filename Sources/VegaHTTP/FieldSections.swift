@@ -1,4 +1,4 @@
-@_spi(Garuda) import VegaWire
+import VegaWire
 
 // Field sections as HTTP/2 and HTTP/3 carry them: lowercase names,
 // pseudo-fields first, no connection-specific fields.

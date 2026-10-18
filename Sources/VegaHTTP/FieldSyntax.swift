@@ -1,4 +1,4 @@
-@_spi(Garuda) import VegaWire
+import VegaWire
 
 // Field syntax (RFC 9110 section 5) that every HTTP version's fields share.
 

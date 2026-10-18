@@ -9,7 +9,7 @@
 
 import Vega
 import VegaIO
-@_spi(Garuda) import VegaWire
+import VegaWire
 @_spi(Garuda) @_exported import VegaWebSocketCore
 
 /// One frame, payload unmasked.

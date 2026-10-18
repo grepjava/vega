@@ -1,4 +1,4 @@
-@_spi(Garuda) import VegaWire
+import VegaWire
 //===----------------------------------------------------------------------===//
 // RFC 6455 framing.
 //

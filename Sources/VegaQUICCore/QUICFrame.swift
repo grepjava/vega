@@ -15,7 +15,7 @@
 // what is worth keeping.
 //===----------------------------------------------------------------------===//
 
-@_spi(Garuda) import VegaWire
+import VegaWire
 
 package enum QUICFrameType {
     public static let padding: UInt64 = 0x00
@@ -212,7 +212,7 @@ package func quicCryptoError(_ alert: UInt8) -> UInt64 { 0x0100 | UInt64(alert) 
     public mutating func clear() { ranges.removeAll(keepingCapacity: true) }
 }
 
-extension ByteBuffer {
+@_spi(Garuda) extension ByteBuffer {
     /// Writes an ACK frame. `delay` is already in the peer's exponent.
     public mutating func writeAckFrame(_ acks: QUICAckRanges, delay: UInt64,
                                        ecn: (ect0: UInt64, ect1: UInt64, ce: UInt64)? = nil) {

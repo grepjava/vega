@@ -11,7 +11,7 @@
 //   * bare CR, NUL and other control bytes in a field value are refused
 
 import VegaHTTP
-@_spi(Garuda) import VegaWire
+import VegaWire
 
 /// What the parser refused. VegaHTTP1's `HTTP1Error` has the same cases.
 package enum HTTP1ParseError: Error {

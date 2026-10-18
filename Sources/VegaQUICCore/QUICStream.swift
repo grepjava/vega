@@ -19,7 +19,7 @@
 // hundred bytes rather than the whole stream.
 //===----------------------------------------------------------------------===//
 
-@_spi(Garuda) import VegaWire
+import VegaWire
 
 /// An ascending set of byte ranges, used for what has been acknowledged and
 /// for what has to be sent again. Half-open: [low, high).

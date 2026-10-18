@@ -15,7 +15,7 @@
 // misinterpreted rather than as an error, so they are spelled out here.
 //===----------------------------------------------------------------------===//
 
-@_spi(Garuda) import VegaWire
+import VegaWire
 
 @_spi(Garuda) public struct QUICTransportParameters {
     public static let originalDestinationConnectionID: UInt64 = 0x00

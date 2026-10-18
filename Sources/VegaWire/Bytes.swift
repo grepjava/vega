@@ -38,7 +38,7 @@ import ucrt
 
 /// A borrowed view of bytes we do not own. Trivial, so it never touches ARC and
 /// is passed in registers.
-@_spi(Garuda) public struct ByteSpan {
+public struct ByteSpan {
     public var base: UnsafePointer<UInt8>
     public var count: Int
 

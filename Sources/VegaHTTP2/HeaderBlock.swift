@@ -1,4 +1,4 @@
-@_spi(Garuda) import VegaWire
+import VegaWire
 import VegaHTTP
 @_spi(Garuda) import VegaHTTP2Core
 

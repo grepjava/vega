@@ -27,7 +27,7 @@
 // a class here would put an atomic retain on every datagram.
 //===----------------------------------------------------------------------===//
 
-@_spi(Garuda) import VegaWire
+import VegaWire
 import VegaCrypto
 
 /// The three TLS 1.3 cipher suites QUIC permits.

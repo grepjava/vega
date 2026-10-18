@@ -38,7 +38,7 @@ import Darwin
 import ucrt
 #endif
 @_spi(Garuda) @_exported import VegaQUICCore
-@_spi(Garuda) import VegaWire
+import VegaWire
 
 /// A UDP socket speaking QUIC: a server (`bind` with a configuration, then
 /// `accept`) or a client (`bind` without one, then `connect`).

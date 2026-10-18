@@ -1,4 +1,4 @@
-@_spi(Garuda) import VegaWire
+import VegaWire
 //===----------------------------------------------------------------------===//
 // HTTP/2 framing (RFC 9113).
 //

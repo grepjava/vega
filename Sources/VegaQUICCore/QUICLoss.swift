@@ -20,7 +20,7 @@
 // squeezes out the last few percent.
 //===----------------------------------------------------------------------===//
 
-@_spi(Garuda) import VegaWire
+import VegaWire
 
 /// What a packet carried, so it can be sent again if it is lost.
 package struct QUICSentFrames {

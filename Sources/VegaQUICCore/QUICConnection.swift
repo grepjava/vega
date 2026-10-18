@@ -20,7 +20,7 @@
 // sending half -- deciding what goes in the next datagram -- is in QUICSend.
 //===----------------------------------------------------------------------===//
 
-@_spi(Garuda) import VegaWire
+import VegaWire
 import VegaCrypto
 
 public struct QUICServerConfiguration {

@@ -1,7 +1,7 @@
 import Vega
 import VegaIO
 import VegaHTTP
-@_spi(Garuda) import VegaWire
+import VegaWire
 @_spi(Garuda) import VegaHTTP2Core
 
 /// Limits and windows for one HTTP/2 connection.

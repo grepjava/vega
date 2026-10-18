@@ -11,7 +11,7 @@
 // first slot for a name and the caller decides whether the value matches.
 //===----------------------------------------------------------------------===//
 
-@_spi(Garuda) import VegaWire
+import VegaWire
 @_spi(Garuda) import VegaHTTP2Core
 
 package enum QPACKTables {

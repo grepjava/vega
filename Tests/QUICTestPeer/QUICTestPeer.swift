@@ -17,7 +17,7 @@
 //===----------------------------------------------------------------------===//
 
 @_spi(Garuda) import VegaQUICCore
-@_spi(Garuda) import VegaWire
+import VegaWire
 import VegaCrypto
 import VegaTLS
 

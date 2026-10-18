@@ -1,4 +1,4 @@
-@_spi(Garuda) import VegaWire
+import VegaWire
 //===----------------------------------------------------------------------===//
 // HPACK tables (RFC 7541 appendices A and B).
 //

@@ -1,7 +1,7 @@
 import CVegaCompress
 import Vega
 import VegaIO
-@_spi(Garuda) import VegaWire
+import VegaWire
 import VegaHTTP1
 @_spi(Garuda) import VegaWebSocketCore
 

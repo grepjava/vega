@@ -17,7 +17,7 @@
 // remove, cannot come back in through the compressor.
 //===----------------------------------------------------------------------===//
 
-@_spi(Garuda) import VegaWire
+import VegaWire
 
 #if canImport(Glibc)
 import Glibc

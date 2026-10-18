@@ -15,7 +15,7 @@
 // connection ID in the packet rather than by the four-tuple it arrived on.
 //===----------------------------------------------------------------------===//
 
-@_spi(Garuda) import VegaWire
+import VegaWire
 import VegaCrypto
 
 @_spi(Garuda) public enum QUICVersion {
