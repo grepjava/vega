@@ -69,7 +69,7 @@ mature, widely deployed and far more proven than Vega.
 | Windows | IOCP: overlapped `AcceptEx`, `ConnectEx`, `WSARecv`, `WSASend`, `WSARecvFrom`, `WSASendTo`, `TransmitFile`, file reads and writes (default); AFD readiness | in progress upstream | IOCP (AFD readiness) |
 | Blocking work | `Runtime.blocking` | `NIOThreadPool` | `spawn_blocking` |
 | Timers and tests | timer wheel; `MockClock` paused time, in-memory `duplex()` streams | `EmbeddedEventLoop`, `NIOAsyncTestingChannel` | timer wheel; `time::pause`, `tokio-test` |
-| TLS | VegaTLS on OpenSSL 3 or vendored BoringSSL; kernel TLS offload on Linux | swift-nio-ssl (BoringSSL) | rustls or native-tls, separate crates |
+| TLS | VegaTLS on OpenSSL 3 or vendored BoringSSL; kernel TLS offload on Linux; Network.framework's TLS on Apple (`NetworkTLS`) | swift-nio-ssl (BoringSSL) | rustls or native-tls, separate crates |
 | HTTP | VegaHTTP1, VegaHTTP2, VegaWebSocket | NIOHTTP1, swift-nio-http2, NIOWebSocket | hyper, tungstenite, separate crates |
 | QUIC and HTTP/3 | VegaQUIC (sans-I/O, client and server), VegaQUICNet (on Vega's UDP sockets), VegaHTTP3 (frames, QPACK), VegaHTTP3Net (server and client) | not in SwiftNIO itself; on Apple platforms, Network.framework's QUIC | quinn, h3, separate crates |
 | Maturity | 0.5, since 2026 | since 2018, the base of Vapor, Hummingbird, gRPC Swift and more | since 2016, the base of most async Rust |

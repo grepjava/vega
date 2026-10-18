@@ -43,9 +43,9 @@ enum NetworkIO {
     /// is created, not after.
     @TaskLocal static var connectOptions: [SocketOption: Int] = [:]
 
-    /// TCP parameters. `tls` is the hook for VegaTLS (v0.4): Network.framework
-    /// runs TLS itself when given options for it. `options` are applied
-    /// here; ones Network.framework has no setting for throw `.unsupported`.
+    /// TCP parameters, with TLS that Network.framework runs when `tls` is
+    /// given (`NetworkTLS`). `options` are applied here; ones
+    /// Network.framework has no setting for throw `.unsupported`.
     static func parameters(_ options: [SocketOption: Int] = [:], tls: NWProtocolTLS.Options? = nil,
                            reuse: Bool = false) throws(IOError) -> NWParameters {
         let tcp = NWProtocolTCP.Options()
@@ -96,10 +96,10 @@ enum NetworkIO {
 
     /// Connect to `host` (a name or an address) and `port`. Network.framework
     /// resolves the name and races the addresses itself (Happy Eyeballs).
-    static func connect(host: String, port: Int,
+    static func connect(host: String, port: Int, tls: NWProtocolTLS.Options? = nil,
                         parameters given: NWParameters? = nil) async throws(IOError) -> IORegistration {
         let parameters: NWParameters
-        if let given { parameters = given } else { parameters = try self.parameters(connectOptions) }
+        if let given { parameters = given } else { parameters = try self.parameters(connectOptions, tls: tls) }
         guard let p = NWEndpoint.Port(rawValue: UInt16(clamping: port)), port > 0, port <= 65535 else {
             throw IOError(code: EINVAL)
         }
@@ -111,6 +111,8 @@ enum NetworkIO {
             case .ready: ready.offer(nil)
             // A refused or unreachable connect waits for a better path in
             // Network.framework; a socket connect fails, and so does this.
+            // (So does a TLS handshake that fails: Network.framework reports
+            // it as waiting, with the TLS error.)
             case .waiting(let e), .failed(let e): ready.offer(map(e))
             case .cancelled: ready.offer(.cancelled)
             default: break
@@ -124,6 +126,7 @@ enum NetworkIO {
             throw error
         }
         connection.stateUpdateHandler = nil
+        stream.settle(nil)
         return registration(for: stream)
     }
 
@@ -164,13 +167,13 @@ enum NetworkIO {
     /// until the listener is ready (a few milliseconds), as bind(2) and
     /// listen(2) return at once for fd-backed listeners.
     /// `connectionOptions` apply to every connection it accepts.
-    static func listen(host: String, port: Int, backlog: Int, reusePort: Bool,
+    static func listen(host: String, port: Int, backlog: Int, reusePort: Bool, tls: NWProtocolTLS.Options? = nil,
                        connectionOptions: [SocketOption: Int] = [:]) throws(IOError) -> IORegistration {
         guard port >= 0, port <= 65535 else { throw IOError(code: EINVAL) }
         // Always, as cv_tcp_listen sets SO_REUSEADDR: without it Network.framework
         // refuses a second listener on the port even on another address (::1
         // after 127.0.0.1). An exact duplicate is still EADDRINUSE.
-        let params = try parameters(connectionOptions, reuse: true)
+        let params = try parameters(connectionOptions, tls: tls, reuse: true)
         let p = port == 0 ? NWEndpoint.Port.any : NWEndpoint.Port(rawValue: UInt16(port))!
         if !host.isEmpty { params.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(host), port: p) }
         let listener: NWListener
@@ -286,9 +289,66 @@ final class NetworkStream: NetworkHandle, @unchecked Sendable {
     private var failure: IOError?
     private var receiving = false
     private var reader: Rendezvous<Bool>?
+    /// How the connection's start (with TLS, its handshake) ended: nil
+    /// until it has, then nil inside for ready.
+    private var started: IOError??
+    private var startWaiters: [Rendezvous<Bool>] = []
 
     init(_ connection: NWConnection) {
         self.connection = connection
+    }
+
+    /// Follow an accepted connection's state, for `ready()`.
+    func watch() {
+        connection.stateUpdateHandler = { [self] state in
+            switch state {
+            case .ready: settle(nil)
+            case .waiting(let e), .failed(let e): settle(NetworkIO.map(e))
+            case .cancelled: settle(IOError(code: ECONNABORTED))
+            default: break
+            }
+        }
+    }
+
+    /// The connection is ready, or never will be.
+    func settle(_ error: IOError?) {
+        lock.lock()
+        guard started == nil else {
+            lock.unlock()
+            return
+        }
+        started = .some(error)
+        let all = startWaiters
+        startWaiters.removeAll()
+        lock.unlock()
+        for w in all { w.offer(true) }
+    }
+
+    /// Wait until the connection is ready: for TLS, until the handshake is
+    /// done. Throws how it failed.
+    func ready() async throws(IOError) {
+        while true {
+            lock.lock()
+            if let started {
+                lock.unlock()
+                if let error = started { throw error }
+                return
+            }
+            let r = Rendezvous<Bool>()
+            startWaiters.append(r)
+            lock.unlock()
+            guard await r.wait(cancelled: false) else {
+                lock.lock()
+                startWaiters.removeAll { $0 === r }
+                lock.unlock()
+                throw .interrupted
+            }
+        }
+    }
+
+    /// The TLS session's metadata, once ready; nil without TLS.
+    var tlsMetadata: sec_protocol_metadata_t? {
+        (connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata)?.securityProtocolMetadata
     }
 
     deinit { lock.destroy() }
@@ -504,6 +564,7 @@ final class NetworkAcceptor: NetworkHandle, @unchecked Sendable {
                 let connection = pending.removeFirst()
                 lock.unlock()
                 let stream = NetworkStream(connection)
+                stream.watch()
                 connection.start(queue: stream.queue)
                 await Runtime.consumeBudget()
                 return NetworkIO.registration(for: stream)
