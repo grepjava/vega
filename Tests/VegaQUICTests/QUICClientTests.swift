@@ -396,7 +396,7 @@ struct CertificateVerifierTests {
             try verifier.verify(chain: der, hostname: "localhost")
             Issue.record("an untrusted chain verified")
         } catch {
-            guard case .failed(let reason) = error else { Issue.record("\(error)"); return }
+            guard error.code == .failed, let reason = error.message else { Issue.record("\(error)"); return }
             #expect(reason.contains("certificate verify failed"))
         }
         // Nor do the system's roots vouch for a self-signed certificate.

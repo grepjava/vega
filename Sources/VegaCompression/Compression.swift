@@ -41,22 +41,56 @@ public enum ContentCoding: String, Sendable, CaseIterable {
 }
 
 /// Why compressing or decompressing failed.
-public enum CompressionError: Error, Hashable, Sendable, CustomStringConvertible {
-    /// No codec for this coding in this process.
-    case unavailable(String)
+///
+/// A struct rather than an enum, so that kinds of failure can be added
+/// without breaking anyone's exhaustive `switch`: switch over `code`, or
+/// compare the error itself where its kind carries nothing more
+/// (`catch CompressionError.invalidData`, `error == .invalidData`).
+public struct CompressionError: Error, Hashable, Sendable, CustomStringConvertible {
+    /// What kind of failure this is.
+    public let code: Code
+    public let message: String?
+
+    /// The kinds of `CompressionError`.
+    public struct Code: Hashable, Sendable, CustomStringConvertible {
+        let rawValue: UInt8
+
+        /// No codec for this coding in this process; `message` names it.
+        public static let unavailable = Code(rawValue: 0)
+        /// The bytes aren't what the coding produces, or stop before its end.
+        public static let invalidData = Code(rawValue: 1)
+        /// The decompressed bytes would pass the limit.
+        public static let tooLarge = Code(rawValue: 2)
+        /// The codec failed (out of memory).
+        public static let failed = Code(rawValue: 3)
+
+        public var description: String {
+            let names = ["unavailable", "invalidData", "tooLarge", "failed"]
+            return Int(rawValue) < names.count ? names[Int(rawValue)] : "code \(rawValue)"
+        }
+    }
+
+    init(_ code: Code, message: String? = nil) {
+        self.code = code
+        self.message = message
+    }
+
+    /// No codec for this coding in this process; `message` names it.
+    public static func unavailable(_ message: String) -> CompressionError { CompressionError(.unavailable, message: message) }
     /// The bytes aren't what the coding produces, or stop before its end.
-    case invalidData
+    public static let invalidData = CompressionError(.invalidData)
     /// The decompressed bytes would pass the limit.
-    case tooLarge
+    public static let tooLarge = CompressionError(.tooLarge)
     /// The codec failed (out of memory).
-    case failed
+    public static let failed = CompressionError(.failed)
 
     public var description: String {
-        switch self {
-        case .unavailable(let coding): "no codec for \(coding)"
+        switch code {
+        case .unavailable: "no codec for \(message ?? "")"
         case .invalidData: "invalid compressed data"
         case .tooLarge: "decompressed data over the limit"
         case .failed: "compression failed"
+        default: "\(code)"
         }
     }
 }

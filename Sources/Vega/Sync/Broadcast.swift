@@ -1,12 +1,53 @@
 /// Why a broadcast receive gave up.
-public enum BroadcastError: Error, Sendable, Hashable {
+///
+/// A struct rather than an enum, so that kinds of failure can be added
+/// without breaking anyone's exhaustive `switch`: switch over `code`, or
+/// compare the error itself where its kind carries nothing more
+/// (`catch BroadcastError.closed`, `error == .closed`).
+public struct BroadcastError: Error, Hashable, Sendable, CustomStringConvertible {
+    /// What kind of failure this is.
+    public let code: Code
+    public let missed: UInt64
+
+    /// The kinds of `BroadcastError`.
+    public struct Code: Hashable, Sendable, CustomStringConvertible {
+        let rawValue: UInt8
+
+        /// The channel is closed and this receiver has seen everything sent.
+        public static let closed = Code(rawValue: 0)
+        /// This receiver fell behind and `missed` values were overwritten
+        /// before it got to them. The next receive returns the oldest kept.
+        public static let lagged = Code(rawValue: 1)
+        /// The waiting task was cancelled. The receiver is still usable.
+        public static let cancelled = Code(rawValue: 2)
+
+        public var description: String {
+            let names = ["closed", "lagged", "cancelled"]
+            return Int(rawValue) < names.count ? names[Int(rawValue)] : "code \(rawValue)"
+        }
+    }
+
+    init(_ code: Code, missed: UInt64 = 0) {
+        self.code = code
+        self.missed = missed
+    }
+
     /// The channel is closed and this receiver has seen everything sent.
-    case closed
+    public static let closed = BroadcastError(.closed)
     /// This receiver fell behind and `missed` values were overwritten
     /// before it got to them. The next receive returns the oldest kept.
-    case lagged(missed: UInt64)
+    public static func lagged(missed: UInt64) -> BroadcastError { BroadcastError(.lagged, missed: missed) }
     /// The waiting task was cancelled. The receiver is still usable.
-    case cancelled
+    public static let cancelled = BroadcastError(.cancelled)
+
+    public var description: String {
+        switch code {
+        case .closed: "closed"
+        case .lagged: "lagged: \(missed) missed"
+        case .cancelled: "cancelled"
+        default: "\(code)"
+        }
+    }
 }
 
 /// Every value to every receiver: Tokio's `broadcast` channel. Senders never

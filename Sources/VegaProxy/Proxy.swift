@@ -2,25 +2,68 @@ import Vega
 import VegaIO
 import VegaHTTP1
 
-/// Why a proxy handshake failed.
-public enum ProxyError: Error, Hashable, Sendable, CustomStringConvertible {
-    case io(IOError)
+/// Why connecting through a proxy failed.
+///
+/// A struct rather than an enum, so that kinds of failure can be added
+/// without breaking anyone's exhaustive `switch`: switch over `code`, or
+/// compare the error itself where its kind carries nothing more
+/// (`catch ProxyError.authenticationFailed`, `error == .authenticationFailed`).
+public struct ProxyError: Error, Hashable, Sendable, CustomStringConvertible {
+    /// What kind of failure this is.
+    public let code: Code
+    public let ioError: IOError?
+    public let message: String?
+    public let socksReply: SOCKS5.Reply?
+    public let status: Int?
+
+    /// The kinds of `ProxyError`.
+    public struct Code: Hashable, Sendable, CustomStringConvertible {
+        let rawValue: UInt8
+
+        /// The connection to the proxy failed.
+        public static let io = Code(rawValue: 0)
+        /// The other end isn't speaking the protocol.
+        public static let malformed = Code(rawValue: 1)
+        /// The SOCKS server took no method offered, or refused the credentials.
+        public static let authenticationFailed = Code(rawValue: 2)
+        /// The SOCKS server couldn't make the connection: `socksReply` says why.
+        public static let socksRefused = Code(rawValue: 3)
+        /// The HTTP proxy answered CONNECT with `status`.
+        public static let httpRefused = Code(rawValue: 4)
+
+        public var description: String {
+            let names = ["io", "malformed", "authenticationFailed", "socksRefused", "httpRefused"]
+            return Int(rawValue) < names.count ? names[Int(rawValue)] : "code \(rawValue)"
+        }
+    }
+
+    init(_ code: Code, ioError: IOError? = nil, message: String? = nil, socksReply: SOCKS5.Reply? = nil, status: Int? = nil) {
+        self.code = code
+        self.ioError = ioError
+        self.message = message
+        self.socksReply = socksReply
+        self.status = status
+    }
+
+    /// The connection to the proxy failed.
+    public static func io(_ ioError: IOError) -> ProxyError { ProxyError(.io, ioError: ioError) }
     /// The other end isn't speaking the protocol.
-    case malformed(String)
+    public static func malformed(_ message: String) -> ProxyError { ProxyError(.malformed, message: message) }
     /// The SOCKS server took no method offered, or refused the credentials.
-    case authenticationFailed
-    /// The SOCKS server couldn't make the connection.
-    case socksRefused(SOCKS5.Reply)
-    /// The HTTP proxy answered CONNECT with this status.
-    case httpRefused(status: Int)
+    public static let authenticationFailed = ProxyError(.authenticationFailed)
+    /// The SOCKS server couldn't make the connection: `socksReply` says why.
+    public static func socksRefused(_ socksReply: SOCKS5.Reply) -> ProxyError { ProxyError(.socksRefused, socksReply: socksReply) }
+    /// The HTTP proxy answered CONNECT with `status`.
+    public static func httpRefused(status: Int) -> ProxyError { ProxyError(.httpRefused, status: status) }
 
     public var description: String {
-        switch self {
-        case .io(let e): "\(e)"
-        case .malformed(let why): "malformed proxy exchange: \(why)"
+        switch code {
+        case .io: "\(ioError!)"
+        case .malformed: "malformed proxy exchange: \(message ?? "")"
         case .authenticationFailed: "proxy authentication failed"
-        case .socksRefused(let reply): "SOCKS server refused: \(reply)"
-        case .httpRefused(let status): "HTTP proxy answered \(status)"
+        case .socksRefused: "SOCKS server refused: \(socksReply!)"
+        case .httpRefused: "HTTP proxy answered \(status!)"
+        default: "\(code)"
         }
     }
 }

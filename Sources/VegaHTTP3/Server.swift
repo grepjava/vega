@@ -166,7 +166,7 @@ public enum HTTP3Server {
             let frame: HTTP3RawFrame?
             do throws(FramedError) { frame = try await frames.next() } catch {
                 // One DATA frame longer than the body may be: 413, below.
-                if case .codec(.frameTooLong) = error, head != nil {
+                if error.codecError?.code == .frameTooLong, head != nil {
                     tooLarge = true
                     break
                 }

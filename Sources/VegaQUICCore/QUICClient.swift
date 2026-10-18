@@ -55,7 +55,7 @@ public enum QUICCertificateVerification: Sendable {
                 try verifier.verify(chain: chain, hostname: name)
                 return nil
             } catch {
-                if case .failed(let reason) = error { return reason }
+                if error.code == .failed, let reason = error.message { return reason }
                 return "\(error)"
             }
         }

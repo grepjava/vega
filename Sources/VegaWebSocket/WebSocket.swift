@@ -12,29 +12,74 @@ public enum WebSocketMessage: Sendable, Equatable {
 }
 
 /// Why a WebSocket operation failed.
-public enum WebSocketError: Error, Hashable, Sendable, CustomStringConvertible {
-    /// The peer broke the protocol; this end sent a close frame with this
-    /// code (1002 protocol error, 1007 bad UTF-8, 1009 too big).
-    case protocolViolation(WebSocketCloseCode)
-    /// The opening handshake failed.
-    case handshake(String)
+///
+/// A struct rather than an enum, so that kinds of failure can be added
+/// without breaking anyone's exhaustive `switch`: switch over `code`, or
+/// compare the error itself where its kind carries nothing more
+/// (`catch WebSocketError.connectionLost`, `error == .connectionLost`).
+public struct WebSocketError: Error, Hashable, Sendable, CustomStringConvertible {
+    /// What kind of failure this is.
+    public let code: Code
+    public let closeCode: WebSocketCloseCode?
+    public let message: String?
+    public let ioError: IOError?
+
+    /// The kinds of `WebSocketError`.
+    public struct Code: Hashable, Sendable, CustomStringConvertible {
+        let rawValue: UInt8
+
+        /// The peer broke the protocol; this end sent a close frame with
+        /// `closeCode` (1002 protocol error, 1007 bad UTF-8, 1009 too big).
+        public static let protocolViolation = Code(rawValue: 0)
+        /// The opening handshake failed: `message` says why.
+        public static let handshake = Code(rawValue: 1)
+        /// The connection ended without a close frame.
+        public static let connectionLost = Code(rawValue: 2)
+        /// This end has already sent its close frame.
+        public static let closed = Code(rawValue: 3)
+        /// `close` was given `closeCode`, which may not be sent (1005, 1006,
+        /// 1015 and the unassigned ones).
+        public static let invalidCloseCode = Code(rawValue: 4)
+        /// The connection failed.
+        public static let io = Code(rawValue: 5)
+
+        public var description: String {
+            let names = ["protocolViolation", "handshake", "connectionLost", "closed", "invalidCloseCode", "io"]
+            return Int(rawValue) < names.count ? names[Int(rawValue)] : "code \(rawValue)"
+        }
+    }
+
+    init(_ code: Code, closeCode: WebSocketCloseCode? = nil, message: String? = nil, ioError: IOError? = nil) {
+        self.code = code
+        self.closeCode = closeCode
+        self.message = message
+        self.ioError = ioError
+    }
+
+    /// The peer broke the protocol; this end sent a close frame with
+    /// `closeCode` (1002 protocol error, 1007 bad UTF-8, 1009 too big).
+    public static func protocolViolation(_ closeCode: WebSocketCloseCode) -> WebSocketError { WebSocketError(.protocolViolation, closeCode: closeCode) }
+    /// The opening handshake failed: `message` says why.
+    public static func handshake(_ message: String) -> WebSocketError { WebSocketError(.handshake, message: message) }
     /// The connection ended without a close frame.
-    case connectionLost
+    public static let connectionLost = WebSocketError(.connectionLost)
     /// This end has already sent its close frame.
-    case closed
-    /// `close` was given a code that may not be sent (1005, 1006, 1015 and
-    /// the unassigned ones).
-    case invalidCloseCode(WebSocketCloseCode)
-    case io(IOError)
+    public static let closed = WebSocketError(.closed)
+    /// `close` was given `closeCode`, which may not be sent (1005, 1006,
+    /// 1015 and the unassigned ones).
+    public static func invalidCloseCode(_ closeCode: WebSocketCloseCode) -> WebSocketError { WebSocketError(.invalidCloseCode, closeCode: closeCode) }
+    /// The connection failed.
+    public static func io(_ ioError: IOError) -> WebSocketError { WebSocketError(.io, ioError: ioError) }
 
     public var description: String {
-        switch self {
-        case .protocolViolation(let code): "protocol violation (closed with \(code))"
-        case .handshake(let why): "handshake failed: \(why)"
+        switch code {
+        case .protocolViolation: "protocol violation (closed with \(closeCode!))"
+        case .handshake: "handshake failed: \(message ?? "")"
         case .connectionLost: "connection lost without a close frame"
         case .closed: "already closed"
-        case .invalidCloseCode(let code): "close code \(code) can't be sent"
-        case .io(let e): "\(e)"
+        case .invalidCloseCode: "close code \(closeCode!) can't be sent"
+        case .io: "\(ioError!)"
+        default: "\(code)"
         }
     }
 }
@@ -447,7 +492,7 @@ public struct WebSocket<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~Copyabl
                     try codec.decodeFrame(UnsafeRawBufferPointer(rebasing: all[s...]))
                 }
             } catch {
-                if case .protocolViolation(let code) = error { try await fail(code) }
+                if error.code == .protocolViolation, let code = error.closeCode { try await fail(code) }
                 throw error
             }
             if let (frame, used) = decoded {

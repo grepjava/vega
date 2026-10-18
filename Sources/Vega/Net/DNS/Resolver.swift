@@ -14,35 +14,71 @@ import ucrt
 // wait like any other, bounded by its timeout and cancellable, and never
 // holds a thread the way getaddrinfo does. Ported from Garuda's resolver.
 
-/// Why a lookup failed.
-public enum ResolveError: Error, Sendable, Hashable, CustomStringConvertible {
+/// Why a name lookup failed.
+///
+/// A struct rather than an enum, so that kinds of failure can be added
+/// without breaking anyone's exhaustive `switch`: switch over `code`, or
+/// compare the error itself where its kind carries nothing more
+/// (`catch ResolveError.unanswered`, `error == .unanswered`).
+public struct ResolveError: Error, Hashable, Sendable, CustomStringConvertible {
+    /// What kind of failure this is.
+    public let code: Code
+
+    /// The kinds of `ResolveError`.
+    public struct Code: Hashable, Sendable, CustomStringConvertible {
+        let rawValue: UInt8
+
+        /// No nameserver answered, across every server and attempt.
+        public static let unanswered = Code(rawValue: 0)
+        /// The name doesn't exist (NXDOMAIN).
+        public static let noSuchName = Code(rawValue: 1)
+        /// The name exists but has no address of the kind asked for.
+        public static let noAddress = Code(rawValue: 2)
+        /// The answer was truncated over UDP and again over TCP.
+        public static let truncated = Code(rawValue: 3)
+        /// The task was cancelled.
+        public static let cancelled = Code(rawValue: 4)
+        /// The name can't be asked about (an empty label, over 255 bytes, ...).
+        public static let badName = Code(rawValue: 5)
+
+        public var description: String {
+            let names = ["unanswered", "noSuchName", "noAddress", "truncated", "cancelled", "badName"]
+            return Int(rawValue) < names.count ? names[Int(rawValue)] : "code \(rawValue)"
+        }
+    }
+
+    init(_ code: Code) {
+        self.code = code
+    }
+
     /// No nameserver answered, across every server and attempt.
-    case unanswered
+    public static let unanswered = ResolveError(.unanswered)
     /// The name doesn't exist (NXDOMAIN).
-    case noSuchName
+    public static let noSuchName = ResolveError(.noSuchName)
     /// The name exists but has no address of the kind asked for.
-    case noAddress
+    public static let noAddress = ResolveError(.noAddress)
     /// The answer was truncated over UDP and again over TCP.
-    case truncated
+    public static let truncated = ResolveError(.truncated)
     /// The task was cancelled.
-    case cancelled
+    public static let cancelled = ResolveError(.cancelled)
     /// The name can't be asked about (an empty label, over 255 bytes, ...).
-    case badName
+    public static let badName = ResolveError(.badName)
 
     public var description: String {
-        switch self {
+        switch code {
         case .unanswered: "no nameserver answered"
         case .noSuchName: "no such name"
         case .noAddress: "no address for the name"
         case .truncated: "answer truncated over UDP and TCP"
         case .cancelled: "cancelled"
         case .badName: "not a valid name"
+        default: "\(code)"
         }
     }
 
     /// As an `IOError`, for APIs that throw those.
     var ioError: IOError {
-        switch self {
+        switch code {
         case .cancelled: .cancelled
         case .unanswered: IOError(code: ETIMEDOUT)
         default: IOError(code: EADDRNOTAVAIL)

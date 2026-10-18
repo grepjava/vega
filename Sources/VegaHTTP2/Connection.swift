@@ -133,7 +133,7 @@ public enum HTTP2Server {
                     case .readEnded:
                         readerDone = true
                     case .readFailed(let error):
-                        if case .connection(let code) = error { goaway(core.highestPeerStream, code, into: &out) }
+                        if error.code == .connection, let code = error.errorCode { goaway(core.highestPeerStream, code, into: &out) }
                         failure = error
                         readerDone = true
                         inFlight = 0
@@ -328,7 +328,7 @@ public final class HTTP2Client: Sendable {
                 failAll(failure!)
             case .readFailed(let error):
                 if failure == nil {
-                    if case .connection(let code) = error { goaway(0, code, into: &out) }
+                    if error.code == .connection, let code = error.errorCode { goaway(0, code, into: &out) }
                     failure = error
                 }
                 failAll(failure!)

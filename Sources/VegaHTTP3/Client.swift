@@ -8,23 +8,60 @@ import VegaIO
 @_exported import VegaQUIC
 
 /// Why an HTTP/3 request failed.
-public enum HTTP3ClientError: Error, Hashable, Sendable, CustomStringConvertible {
-    /// The QUIC connection failed or closed.
-    case connection(QUICConnectionError)
+///
+/// A struct rather than an enum, so that kinds of failure can be added
+/// without breaking anyone's exhaustive `switch`: switch over `code`, or
+/// compare the error itself where its kind carries nothing more
+/// (`catch HTTP3ClientError.malformedResponse`, `error == .malformedResponse`).
+public struct HTTP3ClientError: Error, Hashable, Sendable, CustomStringConvertible {
+    /// What kind of failure this is.
+    public let code: Code
+    public let connectionError: QUICConnectionError?
+    public let ioError: IOError?
+
+    /// The kinds of `HTTP3ClientError`.
+    public struct Code: Hashable, Sendable, CustomStringConvertible {
+        let rawValue: UInt8
+
+        /// The QUIC connection failed or closed: `connectionError` says how.
+        public static let connection = Code(rawValue: 0)
+        /// The request stream was reset, by the server or for a broken
+        /// response.
+        public static let stream = Code(rawValue: 1)
+        /// The response broke HTTP/3's rules (RFC 9114 section 4.1.2).
+        public static let malformedResponse = Code(rawValue: 2)
+        /// The response body was longer than the configuration allows.
+        public static let bodyTooLarge = Code(rawValue: 3)
+
+        public var description: String {
+            let names = ["connection", "stream", "malformedResponse", "bodyTooLarge"]
+            return Int(rawValue) < names.count ? names[Int(rawValue)] : "code \(rawValue)"
+        }
+    }
+
+    init(_ code: Code, connectionError: QUICConnectionError? = nil, ioError: IOError? = nil) {
+        self.code = code
+        self.connectionError = connectionError
+        self.ioError = ioError
+    }
+
+    /// The QUIC connection failed or closed: `connectionError` says how.
+    public static func connection(_ connectionError: QUICConnectionError) -> HTTP3ClientError { HTTP3ClientError(.connection, connectionError: connectionError) }
     /// The request stream was reset, by the server or for a broken
     /// response.
-    case stream(IOError)
+    public static func stream(_ ioError: IOError) -> HTTP3ClientError { HTTP3ClientError(.stream, ioError: ioError) }
     /// The response broke HTTP/3's rules (RFC 9114 section 4.1.2).
-    case malformedResponse
+    public static let malformedResponse = HTTP3ClientError(.malformedResponse)
     /// The response body was longer than the configuration allows.
-    case bodyTooLarge
+    public static let bodyTooLarge = HTTP3ClientError(.bodyTooLarge)
 
     public var description: String {
-        switch self {
-        case .connection(let e): "\(e)"
-        case .stream(let e): "request stream failed: \(e)"
+        switch code {
+        case .connection: "\(connectionError!)"
+        case .stream: "request stream failed: \(ioError!)"
         case .malformedResponse: "malformed HTTP/3 response"
         case .bodyTooLarge: "HTTP/3 response body too large"
+        default: "\(code)"
         }
     }
 }
@@ -128,7 +165,7 @@ public final class HTTP3Client: Sendable {
         } catch {
             // A server may answer before the request is whole and ask us to
             // stop sending (RFC 9114 section 4.1.1): the answer still comes.
-            guard case .stopSending? = stream.error else { throw .stream(error) }
+            guard stream.error?.code == .stopSending else { throw .stream(error) }
         }
         return try await readResponse(stream, head: request.head.method == .head)
     }
@@ -142,13 +179,12 @@ public final class HTTP3Client: Sendable {
         while true {
             let frame: HTTP3RawFrame?
             do throws(FramedError) { frame = try await frames.next() } catch {
-                switch error {
-                case .io(let e): throw .stream(e)
-                case .codec(.frameTooLong):
+                if let e = error.ioError { throw .stream(e) }
+                if error.codecError?.code == .frameTooLong {
                     stream.stopSending(code: HTTP3Error.requestCancelled)
                     throw .bodyTooLarge
-                case .codec: throw .malformedResponse
                 }
+                throw .malformedResponse
             }
             guard let frame else { break }
             switch frame.type {

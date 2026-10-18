@@ -5,39 +5,80 @@ import Vega
 import VegaIO
 @_spi(Garuda) import VegaQUICCore
 
-/// Why a QUIC connection or stream stopped.
-public enum QUICConnectionError: Error, Hashable, Sendable, CustomStringConvertible {
-    /// The connection is closed: by either side (`application` says whose
-    /// code it is: the protocol above QUIC's, or QUIC's own), or because the
-    /// peer went quiet past the idle timeout.
-    case connectionClosed(code: UInt64, application: Bool)
-    /// The peer reset the stream: it won't send the rest.
-    case streamReset(code: UInt64)
-    /// The peer asked us to stop sending on the stream.
-    case stopSending(code: UInt64)
+/// Why a QUIC connection or stream operation failed.
+///
+/// A struct rather than an enum, so that kinds of failure can be added
+/// without breaking anyone's exhaustive `switch`: switch over `code`, or
+/// compare the error itself where its kind carries nothing more
+/// (`catch QUICConnectionError.endpointClosed`, `error == .endpointClosed`).
+public struct QUICConnectionError: Error, Hashable, Sendable, CustomStringConvertible {
+    /// What kind of failure this is.
+    public let code: Code
+    public let errorCode: UInt64?
+    public let isApplicationError: Bool
+    public let ioError: IOError?
+
+    /// The kinds of `QUICConnectionError`.
+    public struct Code: Hashable, Sendable, CustomStringConvertible {
+        let rawValue: UInt8
+
+        /// The connection is closed: by either side, with `errorCode`
+        /// (`isApplicationError` says whose code it is: the protocol above QUIC's,
+        /// or QUIC's own), or because the peer went quiet past the idle timeout.
+        public static let connectionClosed = Code(rawValue: 0)
+        /// The peer reset the stream, with `errorCode`: it won't send the rest.
+        public static let streamReset = Code(rawValue: 1)
+        /// The peer asked us to stop sending on the stream, with `errorCode`.
+        public static let stopSending = Code(rawValue: 2)
+        /// The endpoint has shut down.
+        public static let endpointClosed = Code(rawValue: 3)
+        /// The socket under the endpoint failed.
+        public static let io = Code(rawValue: 4)
+
+        public var description: String {
+            let names = ["connectionClosed", "streamReset", "stopSending", "endpointClosed", "io"]
+            return Int(rawValue) < names.count ? names[Int(rawValue)] : "code \(rawValue)"
+        }
+    }
+
+    init(_ code: Code, errorCode: UInt64? = nil, isApplicationError: Bool = false, ioError: IOError? = nil) {
+        self.code = code
+        self.errorCode = errorCode
+        self.isApplicationError = isApplicationError
+        self.ioError = ioError
+    }
+
+    /// The connection is closed: by either side, with `errorCode`
+    /// (`isApplicationError` says whose code it is: the protocol above QUIC's,
+    /// or QUIC's own), or because the peer went quiet past the idle timeout.
+    public static func connectionClosed(code errorCode: UInt64, application isApplicationError: Bool) -> QUICConnectionError { QUICConnectionError(.connectionClosed, errorCode: errorCode, isApplicationError: isApplicationError) }
+    /// The peer reset the stream, with `errorCode`: it won't send the rest.
+    public static func streamReset(code errorCode: UInt64) -> QUICConnectionError { QUICConnectionError(.streamReset, errorCode: errorCode) }
+    /// The peer asked us to stop sending on the stream, with `errorCode`.
+    public static func stopSending(code errorCode: UInt64) -> QUICConnectionError { QUICConnectionError(.stopSending, errorCode: errorCode) }
     /// The endpoint has shut down.
-    case endpointClosed
+    public static let endpointClosed = QUICConnectionError(.endpointClosed)
     /// The socket under the endpoint failed.
-    case io(IOError)
+    public static func io(_ ioError: IOError) -> QUICConnectionError { QUICConnectionError(.io, ioError: ioError) }
 
     public var description: String {
-        switch self {
-        case .connectionClosed(let code, let application):
-            "connection closed (\(application ? "application" : "transport") code \(code))"
-        case .streamReset(let code): "stream reset by the peer (code \(code))"
-        case .stopSending(let code): "the peer asked to stop sending (code \(code))"
+        switch code {
+        case .connectionClosed: "connection closed (\(isApplicationError ? "application" : "transport") code \(errorCode!))"
+        case .streamReset: "stream reset by the peer (code \(errorCode!))"
+        case .stopSending: "the peer asked to stop sending (code \(errorCode!))"
         case .endpointClosed: "the endpoint is closed"
-        case .io(let error): "\(error)"
+        case .io: "\(ioError!)"
+        default: "\(code)"
         }
     }
 
     /// As an `IOError`, for `AsyncReader` and `AsyncWriter`.
-    var ioError: IOError {
-        switch self {
+    var asIOError: IOError {
+        switch code {
         case .connectionClosed, .streamReset: .connectionReset
         case .stopSending: .brokenPipe
         case .endpointClosed: .cancelled
-        case .io(let error): error
+        default: ioError ?? .connectionReset
         }
     }
 }
@@ -267,7 +308,7 @@ public final class QUICStream: AsyncReader, AsyncWriter, Sendable {
             }
             switch outcome.end {
             case .fin: return 0
-            case .failed(let error): throw error.ioError
+            case .failed(let error): throw error.asIOError
             case nil: break
             }
             if buffer.spareCapacity == 0 { return 0 }
@@ -349,7 +390,7 @@ public final class QUICStream: AsyncReader, AsyncWriter, Sendable {
     }
 
     private func queued(_ outcome: (error: QUICConnectionError?, post: Bool, wait: Bool)) async throws(IOError) {
-        if let error = outcome.error { throw error.ioError }
+        if let error = outcome.error { throw error.asIOError }
         if outcome.post { connection.endpoint.post(.stream(self)) }
         if outcome.wait { try await waitToWrite() }
     }
@@ -373,7 +414,7 @@ public final class QUICStream: AsyncReader, AsyncWriter, Sendable {
             waiter?.resume()
         }
         if cancelled { throw .cancelled }
-        if let error = state.withLock({ $0.writeEnd }) { throw error.ioError }
+        if let error = state.withLock({ $0.writeEnd }) { throw error.asIOError }
     }
 
     /// End the stream (FIN) once what is queued has gone.

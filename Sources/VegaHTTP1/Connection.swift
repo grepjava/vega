@@ -66,8 +66,9 @@ public enum HTTP1Server {
                     part = try await reading.next(from: stream)
                 }
             } catch {
-                switch error {
-                case .io(let e):
+                switch error.code {
+                case .io:
+                    let e = error.ioError!
                     if shutdown?.isTriggered == true && e == .cancelled { return }
                     throw e
                 case .truncated: return // the client went away mid-request

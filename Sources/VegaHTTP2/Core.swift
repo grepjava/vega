@@ -32,29 +32,74 @@ public struct HTTP2Configuration: Sendable {
 }
 
 /// Why an HTTP/2 exchange failed.
-public enum HTTP2Error: Error, Hashable, Sendable, CustomStringConvertible {
+///
+/// A struct rather than an enum, so that kinds of failure can be added
+/// without breaking anyone's exhaustive `switch`: switch over `code`, or
+/// compare the error itself where its kind carries nothing more
+/// (`catch HTTP2Error.closed`, `error == .closed`).
+public struct HTTP2Error: Error, Hashable, Sendable, CustomStringConvertible {
+    /// What kind of failure this is.
+    public let code: Code
+    public let errorCode: HTTP2ErrorCode?
+    public let ioError: IOError?
+
+    /// The kinds of `HTTP2Error`.
+    public struct Code: Hashable, Sendable, CustomStringConvertible {
+        let rawValue: UInt8
+
+        /// The peer broke the protocol; this end closed the connection with
+        /// `errorCode`.
+        public static let connection = Code(rawValue: 0)
+        /// The peer closed the connection (GOAWAY, with `errorCode`) without
+        /// answering.
+        public static let goaway = Code(rawValue: 1)
+        /// The peer reset the stream, with `errorCode`.
+        public static let stream = Code(rawValue: 2)
+        /// The connection ended without answering.
+        public static let closed = Code(rawValue: 3)
+        /// A request that can't be sent, such as one with a field that would
+        /// end early.
+        public static let invalidMessage = Code(rawValue: 4)
+        /// The connection failed.
+        public static let io = Code(rawValue: 5)
+
+        public var description: String {
+            let names = ["connection", "goaway", "stream", "closed", "invalidMessage", "io"]
+            return Int(rawValue) < names.count ? names[Int(rawValue)] : "code \(rawValue)"
+        }
+    }
+
+    init(_ code: Code, errorCode: HTTP2ErrorCode? = nil, ioError: IOError? = nil) {
+        self.code = code
+        self.errorCode = errorCode
+        self.ioError = ioError
+    }
+
     /// The peer broke the protocol; this end closed the connection with
-    /// this code.
-    case connection(HTTP2ErrorCode)
-    /// The peer closed the connection (GOAWAY) without answering.
-    case goaway(HTTP2ErrorCode)
-    /// The peer reset the stream.
-    case stream(HTTP2ErrorCode)
+    /// `errorCode`.
+    public static func connection(_ errorCode: HTTP2ErrorCode) -> HTTP2Error { HTTP2Error(.connection, errorCode: errorCode) }
+    /// The peer closed the connection (GOAWAY, with `errorCode`) without
+    /// answering.
+    public static func goaway(_ errorCode: HTTP2ErrorCode) -> HTTP2Error { HTTP2Error(.goaway, errorCode: errorCode) }
+    /// The peer reset the stream, with `errorCode`.
+    public static func stream(_ errorCode: HTTP2ErrorCode) -> HTTP2Error { HTTP2Error(.stream, errorCode: errorCode) }
     /// The connection ended without answering.
-    case closed
+    public static let closed = HTTP2Error(.closed)
     /// A request that can't be sent, such as one with a field that would
     /// end early.
-    case invalidMessage
-    case io(IOError)
+    public static let invalidMessage = HTTP2Error(.invalidMessage)
+    /// The connection failed.
+    public static func io(_ ioError: IOError) -> HTTP2Error { HTTP2Error(.io, ioError: ioError) }
 
     public var description: String {
-        switch self {
-        case .connection(let c): "connection error \(c)"
-        case .goaway(let c): "connection closed by peer (\(c))"
-        case .stream(let c): "stream reset by peer (\(c))"
+        switch code {
+        case .connection: "connection error \(errorCode!)"
+        case .goaway: "connection closed by peer (\(errorCode!))"
+        case .stream: "stream reset by peer (\(errorCode!))"
         case .closed: "connection closed"
         case .invalidMessage: "message can't be sent"
-        case .io(let e): "\(e)"
+        case .io: "\(ioError!)"
+        default: "\(code)"
         }
     }
 }
