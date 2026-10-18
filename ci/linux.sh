@@ -23,12 +23,13 @@ echo "kernel $(uname -r), $(git rev-parse --short HEAD 2>/dev/null || cat .ci-co
 failed=0
 for job in "${JOBS[@]}"; do
   driver=uring traits=OpenSSL extra= required=1
-  where="--scratch-path .build-ci/$job" run= mount=/src
+  where="--scratch-path .build-ci/$job" run= mount=/src env=
   case $job in
     uring) ;;
     epoll) driver=epoll ;;
     boringssl) traits=BoringSSL ;;
-    tsan) extra=--sanitize=thread ;;
+    # Tests/tsan.supp: a Swift runtime gap (swiftlang/swift#93179), not Vega's.
+    tsan) extra=--sanitize=thread env="-e TSAN_OPTIONS=suppressions=/src/Tests/tsan.supp" ;;
     # VegaNIO names its parent package "vega", the directory's name.
     nio) where="--package-path VegaNIO --scratch-path .build-ci/nio" run="timeout 600" mount=/vega ;;
     *) echo "unknown job $job"; exit 2 ;;
@@ -37,7 +38,7 @@ for job in "${JOBS[@]}"; do
   log=.build-ci/$job.log
   start=$(date +%s)
   docker run --rm --name vega-ci-$job --security-opt seccomp=unconfined \
-    -v "$PWD":$mount -w $mount -e VEGA_DRIVER=$driver $IMAGE bash -c "
+    -v "$PWD":$mount -w $mount -e VEGA_DRIVER=$driver $env $IMAGE bash -c "
       swift build --build-tests -j $JOBS_ARG $where $extra &&
       $run swift test --skip-build $where $extra" > "$log" 2>&1
   code=$?

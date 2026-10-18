@@ -13,10 +13,14 @@ extension Runtime {
     /// }
     /// ```
     ///
-    /// The sampling task ends when the iteration does.
+    /// The sampling task runs on this runtime and ends when the iteration
+    /// does.
     public func metricsSamples(every interval: Duration) -> AsyncStream<RuntimeMetrics> {
         AsyncStream { continuation in
-            let task = Task { [self] in
+            // Not `Task {}`: that runs on the global executor, whose threads
+            // can all be taken (by callers blocked in `block`, as in a test
+            // run), and then no sample comes at all.
+            let task = spawn { [self] in
                 var previous = metrics
                 while !Task.isCancelled {
                     do {
