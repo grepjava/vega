@@ -26,7 +26,10 @@ public struct UnixListener: ~Copyable, Sendable {
 
     /// Wait for the next connection.
     public func accept() async throws(IOError) -> UnixStream {
-        UnixStream(reg: try await reg.accept(cv_unix_accept))
+        #if os(Windows)
+        if reg.overlapped(CV_OVL_ACCEPT) { return UnixStream(reg: try await reg.acceptOverlapped(cv_unix_accept)) }
+        #endif
+        return UnixStream(reg: try await reg.accept(cv_unix_accept))
     }
 }
 

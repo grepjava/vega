@@ -44,8 +44,8 @@ that the language can host it:
   no reference counting on the per-request path where it can be avoided,
   `~Copyable` buffers, and allocation-free I/O deadlines.
 - **Use the kernel's completion I/O where it exists.** io_uring is the default
-  on Linux, a ring per worker; epoll and kqueue stay as fallbacks, and Windows
-  has an IOCP driver.
+  on Linux, a ring per worker, and overlapped requests on an I/O completion
+  port on Windows; epoll, kqueue and AFD readiness stay as fallbacks.
 - **Fix what belongs upstream, upstream.** Where the Swift runtime was the
   bottleneck, the fix is offered to swiftlang/swift rather than kept in a
   private fork, and Vega runs on the stock toolchain.
@@ -66,7 +66,7 @@ mature, widely deployed and far more proven than Vega.
 | Multi-process | `Runtime.sharded`: supervised shard processes | none built in | none built in |
 | Linux I/O | io_uring (default), epoll | epoll | epoll (io_uring through `tokio-uring`) |
 | Apple I/O | kqueue, Network.framework | kqueue, Network.framework (NIOTransportServices) | kqueue |
-| Windows | IOCP: AFD readiness, `TransmitFile` | in progress upstream | IOCP |
+| Windows | IOCP: overlapped `AcceptEx`, `ConnectEx`, `WSARecv`, `WSASend`, `WSARecvFrom`, `WSASendTo`, `TransmitFile`, file reads and writes (default); AFD readiness | in progress upstream | IOCP (AFD readiness) |
 | Blocking work | `Runtime.blocking` | `NIOThreadPool` | `spawn_blocking` |
 | Timers and tests | timer wheel; `MockClock` paused time, in-memory `duplex()` streams | `EmbeddedEventLoop`, `NIOAsyncTestingChannel` | timer wheel; `time::pause`, `tokio-test` |
 | TLS | VegaTLS on OpenSSL 3 or vendored BoringSSL; kernel TLS offload on Linux | swift-nio-ssl (BoringSSL) | rustls or native-tls, separate crates |
@@ -125,15 +125,18 @@ Measure your own.
 
 Linux is the primary target; macOS 26.4 and newer and Windows (x64, Swift
 6.3.3) are supported. On Windows the whole test suite runs natively
-(`ci/windows.ps1`): sockets on an I/O completion port with AFD readiness, as
-Tokio's mio does, `sendFile` by `TransmitFile`, files, processes, TLS,
-HTTP/1, HTTP/2, HTTP/3 and QUIC, WebSocket with permessage-deflate, and gzip
-and deflate on a vendored zlib. What Windows lacks: `Runtime.sharded` (it
-needs `fork`), brotli and zstd, Unix datagram sockets (Windows has none),
-raw sockets, vsock, and arrival timestamps on reads. A cancelled or timed-out
-`sendFile` there aborts the connection, since Winsock can't say how much of a
-cancelled send went. See docs/PLAN.md for the driver. Linux builds also work
-through WSL:
+(`ci/windows.ps1`, once per backend): sockets and files on an I/O completion
+port, where each operation that would wait is an overlapped request whose
+completion resumes the task (`IOBackend.iocp`, the default), or with AFD
+readiness polls as Tokio's mio does (`.readiness`, `VEGA_DRIVER=afd`);
+`sendFile` by `TransmitFile`, processes, TLS, HTTP/1, HTTP/2, HTTP/3 and QUIC,
+WebSocket with permessage-deflate, and gzip and deflate on a vendored zlib.
+What Windows lacks: `Runtime.sharded` (it needs `fork`), brotli and zstd,
+Unix datagram sockets (Windows has none), raw sockets, vsock, and arrival
+timestamps on reads. A write or `sendFile` cancelled or timed out while its
+request is in flight aborts the connection there, since Winsock can't say how
+much of a cancelled send went. See docs/PLAN.md for the driver. Linux builds
+also work through WSL:
 
 ```sh
 swift build --scratch-path ~/.cache/vega-build

@@ -93,9 +93,9 @@ public final class Runtime: Sendable {
     /// Whether this is a ``currentThread(name:blockingThreads:blockingKeepAlive:)`` runtime.
     public var isCurrentThread: Bool { scheduler.isCurrentThread }
 
-    /// The I/O driver running: `.ioUring`, `.network` or `.readiness`.
+    /// The I/O driver running: `.ioUring`, `.network`, `.iocp` or `.readiness`.
     public var ioBackend: IOBackend {
-        scheduler.usesNetwork ? .network : scheduler.usesRings ? .ioUring : .readiness
+        scheduler.usesNetwork ? .network : scheduler.usesRings ? .ioUring : scheduler.usesIOCP ? .iocp : .readiness
     }
 
     /// The runtime as a `TaskExecutor`, for `Task(executorPreference:)`,

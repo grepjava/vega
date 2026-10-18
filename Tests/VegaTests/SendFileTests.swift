@@ -34,16 +34,14 @@ import Testing
         return try body(fd)
     }
 
-    /// A runtime whose accepts and reads are overlapped requests too, on
-    /// Windows (as VEGA_DRIVER=overlapped makes them).
+    /// On Windows, a runtime on the iocp backend (accepts and reads are
+    /// overlapped requests too) or on readiness; elsewhere the default.
     static func runtime(overlapped: Bool) -> Runtime {
-        let rt = Runtime(workers: 2)
         #if os(Windows)
-        if overlapped, let raw = rt.scheduler.driver?.raw {
-            cv_driver_set_overlapped(raw, (1 << CV_OVL_TRANSMIT) | (1 << CV_OVL_ACCEPT) | (1 << CV_OVL_RECV))
-        }
+        return Runtime(workers: 2, io: overlapped ? .iocp : .readiness)
+        #else
+        return Runtime(workers: 2)
         #endif
-        return rt
     }
 
     @Test(arguments: [false, true])

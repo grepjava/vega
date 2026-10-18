@@ -72,7 +72,16 @@ public struct UDPSocket: ~Copyable, Sendable {
     @discardableResult
     public func send(_ bytes: UnsafeRawBufferPointer) async throws(IOError) -> Int {
         let fd = reg.fd
+        #if os(Windows)
+        let io = reg.io
+        return try await reg.perform(CV_IO_WRITE, kind: CV_OVL_SENDTO) {
+            cv_send(fd, bytes.baseAddress, bytes.count)
+        } overlapped: { waiter, res in
+            cv_ovl_sendto(io, waiter, bytes.baseAddress, bytes.count, nil, res)
+        }
+        #else
         return try await reg.perform(CV_IO_WRITE) { cv_send(fd, bytes.baseAddress, bytes.count) }
+        #endif
     }
 
     @discardableResult
@@ -85,9 +94,18 @@ public struct UDPSocket: ~Copyable, Sendable {
     public func send(_ bytes: UnsafeRawBufferPointer, to address: SocketAddress) async throws(IOError) -> Int {
         let fd = reg.fd
         var to = address.raw
+        #if os(Windows)
+        let io = reg.io
+        return try await reg.perform(CV_IO_WRITE, kind: CV_OVL_SENDTO) {
+            cv_sendto(fd, bytes.baseAddress, bytes.count, &to)
+        } overlapped: { waiter, res in
+            cv_ovl_sendto(io, waiter, bytes.baseAddress, bytes.count, &to, res)
+        }
+        #else
         return try await reg.perform(CV_IO_WRITE) {
             cv_sendto(fd, bytes.baseAddress, bytes.count, &to)
         }
+        #endif
     }
 
     @discardableResult
@@ -101,7 +119,13 @@ public struct UDPSocket: ~Copyable, Sendable {
         precondition(buffer.spareCapacity > 0, "receive into a full IOBuffer")
         let fd = reg.fd
         let at = buffer.base + buffer.count, room = buffer.spareCapacity
+        #if os(Windows)
+        let io = reg.io
+        let n = try await reg.perform(CV_IO_READ, kind: CV_OVL_RECVFROM) { cv_recvfrom(fd, at, room, nil) }
+            overlapped: { waiter, res in cv_ovl_recvfrom(io, waiter, at, room, res) }
+        #else
         let n = try await reg.perform(CV_IO_READ) { cv_recv(fd, at, room) }
+        #endif
         buffer.count += n
         return n
     }
@@ -112,7 +136,20 @@ public struct UDPSocket: ~Copyable, Sendable {
         let fd = reg.fd
         let at = buffer.base + buffer.count, room = buffer.spareCapacity
         var from = cv_sockaddr()
+        #if os(Windows)
+        let io = reg.io
+        // The overlapped request leaves the sender in the request, for
+        // cv_ovl_sender once it has completed.
+        var waited = false
+        let n = try await reg.perform(CV_IO_READ, kind: CV_OVL_RECVFROM) { cv_recvfrom(fd, at, room, &from) }
+            overlapped: { waiter, res in
+                waited = true
+                return cv_ovl_recvfrom(io, waiter, at, room, res)
+            }
+        if waited { cv_ovl_sender(io, &from) }
+        #else
         let n = try await reg.perform(CV_IO_READ) { cv_recvfrom(fd, at, room, &from) }
+        #endif
         buffer.count += n
         return (n, SocketAddress(raw: from))
     }

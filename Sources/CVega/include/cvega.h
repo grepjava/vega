@@ -203,33 +203,87 @@ void cv_driver_deregister(cv_driver *d, cv_io *io);
 void cv_driver_want(cv_io *io, int dir);
 
 #if defined(_WIN32)
-// Overlapped requests on a registered socket, completing on the driver's
-// port: TransmitFile (sendFile), and AcceptEx and WSARecv where the runtime
-// asks for them (VEGA_DRIVER=overlapped). `waiter` is the bits of the
-// task's UnsafeContinuation<Int64, Never>. Each call returns 1 when the
-// request is in flight: its completion resumes the waiter with the result
-// (the wake carries CV_OVL_WAITER, the result is in cv_driver_results at
-// the same index). 0 when it finished now, the result in *res and the
-// waiter untouched. A result is >= 0 (bytes; AcceptEx: the new socket, for
+// Overlapped requests on a registered socket or file, completing on the
+// driver's port: TransmitFile (sendFile) always; under the iocp backend
+// (the default) also AcceptEx, ConnectEx, WSARecv, WSASend, WSARecvFrom,
+// WSASendTo and file reads and writes. `waiter` is the bits of the task's
+// UnsafeContinuation<Int64, Never>. Each call returns 1 when the request is
+// in flight: its completion resumes the waiter with the result (the wake
+// carries CV_OVL_WAITER, the result is in cv_driver_results at the same
+// index). 0 when it finished now, the result in *res and the waiter
+// untouched. A result is >= 0 (bytes; AcceptEx: the new socket, for
 // cv_tcp_accept_finish) or -errno, -ECANCELED once cancelled.
 #define CV_OVL_TRANSMIT 0
 #define CV_OVL_ACCEPT 1
 #define CV_OVL_RECV 2
+#define CV_OVL_SEND 3
+#define CV_OVL_CONNECT 4
+/// Datagrams: WSARecvFrom (a receive, with or without its sender).
+#define CV_OVL_RECVFROM 5
+/// Datagrams: WSASendTo (a send, to the default peer or an address).
+#define CV_OVL_SENDTO 6
+/// File reads and writes (VegaFS).
+#define CV_OVL_FILE_READ 7
+#define CV_OVL_FILE_WRITE 8
+#define CV_OVL_KINDS 9
+/// Every kind: what the iocp backend does overlapped.
+#define CV_OVL_ALL 0x1ff
 #define CV_OVL_WAITER ((uintptr_t)1)
+struct cv_iovec;
+struct cv_sockaddr;
 /// Whether the runtime does `kind` (CV_OVL_*) as overlapped requests.
 int cv_ovl_enabled(cv_io *io, int kind);
-/// The kinds a runtime does overlapped, as bits (1 << CV_OVL_*): for tests.
+/// Whether the driver's runtime does `kind` as overlapped requests.
+int cv_driver_overlapped(cv_driver *d, int kind);
+/// The kinds a runtime does overlapped, as bits (1 << CV_OVL_*).
 void cv_driver_set_overlapped(cv_driver *d, int kinds);
 /// Requests of `kind` finished so far in this process (for tests).
 uint64_t cv_ovl_count(int kind);
+/// Requests of `kind` finished so far on this driver's port (for tests).
+uint64_t cv_driver_ovl_count(cv_driver *d, int kind);
 int64_t *cv_driver_results(cv_driver *d);
 /// From `offset`, up to `count` bytes of the file handle `file`; fewer
 /// only when the file ends first.
 int cv_ovl_transmit_file(cv_io *io, uintptr_t waiter, int file, int64_t offset, intptr_t count, int64_t *res);
+/// Up to `len` bytes into `buf`. With `len` 0, a zero-byte receive: it
+/// completes (with 0) once bytes are waiting or the peer has closed, and
+/// pins no buffer while it waits.
 int cv_ovl_recv(cv_io *io, uintptr_t waiter, void *buf, intptr_t len, int64_t *res);
+/// All of `count` buffers (up to 64), gathered: a stream socket's send
+/// completes once every byte is taken.
+int cv_ovl_send(cv_io *io, uintptr_t waiter, const struct cv_iovec *iov, int count, int64_t *res);
 int cv_ovl_accept(cv_io *io, uintptr_t waiter, int64_t *res);
+/// Connect a socket from cv_socket_open to `addr` (binding it to the
+/// wildcard address first, as ConnectEx needs); 0 once connected.
+int cv_ovl_connect(cv_io *io, uintptr_t waiter, const struct cv_sockaddr *addr, int64_t *res);
+/// One datagram into `buf`; a datagram longer than `len` is cut to it, as
+/// recvfrom does. Once it has completed, cv_ovl_sender reads its sender.
+int cv_ovl_recvfrom(cv_io *io, uintptr_t waiter, void *buf, intptr_t len, int64_t *res);
+/// The sender of the datagram the last cv_ovl_recvfrom brought.
+void cv_ovl_sender(cv_io *io, struct cv_sockaddr *out);
+/// One datagram to `to` (NULL: the default peer).
+int cv_ovl_sendto(cv_io *io, uintptr_t waiter, const void *buf, intptr_t len, const struct cv_sockaddr *to,
+                  int64_t *res);
 /// Cancel the request in flight in `dir` (CV_IO_READ: accept, recv), if any.
 void cv_ovl_cancel(cv_io *io, int dir);
+/// A file read or write (`fd` a file handle from cv_file_open) at `offset`,
+/// or at the file's position (offset < 0), which then moves on by the bytes
+/// done. 1: in flight, `*op` the request, for cv_ovl_file_cancel and, once
+/// its completion has resumed the waiter, cv_ovl_file_finish with the
+/// result. 0: done now, the result in *res. -1: no request here (another
+/// runtime's port has the file, or it can't have one): use the blocking pool.
+/// A read's result is the bytes read, 0 at the end of the file.
+int cv_ovl_file_read(cv_driver *d, int fd, uintptr_t waiter, void *buf, intptr_t len, int64_t offset,
+                     int64_t *res, void **op);
+int cv_ovl_file_write(cv_driver *d, int fd, uintptr_t waiter, const void *buf, intptr_t len, int64_t offset,
+                      int64_t *res, void **op);
+void cv_ovl_file_cancel(void *op);
+void cv_ovl_file_finish(void *op, int64_t res);
+/// The file handle `fd` is closing: drop what the driver keeps for it.
+void cv_file_forget(int fd);
+/// A new non-blocking socket of `type` for `family`, not yet connected (TCP:
+/// with TCP_NODELAY), for cv_ovl_connect. -1 and an errno in *err.
+int cv_socket_open(int family, int type, int *err);
 /// Make a socket AcceptEx accepted on `listener` a socket like accept's:
 /// non-blocking, TCP_NODELAY. 0, or an errno value (`fd` is closed).
 int cv_tcp_accept_finish(int listener, int fd);

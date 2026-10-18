@@ -7,13 +7,14 @@ import Glibc
 /// Which I/O driver a runtime uses.
 public enum IOBackend: Sendable, Equatable {
     /// `.ioUring` where the kernel can run it, else `.readiness`; on iOS,
-    /// tvOS, watchOS and visionOS, `.network`. `VEGA_DRIVER=epoll`, `uring`,
-    /// `kqueue` or `network` overrides. On Windows, `VEGA_DRIVER=overlapped`
-    /// makes TCP accepts and socket reads overlapped requests (`AcceptEx`,
-    /// `WSARecv`) rather than readiness waits; docs/PLAN.md has why that
-    /// isn't the default.
+    /// tvOS, watchOS and visionOS, `.network`; on Windows, `.iocp`.
+    /// `VEGA_DRIVER=epoll`, `uring`, `kqueue`, `network`, `iocp` or (on
+    /// Windows) `afd` overrides.
     case automatic
-    /// One edge-triggered epoll (kqueue on Darwin) per runtime.
+    /// One edge-triggered epoll (kqueue on Darwin) per runtime. On Windows,
+    /// one I/O completion port per runtime with AFD readiness polls on its
+    /// sockets (as Tokio's mio does it), and only `sendFile` an overlapped
+    /// request.
     case readiness
     /// Completion (Linux 6.7+): one io_uring per worker. Falls back to
     /// `.readiness` where the kernel can't run it (older, or io_uring
@@ -26,6 +27,20 @@ public enum IOBackend: Sendable, Equatable {
     /// where BSD sockets don't bring up the cellular radio or VPN on demand;
     /// opt-in on macOS. Elsewhere it means `.automatic`.
     case network
+    /// Completion on Windows: one I/O completion port per runtime, where
+    /// each socket operation that would wait is an overlapped request
+    /// (`AcceptEx`, `ConnectEx`, `WSARecv`, `WSASend`, `WSARecvFrom`,
+    /// `WSASendTo`, `TransmitFile`) and VegaFS's file reads and writes are
+    /// overlapped `ReadFile` and `WriteFile`; the completion resumes the
+    /// task with the result. Each is tried as a non-blocking call first, so
+    /// it costs a request only when it would have waited. Readiness (an AFD
+    /// poll) remains for the waits with no request to make: `readable()`,
+    /// `writable()`, pipes' and datagram batches'. The default on Windows;
+    /// elsewhere it means `.automatic`.
+    ///
+    /// A write cancelled or timed out while its request is in flight
+    /// aborts the connection: Winsock can't say how much of it went.
+    case iocp
 }
 
 /// One operation for a worker's ring. Pointers stay valid until the
@@ -64,7 +79,7 @@ enum URing {
         switch backend {
         case .readiness, .network: return false
         case .ioUring: return true
-        case .automatic:
+        case .automatic, .iocp: // (.iocp is Windows only)
             guard let v = getenv("VEGA_DRIVER") else { return true }
             return String(cString: v) != "epoll"
         }

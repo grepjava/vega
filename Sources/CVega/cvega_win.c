@@ -144,6 +144,17 @@ int cv_tcp_listen(const char *host, int port, int backlog, int reuse_port, int *
     return as_fd(s);
 }
 
+int cv_socket_open(int family, int type, int *err) {
+    SOCKET s = new_socket(family, type, err);
+    if (s == INVALID_SOCKET) return -1;
+    if (type == SOCK_STREAM && family != AF_UNIX) {
+        BOOL one = TRUE;
+        setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof one);
+    }
+    *err = 0;
+    return as_fd(s);
+}
+
 int cv_connect_new(const cv_sockaddr *addr, int type, int *err) {
     const struct sockaddr *sa = (const struct sockaddr *)addr->storage;
     SOCKET s = new_socket(sa->sa_family, type, err);
@@ -394,6 +405,8 @@ intptr_t cv_sendto(int fd, const void *buf, intptr_t len, const cv_sockaddr *to)
 }
 
 intptr_t cv_recvfrom(int fd, void *buf, intptr_t len, cv_sockaddr *from) {
+    cv_sockaddr ignored;
+    if (!from) from = &ignored;
     int alen = sizeof from->storage;
     int n = recvfrom(as_socket(fd), buf, clamp_len(len), 0, (struct sockaddr *)from->storage, &alen);
     if (n < 0) {
@@ -583,6 +596,12 @@ int cv_win_errno(unsigned long e) {
     case ERROR_NETNAME_DELETED: return ECONNRESET;
     case ERROR_CONNECTION_ABORTED: return ECONNABORTED;
     case ERROR_CONNECTION_REFUSED: return ECONNREFUSED;
+    case ERROR_NETWORK_UNREACHABLE: return ENETUNREACH;
+    case ERROR_HOST_UNREACHABLE: case ERROR_PORT_UNREACHABLE: return EHOSTUNREACH;
+    case ERROR_SEM_TIMEOUT: return ETIMEDOUT;
+    case ERROR_MORE_DATA: return EMSGSIZE;
+    case ERROR_ADDRESS_ALREADY_ASSOCIATED: return EADDRINUSE;
+    case ERROR_GRACEFUL_DISCONNECT: return EPIPE;
     default: return e >= WSABASEERR ? map_error((int)e) : EIO;
     }
 }
@@ -643,7 +662,10 @@ int cv_file_open(const char *path, int flags, unsigned mode, int *fd) {
     return 0;
 }
 
-int cv_file_close(int fd) { return CloseHandle(as_handle(fd)) ? 0 : last_win_error(); }
+int cv_file_close(int fd) {
+    cv_file_forget(fd); // its overlapped twin, if it has one
+    return CloseHandle(as_handle(fd)) ? 0 : last_win_error();
+}
 
 int cv_file_dup(int fd, int *out) {
     HANDLE dup;

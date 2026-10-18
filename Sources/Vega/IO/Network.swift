@@ -19,7 +19,7 @@ enum NetworkIO {
         switch backend {
         case .network: return true
         case .readiness, .ioUring: return false
-        case .automatic:
+        case .automatic, .iocp: // (.iocp is Windows only)
             if let v = getenv("VEGA_DRIVER") { return String(cString: v) == "network" }
             #if os(macOS)
             return false

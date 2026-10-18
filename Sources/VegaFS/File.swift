@@ -18,12 +18,15 @@ import ucrt
 /// ```
 ///
 /// On the io_uring driver, reads, writes, syncs and opens go through the
-/// running worker's ring. Elsewhere (the readiness drivers, or a task off
-/// Vega's workers) each runs on the blocking pool, so a slow disk never
-/// stalls a worker thread.
+/// running worker's ring; on Windows' iocp backend, reads and writes are
+/// overlapped requests on the runtime's completion port (a read the cache
+/// holds finishes at once, without a trip through it). Elsewhere (the
+/// readiness drivers, or a task off Vega's workers) each runs on the
+/// blocking pool, so a slow disk never stalls a worker thread.
 ///
-/// Cancelling a task abandons a ring operation where the kernel allows
-/// (`IOError.cancelled`); one on the blocking pool always finishes first.
+/// Cancelling a task abandons a ring or overlapped operation where the
+/// kernel allows (`IOError.cancelled`); one on the blocking pool always
+/// finishes first.
 /// Either way the buffer is never written after the call returns.
 ///
 /// The file is closed when the value is dropped, or with `close()`, which

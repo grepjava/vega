@@ -149,13 +149,34 @@ extension IORegistration {
     @usableFromInline static let sendYield: Int32 = -1, sendElsewhere: Int32 = -2
 
     #if os(Windows)
-    /// `read(into:)` with VEGA_DRIVER=overlapped: a recv, and where it finds
-    /// nothing, a WSARecv into the buffer whose completion brings the bytes
-    /// (in place of an AFD poll and a second recv). After a short read the
-    /// socket is likely empty, so the WSARecv goes first.
+    /// `read(into:)` under the iocp backend: a recv, and where it finds
+    /// nothing, a zero-byte WSARecv whose completion says bytes have come
+    /// (or the peer closed), then the recv again, in place of an AFD poll.
+    /// After a short read the socket is likely empty, so the WSARecv goes
+    /// first.
+    ///
+    /// Zero bytes, as libuv asks for: a receive into the buffer itself
+    /// would lock the buffer's pages for as long as it waits, every idle
+    /// connection's (a server with many runs into WSAENOBUFS), and locking
+    /// them costs each request: bulk transfers measured 12% slower that
+    /// way, and no faster for small messages (docs/PLAN.md).
     private func readOverlapped(into buffer: inout IOBuffer) async throws(IOError) -> Int {
         let want = buffer.spareCapacity, base = buffer.base + buffer.count
-        if io.pointee.read_drained == 0 {
+        var waited = io.pointee.read_drained != 0
+        io.pointee.read_drained = 0
+        let io = self.io
+        while true {
+            if waited {
+                let res = await overlapped(CV_IO_READ) { waiter, res in cv_ovl_recv(io, waiter, base, 0, res) }
+                if res < 0 {
+                    switch Int32(-res) {
+                    case EINTR, EAGAIN: continue
+                    case ECANCELED: throw .cancelled
+                    case ETIMEDOUT: throw .timedOut
+                    default: throw IOError(code: Int32(-res))
+                    }
+                }
+            }
             let n = cv_recv(fd, base, want)
             if n >= 0 {
                 buffer.count += n
@@ -163,33 +184,24 @@ extension IORegistration {
                 await Runtime.consumeBudget()
                 return n
             }
-            if Int32(-n) != EAGAIN { throw IOError(code: Int32(-n)) }
-        }
-        io.pointee.read_drained = 0
-        let io = self.io
-        while true {
-            let res = await overlapped(CV_IO_READ) { waiter, res in cv_ovl_recv(io, waiter, base, want, res) }
-            if res >= 0 {
-                buffer.count += Int(res)
-                await Runtime.consumeBudget()
-                return Int(res)
-            }
-            switch Int32(-res) {
-            case EINTR, EAGAIN: continue
-            case ECANCELED: throw .cancelled
-            case ETIMEDOUT: throw .timedOut
-            default: throw IOError(code: Int32(-res))
+            switch Int32(-n) {
+            case EAGAIN: waited = true // nothing yet: (another) zero-byte wait
+            case EINTR: continue
+            default: throw IOError(code: Int32(-n))
             }
         }
     }
 
-    /// `TCPListener.accept` with VEGA_DRIVER=overlapped: accept, and where
-    /// nothing waits, an AcceptEx whose completion brings the connection.
-    func acceptOverlapped() async throws(IOError) -> IORegistration {
+    /// `accept` under the iocp backend: accept, and where nothing waits, an
+    /// AcceptEx whose completion brings the connection. `accept` is the
+    /// cv_*_accept for the socket's kind; a provider without AcceptEx (an
+    /// AF_UNIX one may lack it) waits for readiness instead.
+    func acceptOverlapped(_ accept: (Int32, UnsafeMutablePointer<Int32>) -> Int32 = cv_tcp_accept)
+        async throws(IOError) -> IORegistration {
         let io = self.io
         while true {
             var err: Int32 = 0
-            let fd = cv_tcp_accept(self.fd, &err)
+            let fd = accept(self.fd, &err)
             if fd >= 0 {
                 await Runtime.consumeBudget()
                 return try IORegistration(fd: fd, driver: home)
@@ -211,8 +223,85 @@ extension IORegistration {
             case EINTR, EAGAIN, ECONNABORTED, ECONNRESET: continue
             case ECANCELED: throw .cancelled
             case ETIMEDOUT: throw .timedOut
+            case EOPNOTSUPP, EINVAL, ENOSYS:
+                // No AcceptEx for this socket: wait for readiness.
+                try await wait(CV_IO_READ)
             default: throw IOError(code: Int32(-res))
             }
+        }
+    }
+
+    /// The rest of a write that found the socket full, under the iocp
+    /// backend: WSASend requests, gathered, each of which completes once
+    /// the socket has taken all of it (in place of an AFD poll and another
+    /// send). Under `Runtime.withWriteStallTimeout`, and no deadline of its
+    /// own, in slices of 64 KiB, each given the limit, so a peer that keeps
+    /// taking bytes keeps the write going and one that takes none for the
+    /// limit stops it, as a readiness wait does.
+    ///
+    /// Winsock can't say how much of a cancelled send went, so a write
+    /// cancelled or timed out here aborts the connection (ECONNABORTED
+    /// after that), as a cancelled `sendFile` does.
+    func sendOverlapped(parts count: Int, _ part: (Int) -> UnsafeRawBufferPointer) async throws(IOError) {
+        let stall = IODeadline.active == nil ? WriteStall.active : nil
+        let slice = stall == nil ? Int.max : 64 * 1024
+        let iov = UnsafeMutablePointer<cv_iovec>.allocate(capacity: 64)
+        defer { iov.deallocate() }
+        let io = self.io
+        var index = 0, offset = 0
+        while true {
+            while index < count && offset == part(index).count {
+                index += 1
+                offset = 0
+            }
+            if index == count { break }
+            var k: Int32 = 0, offered = 0, i = index
+            while k < 64 && i < count && offered < slice {
+                let p = part(i)
+                let skip = i == index ? offset : 0
+                let n = min(p.count - skip, slice - offered)
+                if n > 0 {
+                    iov[Int(k)] = cv_iovec(base: p.baseAddress! + skip, len: n)
+                    offered += n
+                    k += 1
+                }
+                i += 1
+            }
+            let res: Int64
+            if let stall {
+                res = try await Runtime.withIODeadline(.nanoseconds(Int64(clamping: stall))) {
+                    () async throws(IOError) -> Int64 in
+                    await overlapped(CV_IO_WRITE) { waiter, res in cv_ovl_send(io, waiter, iov, k, res) }
+                }
+            } else {
+                res = await overlapped(CV_IO_WRITE) { waiter, res in cv_ovl_send(io, waiter, iov, k, res) }
+            }
+            if res < 0 {
+                switch Int32(-res) {
+                case EINTR, EAGAIN: continue
+                case ECANCELED: throw .cancelled
+                case ETIMEDOUT: throw .timedOut
+                default: throw IOError(code: Int32(-res))
+                }
+            }
+            (index, offset) = position(after: Int(res), index, offset, part)
+        }
+        await Runtime.consumeBudget()
+    }
+
+    /// Connect a socket from cv_socket_open to `address` with ConnectEx,
+    /// under the iocp backend.
+    func connectOverlapped(to address: SocketAddress) async throws(IOError) {
+        let addr = UnsafeMutablePointer<cv_sockaddr>.allocate(capacity: 1)
+        addr.initialize(to: address.raw)
+        defer { addr.deallocate() }
+        let io = self.io
+        let res = await overlapped(CV_IO_WRITE) { waiter, res in cv_ovl_connect(io, waiter, addr, res) }
+        guard res < 0 else { return }
+        switch Int32(-res) {
+        case ECANCELED: throw .cancelled
+        case ETIMEDOUT: throw .timedOut
+        default: throw IOError(code: Int32(-res))
         }
     }
     #endif
@@ -260,6 +349,11 @@ extension IORegistration {
         case Self.sendElsewhere:
             try await write(bytes)
         case EAGAIN:
+            #if os(Windows)
+            if overlapped(CV_OVL_SEND) {
+                return try await sendOverlapped(parts: 1) { _ in UnsafeRawBufferPointer(rebasing: bytes[sent...]) }
+            }
+            #endif
             try await wait(CV_IO_WRITE)
             try await write(UnsafeRawBufferPointer(rebasing: bytes[sent...]))
         default:
@@ -354,6 +448,14 @@ extension IORegistration {
         case Self.sendElsewhere:
             try await write(parts: count, part)
         case EAGAIN:
+            #if os(Windows)
+            if overlapped(CV_OVL_SEND) {
+                let (index, offset) = position(after: sent, 0, 0, part)
+                return try await sendOverlapped(parts: count - index) { j in
+                    j == 0 ? UnsafeRawBufferPointer(rebasing: part(index)[offset...]) : part(index + j)
+                }
+            }
+            #endif
             try await wait(CV_IO_WRITE)
             let (index, offset) = position(after: sent, 0, 0, part)
             try await write(parts: count - index) { j in
@@ -399,7 +501,14 @@ extension IORegistration {
             }
             let err = Int32(-n)
             switch err {
-            case EAGAIN, EWOULDBLOCK: try await wait(CV_IO_WRITE)
+            case EAGAIN, EWOULDBLOCK:
+                #if os(Windows)
+                if overlapped(CV_OVL_SEND) {
+                    let rest = UnsafeRawBufferPointer(rebasing: bytes[done...])
+                    return try await sendOverlapped(parts: 1) { _ in rest }
+                }
+                #endif
+                try await wait(CV_IO_WRITE)
             case EINTR: continue
             default: throw IOError(code: err)
             }
@@ -532,7 +641,16 @@ extension IORegistration {
             }
             let err = Int32(-n)
             switch err {
-            case EAGAIN, EWOULDBLOCK: try await wait(CV_IO_WRITE)
+            case EAGAIN, EWOULDBLOCK:
+                #if os(Windows)
+                if overlapped(CV_OVL_SEND) {
+                    let (first, skip) = (index, offset)
+                    return try await sendOverlapped(parts: count - first) { j in
+                        j == 0 ? UnsafeRawBufferPointer(rebasing: part(first)[skip...]) : part(first + j)
+                    }
+                }
+                #endif
+                try await wait(CV_IO_WRITE)
             case EINTR: continue
             default: throw IOError(code: err)
             }
@@ -655,6 +773,41 @@ extension IORegistration {
             }
         }
     }
+
+    #if os(Windows)
+    /// `perform` for a datagram socket under the iocp backend: `op` (the
+    /// non-blocking call) first, and where it would wait, the overlapped
+    /// request `start` makes (WSARecvFrom, WSASendTo), whose completion
+    /// brings the result.
+    @inline(__always)
+    func perform(_ direction: Int32, kind: Int32, _ op: () -> Int,
+                 overlapped start: (UInt, UnsafeMutablePointer<Int64>) -> Int32) async throws(IOError) -> Int {
+        guard overlapped(kind) else { return try await perform(direction, op) }
+        while true {
+            let n = op()
+            if n >= 0 {
+                await Runtime.consumeBudget()
+                return n
+            }
+            switch Int32(-n) {
+            case EAGAIN, EWOULDBLOCK: break
+            case EINTR: continue
+            default: throw IOError(code: Int32(-n))
+            }
+            let res = await overlapped(direction, start)
+            if res >= 0 {
+                await Runtime.consumeBudget()
+                return Int(res)
+            }
+            switch Int32(-res) {
+            case EINTR, EAGAIN: continue
+            case ECANCELED: throw .cancelled
+            case ETIMEDOUT: throw .timedOut
+            default: throw IOError(code: Int32(-res))
+            }
+        }
+    }
+    #endif
 
     /// A failed ring operation: return to retry (EINTR, EAGAIN), else throw.
     @inline(__always)

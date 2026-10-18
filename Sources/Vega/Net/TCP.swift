@@ -77,6 +77,16 @@ public struct TCPStream: ~Copyable, Sendable {
         #endif
         let driver = try IODriver.current()
         var err: Int32 = 0
+        #if os(Windows)
+        if cv_driver_overlapped(driver.raw, CV_OVL_CONNECT) != 0 {
+            // ConnectEx: the completion says it's connected.
+            let fd = withUnsafePointer(to: address.raw) { cv_socket_open(cv_sockaddr_family($0), socketStream, &err) }
+            guard fd >= 0 else { throw IOError(code: err) }
+            let stream = TCPStream(reg: try IORegistration(fd: fd, driver: driver))
+            try await stream.reg.connectOverlapped(to: address)
+            return stream
+        }
+        #endif
         let fd = withUnsafePointer(to: address.raw) { cv_connect_new($0, socketStream, &err) }
         guard fd >= 0 else { throw IOError(code: err) }
         let stream = TCPStream(reg: try IORegistration(fd: fd, driver: driver))

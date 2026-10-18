@@ -36,6 +36,9 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     let usesRings: Bool
     /// Whether TCP goes through Network.framework (`IOBackend.network`).
     let usesNetwork: Bool
+    /// Whether sockets and files make overlapped requests where they would
+    /// wait (`IOBackend.iocp`, Windows).
+    let usesIOCP: Bool
     /// A current-thread runtime: one worker and no thread of its own; the
     /// thread in `Runtime.block` runs its loop.
     let isCurrentThread: Bool
@@ -154,6 +157,15 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
         #if canImport(Darwin) || os(Windows)
         driver = IODriver.make()
         #endif
+        #endif
+        #if os(Windows)
+        // A current-thread runtime asks for readiness only to keep off
+        // rings; overlapped requests are made from any thread, so it gets
+        // what the environment says.
+        usesIOCP = driver != nil && IODriver.wantsIOCP(currentThread ? .automatic : io)
+        if let driver, !usesIOCP { cv_driver_set_overlapped(driver.raw, 1 << CV_OVL_TRANSMIT) }
+        #else
+        usesIOCP = false
         #endif
         #if canImport(Network)
         usesNetwork = !currentThread && NetworkIO.wanted(io)

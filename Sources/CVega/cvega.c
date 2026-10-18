@@ -735,6 +735,7 @@ void cv_driver_unwatch_exit(cv_driver *d, cv_io *io, int pid) {
 // is lost. Its completion resumes the waiter exactly as an epoll event does.
 
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #include <mswsock.h>
 #include <timeapi.h>
 #include <limits.h>
@@ -790,10 +791,12 @@ typedef NTSTATUS(NTAPI *nt_create_file_fn)(PHANDLE, ACCESS_MASK, cv_object_attri
 typedef NTSTATUS(NTAPI *nt_device_io_control_file_fn)(HANDLE, HANDLE, PVOID, PVOID, cv_iosb *, ULONG,
                                                       PVOID, ULONG, PVOID, ULONG);
 typedef NTSTATUS(NTAPI *nt_cancel_io_file_ex_fn)(HANDLE, cv_iosb *, cv_iosb *);
+typedef NTSTATUS(NTAPI *nt_query_object_fn)(HANDLE, int, PVOID, ULONG, PULONG);
 
 static nt_create_file_fn nt_create_file;
 static nt_device_io_control_file_fn nt_device_io_control_file;
 static nt_cancel_io_file_ex_fn nt_cancel_io_file_ex;
+static nt_query_object_fn nt_query_object; // optional: files stay on the blocking pool without it
 
 static BOOL CALLBACK load_ntdll(PINIT_ONCE once, PVOID param, PVOID *ctx) {
     (void)once, (void)param, (void)ctx;
@@ -802,6 +805,7 @@ static BOOL CALLBACK load_ntdll(PINIT_ONCE once, PVOID param, PVOID *ctx) {
     nt_create_file = (nt_create_file_fn)(void *)GetProcAddress(nt, "NtCreateFile");
     nt_device_io_control_file = (nt_device_io_control_file_fn)(void *)GetProcAddress(nt, "NtDeviceIoControlFile");
     nt_cancel_io_file_ex = (nt_cancel_io_file_ex_fn)(void *)GetProcAddress(nt, "NtCancelIoFileEx");
+    nt_query_object = (nt_query_object_fn)(void *)GetProcAddress(nt, "NtQueryObject");
     return nt_create_file && nt_device_io_control_file && nt_cancel_io_file_ex;
 }
 
@@ -834,8 +838,9 @@ typedef struct cv_pipe_op {
     DWORD err; // the last request's Win32 error, 0 if none
 } cv_pipe_op;
 
-// An overlapped request on a socket (TransmitFile, AcceptEx, WSARecv), one
-// per direction: a task has one read and one write going at a time.
+// An overlapped request on a socket, one per direction: a task has one
+// read (WSARecv, WSARecvFrom, AcceptEx) and one write (WSASend, WSASendTo,
+// ConnectEx, TransmitFile) going at a time.
 typedef struct cv_sock_op {
     OVERLAPPED ov; // first: the completion's lpOverlapped points here
     struct cv_io_win *io;
@@ -843,7 +848,12 @@ typedef struct cv_sock_op {
     int kind;         // CV_OVL_*
     uintptr_t waiter; // the task's continuation, tagged CV_OVL_WAITER
     SOCKET accepted;  // AcceptEx: the socket it accepts into
+    // WSARecvFrom: the bytes asked for (a longer datagram is cut to them),
+    // and the sender's length, which the request fills in.
+    DWORD len;
+    INT addrlen;
     // AcceptEx: the local and remote addresses, each with 16 bytes to spare.
+    // WSARecvFrom: the sender. WSASendTo and ConnectEx: the address.
     char addrs[2 * (sizeof(SOCKADDR_STORAGE) + 16)];
 } cv_sock_op;
 
@@ -855,6 +865,7 @@ typedef struct cv_sock_op {
 #define CV_PIPE_KEY ((ULONG_PTR)2)
 #define CV_EXIT_KEY ((ULONG_PTR)3)
 #define CV_SOCK_KEY ((ULONG_PTR)4)
+#define CV_FILE_KEY ((ULONG_PTR)5)
 
 enum { IO_SOCKET, IO_PIPE, IO_HANDLE };
 
@@ -903,6 +914,7 @@ struct cv_driver {
     HANDLE port;
     HANDLE afd;
     int overlapped; // CV_OVL_* bits: what this runtime does with overlapped requests
+    _Atomic uint64_t ovl_counts[CV_OVL_KINDS]; // requests finished, by kind
     cv_driver_stats stats;
     OVERLAPPED_ENTRY events[CV_MAX_EVENTS];
     uintptr_t wakes[2 * CV_MAX_EVENTS];
@@ -940,11 +952,9 @@ cv_driver *cv_driver_new(void) {
     // Waits time out on the system tick, 15.6 ms by default: too coarse for
     // timers. 1 ms while a runtime exists (per process since Windows 10 2004).
     timeBeginPeriod(1);
-    // sendFile's TransmitFile always; accepts and reads by readiness unless
-    // VEGA_DRIVER=overlapped (see docs/PLAN.md for why).
-    d->overlapped = 1 << CV_OVL_TRANSMIT;
-    const char *mode = getenv("VEGA_DRIVER");
-    if (mode && strcmp(mode, "overlapped") == 0) d->overlapped |= (1 << CV_OVL_ACCEPT) | (1 << CV_OVL_RECV);
+    // Everything overlapped (the iocp backend); the runtime narrows it to
+    // sendFile's TransmitFile alone for the readiness backend.
+    d->overlapped = CV_OVL_ALL;
     return d;
 fail:
     if (d->afd) CloseHandle(d->afd);
@@ -963,8 +973,11 @@ static void release_pending(cv_driver *d) {
     }
 }
 
+static void twins_drop_driver(cv_driver *d);
+
 void cv_driver_free(cv_driver *d) {
     if (!d) return;
+    twins_drop_driver(d);
     release_pending(d);
     CloseHandle(d->afd);
     CloseHandle(d->port);
@@ -1081,8 +1094,9 @@ void cv_driver_want(cv_io *raw, int dir) {
 // waiter with the request's result, not with "ready".
 
 static LPFN_ACCEPTEX accept_ex;
+static LPFN_CONNECTEX connect_ex;
 static LPFN_TRANSMITFILE transmit_file;
-static _Atomic uint64_t ovl_counts[3];
+static _Atomic uint64_t ovl_counts[CV_OVL_KINDS];
 
 static BOOL CALLBACK load_extensions(PINIT_ONCE once, PVOID param, PVOID *ctx) {
     (void)once, (void)param, (void)ctx;
@@ -1092,14 +1106,16 @@ static BOOL CALLBACK load_extensions(PINIT_ONCE once, PVOID param, PVOID *ctx) {
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) return FALSE;
-    GUID accept_id = WSAID_ACCEPTEX, transmit_id = WSAID_TRANSMITFILE;
+    GUID accept_id = WSAID_ACCEPTEX, connect_id = WSAID_CONNECTEX, transmit_id = WSAID_TRANSMITFILE;
     DWORD bytes = 0;
     int a = WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, &accept_id, sizeof accept_id, &accept_ex,
                      sizeof accept_ex, &bytes, NULL, NULL);
+    int c = WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, &connect_id, sizeof connect_id, &connect_ex,
+                     sizeof connect_ex, &bytes, NULL, NULL);
     int t = WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, &transmit_id, sizeof transmit_id, &transmit_file,
                      sizeof transmit_file, &bytes, NULL, NULL);
     closesocket(s);
-    return a == 0 && t == 0;
+    return a == 0 && c == 0 && t == 0;
 }
 
 // Ready the socket for overlapped requests: 0 or an errno value.
@@ -1132,14 +1148,34 @@ static int sock_prepare(cv_io_win *io) {
 // socket), or -errno. The socket must still be open.
 static int64_t sock_result(cv_io_win *io, cv_sock_op *op) {
     DWORD bytes = 0, flags = 0;
-    int64_t r = WSAGetOverlappedResult((SOCKET)(intptr_t)io->io.fd, &op->ov, &bytes, FALSE, &flags)
-                    ? (int64_t)bytes
-                    : -(int64_t)cv_win_errno((unsigned long)WSAGetLastError());
+    SOCKET s = (SOCKET)(intptr_t)io->io.fd;
+    int64_t r;
+    if (WSAGetOverlappedResult(s, &op->ov, &bytes, FALSE, &flags)) {
+        r = (int64_t)bytes;
+    } else {
+        int e = WSAGetLastError();
+        // A datagram longer than the buffer: the buffer is full, and the
+        // rest is dropped, as recvfrom reports it.
+        r = op->kind == CV_OVL_RECVFROM && (e == WSAEMSGSIZE || e == ERROR_MORE_DATA)
+                ? (int64_t)op->len
+                : -(int64_t)cv_win_errno((unsigned long)e);
+    }
     atomic_fetch_add_explicit(&ovl_counts[op->kind], 1, memory_order_relaxed);
-    if (op->kind == CV_OVL_ACCEPT) {
+    atomic_fetch_add_explicit(&io->driver->ovl_counts[op->kind], 1, memory_order_relaxed);
+    switch (op->kind) {
+    case CV_OVL_ACCEPT:
         if (r >= 0) r = (int64_t)(intptr_t)op->accepted;
         else closesocket(op->accepted);
         op->accepted = INVALID_SOCKET;
+        break;
+    case CV_OVL_CONNECT:
+        // Until then the socket has none of a connected one's properties:
+        // getpeername, shutdown and the rest fail on it.
+        if (r >= 0)
+            r = setsockopt(s, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0) == 0
+                    ? 0
+                    : -(int64_t)cv_win_errno((unsigned long)WSAGetLastError());
+        break;
     }
     return r;
 }
@@ -1161,6 +1197,10 @@ static int sock_end(cv_io_win *io, cv_sock_op *op, BOOL ok, int64_t *res) {
     } else {
         int e = WSAGetLastError();
         if (e == WSA_IO_PENDING) return 1;
+        // A datagram cut short at once: STATUS_BUFFER_OVERFLOW underneath, a
+        // warning, which is neither an error (that posts nothing) nor a
+        // success (that skips the port): its completion comes.
+        if (op->kind == CV_OVL_RECVFROM && e == WSAEMSGSIZE) return 1;
         *res = -(int64_t)cv_win_errno((unsigned long)e);
         if (op->kind == CV_OVL_ACCEPT) {
             closesocket(op->accepted);
@@ -1195,9 +1235,15 @@ int cv_ovl_enabled(cv_io *raw, int kind) {
     return io->kind == IO_SOCKET && (io->driver->overlapped & (1 << kind)) != 0;
 }
 
+int cv_driver_overlapped(cv_driver *d, int kind) { return (d->overlapped & (1 << kind)) != 0; }
+
 void cv_driver_set_overlapped(cv_driver *d, int kinds) { d->overlapped = kinds; }
 
 uint64_t cv_ovl_count(int kind) { return atomic_load_explicit(&ovl_counts[kind], memory_order_relaxed); }
+
+uint64_t cv_driver_ovl_count(cv_driver *d, int kind) {
+    return atomic_load_explicit(&d->ovl_counts[kind], memory_order_relaxed);
+}
 
 int64_t *cv_driver_results(cv_driver *d) { return d->results; }
 
@@ -1234,6 +1280,111 @@ int cv_ovl_recv(cv_io *raw, uintptr_t waiter, void *buf, intptr_t len, int64_t *
     return sock_end(io, op, rc == 0, res);
 }
 
+int cv_ovl_send(cv_io *raw, uintptr_t waiter, const cv_iovec *iov, int count, int64_t *res) {
+    cv_io_win *io = (cv_io_win *)raw;
+    int e = sock_prepare(io);
+    if (e) {
+        *res = -(int64_t)e;
+        return 0;
+    }
+    WSABUF b[64]; // copied by the call
+    DWORD n = 0;
+    for (int i = 0; i < count && n < 64; i++) {
+        if (iov[i].len == 0) continue;
+        b[n].buf = (CHAR *)iov[i].base;
+        b[n].len = iov[i].len > INT_MAX ? INT_MAX : (ULONG)iov[i].len;
+        n++;
+    }
+    cv_sock_op *op = &io->sock[CV_IO_WRITE];
+    DWORD bytes = 0;
+    sock_begin(io, op, waiter, CV_OVL_SEND);
+    int rc = WSASend((SOCKET)(intptr_t)raw->fd, b, n, &bytes, 0, &op->ov, NULL);
+    return sock_end(io, op, rc == 0, res);
+}
+
+int cv_ovl_recvfrom(cv_io *raw, uintptr_t waiter, void *buf, intptr_t len, int64_t *res) {
+    cv_io_win *io = (cv_io_win *)raw;
+    int e = sock_prepare(io);
+    if (e) {
+        *res = -(int64_t)e;
+        return 0;
+    }
+    cv_sock_op *op = &io->sock[CV_IO_READ];
+    WSABUF b = {len > INT_MAX ? INT_MAX : (ULONG)len, buf};
+    DWORD bytes = 0, flags = 0;
+    sock_begin(io, op, waiter, CV_OVL_RECVFROM);
+    op->len = b.len;
+    op->addrlen = sizeof(SOCKADDR_STORAGE);
+    // The sender and its length are written when the datagram comes: they
+    // live in the request, not on this stack.
+    int rc = WSARecvFrom((SOCKET)(intptr_t)raw->fd, &b, 1, &bytes, &flags, (struct sockaddr *)op->addrs,
+                         &op->addrlen, &op->ov, NULL);
+    return sock_end(io, op, rc == 0, res);
+}
+
+void cv_ovl_sender(cv_io *raw, cv_sockaddr *out) {
+    cv_sock_op *op = &((cv_io_win *)raw)->sock[CV_IO_READ];
+    memset(out, 0, sizeof *out);
+    memcpy(out->storage, op->addrs, (size_t)op->addrlen);
+    out->len = (uint32_t)op->addrlen;
+}
+
+int cv_ovl_sendto(cv_io *raw, uintptr_t waiter, const void *buf, intptr_t len, const cv_sockaddr *to,
+                  int64_t *res) {
+    cv_io_win *io = (cv_io_win *)raw;
+    int e = sock_prepare(io);
+    if (e) {
+        *res = -(int64_t)e;
+        return 0;
+    }
+    cv_sock_op *op = &io->sock[CV_IO_WRITE];
+    WSABUF b = {len > INT_MAX ? INT_MAX : (ULONG)len, (CHAR *)buf};
+    DWORD bytes = 0;
+    sock_begin(io, op, waiter, CV_OVL_SENDTO);
+    int rc;
+    if (to) {
+        memcpy(op->addrs, to->storage, to->len);
+        rc = WSASendTo((SOCKET)(intptr_t)raw->fd, &b, 1, &bytes, 0, (const struct sockaddr *)op->addrs,
+                       (int)to->len, &op->ov, NULL);
+    } else {
+        rc = WSASend((SOCKET)(intptr_t)raw->fd, &b, 1, &bytes, 0, &op->ov, NULL);
+    }
+    return sock_end(io, op, rc == 0, res);
+}
+
+int cv_ovl_connect(cv_io *raw, uintptr_t waiter, const cv_sockaddr *addr, int64_t *res) {
+    cv_io_win *io = (cv_io_win *)raw;
+    SOCKET s = (SOCKET)(intptr_t)raw->fd;
+    int e = sock_prepare(io);
+    if (!e) {
+        // ConnectEx wants a bound socket: the wildcard address, any port.
+        // An explicit bind would pick the port now, one no other
+        // destination may share, and under heavy churn run them out
+        // (WSAEADDRINUSE); SO_REUSE_UNICASTPORT leaves the choice to the
+        // connect, as connect(2) on an unbound socket makes it.
+#ifndef SO_REUSE_UNICASTPORT
+#define SO_REUSE_UNICASTPORT 0x3007
+#endif
+        DWORD reuse = 1;
+        setsockopt(s, SOL_SOCKET, SO_REUSE_UNICASTPORT, (const char *)&reuse, sizeof reuse);
+        SOCKADDR_STORAGE any = {0};
+        int family = ((const struct sockaddr *)addr->storage)->sa_family;
+        any.ss_family = (ADDRESS_FAMILY)family;
+        int len = family == AF_INET6 ? (int)sizeof(struct sockaddr_in6) : (int)sizeof(struct sockaddr_in);
+        if (bind(s, (struct sockaddr *)&any, len) != 0 && WSAGetLastError() != WSAEINVAL) // (bound already)
+            e = cv_win_errno((unsigned long)WSAGetLastError());
+    }
+    if (e) {
+        *res = -(int64_t)e;
+        return 0;
+    }
+    cv_sock_op *op = &io->sock[CV_IO_WRITE];
+    sock_begin(io, op, waiter, CV_OVL_CONNECT);
+    memcpy(op->addrs, addr->storage, addr->len);
+    BOOL ok = connect_ex(s, (const struct sockaddr *)op->addrs, (int)addr->len, NULL, 0, NULL, &op->ov);
+    return sock_end(io, op, ok, res);
+}
+
 int cv_ovl_accept(cv_io *raw, uintptr_t waiter, int64_t *res) {
     cv_io_win *io = (cv_io_win *)raw;
     SOCKET listener = (SOCKET)(intptr_t)raw->fd;
@@ -1246,7 +1397,8 @@ int cv_ovl_accept(cv_io *raw, uintptr_t waiter, int64_t *res) {
     }
     SOCKET a = INVALID_SOCKET;
     if (!e) {
-        a = WSASocketW(io->family, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+        a = WSASocketW(io->family, SOCK_STREAM, io->family == AF_UNIX ? 0 : IPPROTO_TCP, NULL, 0,
+                       WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
         if (a == INVALID_SOCKET) e = cv_win_errno((unsigned long)WSAGetLastError());
     }
     if (e) {
@@ -1267,6 +1419,219 @@ void cv_ovl_cancel(cv_io *raw, int dir) {
     // ERROR_NOT_FOUND if it finished first: harmless.
     if (atomic_load_explicit(&io->state, memory_order_acquire) & bit)
         CancelIoEx((HANDLE)(intptr_t)raw->fd, &io->sock[dir].ov);
+}
+
+// ---- overlapped file reads and writes (VegaFS) -----------------------------
+// A file keeps its synchronous handle: it may be given to a child process,
+// whose C runtime can't use an overlapped one. Its overlapped requests go
+// through a second handle to the same file (ReOpenFile, FILE_FLAG_OVERLAPPED),
+// its twin, made on the first request and associated with that runtime's
+// port; cv_file_close closes it. The twins are found by the first handle's
+// value. A file another runtime's port has, or one that is no disk file or
+// can't be opened again, gets nothing here: its caller uses the blocking
+// pool. Every request names its offset, so the twin's own position is never
+// used; a request at "the position" reads the first handle's, and moves it
+// on by the bytes done once the request is over.
+
+typedef struct cv_twin {
+    HANDLE file, twin; // twin: NULL when the file can't have one
+    cv_driver *driver;
+    int append;        // opened to append: writes go to the end
+    struct cv_twin *next;
+} cv_twin;
+
+#define TWIN_BUCKETS 256
+static cv_twin *twins[TWIN_BUCKETS];
+static SRWLOCK twins_lock = SRWLOCK_INIT;
+
+static unsigned twin_bucket(HANDLE h) { return (unsigned)(((uintptr_t)h >> 2) % TWIN_BUCKETS); }
+
+typedef struct {
+    ULONG Attributes;
+    ACCESS_MASK GrantedAccess;
+    ULONG HandleCount;
+    ULONG PointerCount;
+    ULONG Reserved[10];
+} cv_object_basic_information;
+
+// A new entry for `file` on `d`: its twin, or none.
+static cv_twin *twin_make(cv_driver *d, HANDLE file) {
+    cv_twin *t = calloc(1, sizeof *t);
+    if (!t) return NULL;
+    t->file = file;
+    t->driver = d;
+    cv_object_basic_information info;
+    ULONG got = 0;
+    if (!nt_query_object || GetFileType(file) != FILE_TYPE_DISK ||
+        nt_query_object(file, 0, &info, sizeof info, &got) != 0)
+        return t;
+    // What the first handle was opened for, and no more.
+    DWORD access = info.GrantedAccess & (FILE_READ_DATA | FILE_WRITE_DATA | FILE_APPEND_DATA | SYNCHRONIZE);
+    if (!(access & (FILE_READ_DATA | FILE_WRITE_DATA | FILE_APPEND_DATA))) return t;
+    t->append = (access & FILE_APPEND_DATA) && !(access & FILE_WRITE_DATA);
+    HANDLE twin = ReOpenFile(file, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             FILE_FLAG_OVERLAPPED);
+    if (twin == INVALID_HANDLE_VALUE) return t;
+    if (!CreateIoCompletionPort(twin, d->port, CV_FILE_KEY, 0)) {
+        CloseHandle(twin);
+        return t;
+    }
+    // A request done at once (a read from the cache, usually) posts nothing.
+    SetFileCompletionNotificationModes(twin, FILE_SKIP_COMPLETION_PORT_ON_SUCCESS | FILE_SKIP_SET_EVENT_ON_HANDLE);
+    t->twin = twin;
+    return t;
+}
+
+// The twin `file` has on `d`'s port, or NULL: no request here.
+static HANDLE twin_for(cv_driver *d, HANDLE file, int *append) {
+    unsigned b = twin_bucket(file);
+    AcquireSRWLockShared(&twins_lock);
+    cv_twin *t = twins[b];
+    while (t && t->file != file) t = t->next;
+    HANDLE twin = t && t->driver == d ? t->twin : NULL;
+    if (t) *append = t->append;
+    ReleaseSRWLockShared(&twins_lock);
+    if (t) return twin;
+    AcquireSRWLockExclusive(&twins_lock);
+    for (t = twins[b]; t && t->file != file; t = t->next) {}
+    if (!t && (t = twin_make(d, file))) {
+        t->next = twins[b];
+        twins[b] = t;
+    }
+    twin = t && t->driver == d ? t->twin : NULL;
+    if (t) *append = t->append;
+    ReleaseSRWLockExclusive(&twins_lock);
+    return twin;
+}
+
+void cv_file_forget(int fd) {
+    HANDLE file = (HANDLE)(intptr_t)fd;
+    unsigned b = twin_bucket(file);
+    AcquireSRWLockExclusive(&twins_lock);
+    cv_twin **p = &twins[b];
+    while (*p && (*p)->file != file) p = &(*p)->next;
+    cv_twin *t = *p;
+    if (t) *p = t->next;
+    ReleaseSRWLockExclusive(&twins_lock);
+    if (!t) return;
+    if (t->twin) CloseHandle(t->twin);
+    free(t);
+}
+
+static void twins_drop_driver(cv_driver *d) {
+    AcquireSRWLockExclusive(&twins_lock);
+    for (unsigned b = 0; b < TWIN_BUCKETS; b++) {
+        cv_twin **p = &twins[b];
+        while (*p) {
+            cv_twin *t = *p;
+            if (t->driver != d) {
+                p = &t->next;
+                continue;
+            }
+            *p = t->next;
+            if (t->twin) CloseHandle(t->twin);
+            free(t);
+        }
+    }
+    ReleaseSRWLockExclusive(&twins_lock);
+}
+
+typedef struct cv_file_op {
+    OVERLAPPED ov; // first: the completion's lpOverlapped points here
+    HANDLE file, twin;
+    uintptr_t waiter;  // the task's continuation, tagged CV_OVL_WAITER
+    int64_t at;        // where it went: the position, when `advance`
+    int advance;       // at the file's position: move it on by the bytes done
+    int kind;          // CV_OVL_FILE_READ or CV_OVL_FILE_WRITE
+} cv_file_op;
+
+static int64_t file_result(cv_file_op *op) {
+    DWORD bytes = 0;
+    if (GetOverlappedResult(op->twin, &op->ov, &bytes, FALSE)) return (int64_t)bytes;
+    DWORD e = GetLastError();
+    return e == ERROR_HANDLE_EOF ? 0 : -(int64_t)cv_win_errno(e);
+}
+
+static uintptr_t file_completed(cv_driver *d, OVERLAPPED_ENTRY *e, int64_t *res) {
+    cv_file_op *op = (cv_file_op *)(void *)e->lpOverlapped;
+    *res = file_result(op);
+    atomic_fetch_add_explicit(&ovl_counts[op->kind], 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&d->ovl_counts[op->kind], 1, memory_order_relaxed);
+    return op->waiter;
+}
+
+static int file_request(cv_driver *d, int kind, int fd, uintptr_t waiter, void *buf, intptr_t len, int64_t offset,
+                        int64_t *res, void **opp) {
+    *opp = NULL;
+    if (!(d->overlapped & (1 << kind))) return -1;
+    HANDLE file = (HANDLE)(intptr_t)fd;
+    int append = 0;
+    HANDLE twin = twin_for(d, file, &append);
+    if (!twin) return -1;
+    cv_file_op *op = calloc(1, sizeof *op);
+    if (!op) return -1;
+    op->file = file;
+    op->twin = twin;
+    op->kind = kind;
+    op->waiter = waiter | CV_OVL_WAITER;
+    if (kind == CV_OVL_FILE_WRITE && append) {
+        op->ov.Offset = op->ov.OffsetHigh = 0xffffffff; // the end, whatever it is then
+    } else {
+        int64_t at = offset;
+        if (at < 0) {
+            LARGE_INTEGER zero = {0}, pos;
+            if (!SetFilePointerEx(file, zero, &pos, FILE_CURRENT)) {
+                *res = -(int64_t)cv_win_errno(GetLastError());
+                free(op);
+                return 0;
+            }
+            at = pos.QuadPart;
+            op->advance = 1;
+        }
+        op->at = at;
+        op->ov.Offset = (DWORD)at;
+        op->ov.OffsetHigh = (DWORD)((uint64_t)at >> 32);
+    }
+    DWORD want = len > 0x7ffff000 ? 0x7ffff000 : (DWORD)len;
+    BOOL ok = kind == CV_OVL_FILE_READ ? ReadFile(twin, buf, want, NULL, &op->ov)
+                                       : WriteFile(twin, buf, want, NULL, &op->ov);
+    if (!ok && GetLastError() == ERROR_IO_PENDING) {
+        *opp = op;
+        return 1;
+    }
+    // Done at once (nothing posted), or failed (nothing posted either).
+    *res = ok ? file_result(op) : GetLastError() == ERROR_HANDLE_EOF ? 0 : -(int64_t)cv_win_errno(GetLastError());
+    if (ok) {
+        atomic_fetch_add_explicit(&ovl_counts[kind], 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&d->ovl_counts[kind], 1, memory_order_relaxed);
+    }
+    cv_ovl_file_finish(op, *res);
+    return 0;
+}
+
+int cv_ovl_file_read(cv_driver *d, int fd, uintptr_t waiter, void *buf, intptr_t len, int64_t offset,
+                     int64_t *res, void **op) {
+    return file_request(d, CV_OVL_FILE_READ, fd, waiter, buf, len, offset, res, op);
+}
+
+int cv_ovl_file_write(cv_driver *d, int fd, uintptr_t waiter, const void *buf, intptr_t len, int64_t offset,
+                      int64_t *res, void **op) {
+    return file_request(d, CV_OVL_FILE_WRITE, fd, waiter, (void *)buf, len, offset, res, op);
+}
+
+void cv_ovl_file_cancel(void *raw) {
+    cv_file_op *op = raw;
+    CancelIoEx(op->twin, &op->ov); // ERROR_NOT_FOUND if it finished first: harmless
+}
+
+void cv_ovl_file_finish(void *raw, int64_t res) {
+    cv_file_op *op = raw;
+    if (op->advance && res > 0) {
+        LARGE_INTEGER to;
+        to.QuadPart = op->at + res;
+        SetFilePointerEx(op->file, to, NULL, FILE_BEGIN);
+    }
+    free(op);
 }
 
 static int pipe_broken(DWORD e) {
@@ -1453,6 +1818,11 @@ int cv_driver_turn(cv_driver *d, cv_parker *p, int64_t timeout_ns) {
         if (e->lpCompletionKey == CV_WAKE_KEY || !e->lpOverlapped) continue; // a wake
         if (e->lpCompletionKey == CV_SOCK_KEY) {
             d->wakes[woken] = sock_completed(e, &d->results[woken]);
+            woken++;
+            continue;
+        }
+        if (e->lpCompletionKey == CV_FILE_KEY) {
+            d->wakes[woken] = file_completed(d, e, &d->results[woken]);
             woken++;
             continue;
         }

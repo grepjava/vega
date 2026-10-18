@@ -215,6 +215,22 @@ struct IORegistration: @unchecked Sendable {
 }
 
 #if os(Windows)
+extension IODriver {
+    /// Whether `backend` (with `VEGA_DRIVER` for the rest) asks for
+    /// overlapped requests: everything but `.readiness`, unless
+    /// `VEGA_DRIVER=afd` (or `readiness`).
+    static func wantsIOCP(_ backend: IOBackend) -> Bool {
+        switch backend {
+        case .readiness: return false
+        case .iocp: return true
+        case .automatic, .ioUring, .network:
+            guard let v = getenv("VEGA_DRIVER") else { return true }
+            let mode = String(cString: v)
+            return mode != "afd" && mode != "readiness"
+        }
+    }
+}
+
 extension IORegistration {
     /// Whether this runtime does `kind` (`CV_OVL_*`) as overlapped requests.
     @inline(__always) func overlapped(_ kind: Int32) -> Bool { cv_ovl_enabled(io, kind) != 0 }

@@ -15,6 +15,8 @@ enum IOInterrupt {
     /// An overlapped request: cancel it (CancelIoEx); it completes with
     /// -ECANCELED unless it completed first.
     case overlapped(UnsafeMutablePointer<cv_io>, Int32)
+    /// An overlapped file request (`cv_ovl_file_read`, `_write`): the same.
+    case file(UnsafeMutableRawPointer)
     #endif
     /// A readiness wait: take the waiter out of the direction's slot and
     /// resume it with false, unless the driver took it first.
@@ -32,6 +34,8 @@ enum IOInterrupt {
         #if os(Windows)
         case let .overlapped(io, direction):
             cv_ovl_cancel(io, direction)
+        case let .file(op):
+            cv_ovl_file_cancel(op)
         #endif
         case let .readiness(io, direction):
             let waiter = cv_io_take_waiter(io, direction)
@@ -59,7 +63,7 @@ class IOInterruptTarget: @unchecked Sendable {
 @usableFromInline
 class IOInterruptSlot: @unchecked Sendable {
     private static let idle: UInt8 = 0, armed: UInt8 = 1, firing: UInt8 = 2, fired: UInt8 = 3
-    private static let uring: UInt8 = 0, readiness: UInt8 = 1, object: UInt8 = 2, overlapped: UInt8 = 3
+    private static let uring: UInt8 = 0, readiness: UInt8 = 1, object: UInt8 = 2, overlapped: UInt8 = 3, file: UInt8 = 4
 
     private let state = Atomic<UInt8>(IOInterruptSlot.idle)
     private let kind = Atomic<UInt8>(0)
@@ -94,6 +98,9 @@ class IOInterruptSlot: @unchecked Sendable {
             kind.store(Self.overlapped, ordering: .relaxed)
             a.store(UInt(bitPattern: io), ordering: .relaxed)
             b.store(UInt64(UInt32(bitPattern: direction)), ordering: .relaxed)
+        case let .file(op):
+            kind.store(Self.file, ordering: .relaxed)
+            a.store(UInt(bitPattern: op), ordering: .relaxed)
         #endif
         case let .readiness(io, direction):
             kind.store(Self.readiness, ordering: .relaxed)
@@ -149,6 +156,8 @@ class IOInterruptSlot: @unchecked Sendable {
         case Self.overlapped:
             return .overlapped(UnsafeMutablePointer(bitPattern: a).unsafelyUnwrapped,
                                Int32(bitPattern: UInt32(truncatingIfNeeded: b.load(ordering: .relaxed))))
+        case Self.file:
+            return .file(UnsafeMutableRawPointer(bitPattern: a).unsafelyUnwrapped)
         #endif
         case Self.readiness:
             return .readiness(UnsafeMutablePointer(bitPattern: a).unsafelyUnwrapped,
