@@ -102,7 +102,7 @@ let server = try TCPServer.bind(port: 8080) { stream in
         // The peer went away, or sent a line over the codec's limit.
     }
 }
-await server.waitForShutdown()
+try await server.waitForShutdown()
 ```
 
 - Call `TCPServer.bind` from a task on the runtime. Each connection runs the handler in its own task, and the connection closes when the handler returns.

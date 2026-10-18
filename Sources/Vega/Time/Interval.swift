@@ -50,15 +50,16 @@ public struct Interval: Sendable {
         deadline = now &+ UInt64(clamping: Scheduler.nanoseconds(delay))
     }
 
-    /// Wait for the next tick and return when it was scheduled for.
+    /// Wait for the next tick and return when it was scheduled for. Throws
+    /// `CancellationError` if the task is cancelled first.
     @discardableResult
-    public mutating func tick() async throws -> ContinuousClock.Instant {
+    public mutating func tick() async throws(CancellationError) -> ContinuousClock.Instant {
         let scheduled = deadline
         let now = Runtime.nowNanos
         if scheduled > now {
             try await Runtime.sleep(untilNanos: scheduled, now: now)
-        } else {
-            try Task.checkCancellation()
+        } else if Task.isCancelled {
+            throw CancellationError()
         }
         let after = Runtime.nowNanos
         deadline = after > scheduled + Self.missedAfter ? next(after: scheduled, now: after) : scheduled + periodNanos

@@ -22,7 +22,7 @@ private func interleaving(_ rt: Runtime) async -> [Int] {
             }
         }
     }
-    while await set.next() != nil {}
+    while (try? await set.next()) != nil {}
     return log.all
 }
 
@@ -57,7 +57,7 @@ struct SeededRuntimeTests {
                     shared.value = v + 1
                 }
             }
-            while await set.next() != nil {}
+            while (try? await set.next()) != nil {}
             if shared.value != 2 { throw LostUpdate() }
         }
         var failingSeed: UInt64?
@@ -86,7 +86,7 @@ struct SeededRuntimeTests {
                     log.add(id)
                 }
             }
-            while await set.next() != nil {}
+            while (try? await set.next()) != nil {}
             return log.all
         }
         #expect(order.allSatisfy { $0 == [2, 3, 1] })

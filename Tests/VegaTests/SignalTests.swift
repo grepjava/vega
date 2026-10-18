@@ -63,7 +63,7 @@ private func next(_ stream: SignalStream, within ms: Int = 2_000) async -> Int32
             for _ in 0..<3 { deliver(SIGURG) }
             // Give the handler and the dispatcher a moment.
             try? await Runtime.sleep(for: .milliseconds(20))
-            let first = await stream.recv()
+            let first = (try? await stream.recv()) != nil
             let again = stream
             return (first, await next(again, within: 200) != nil)
         }

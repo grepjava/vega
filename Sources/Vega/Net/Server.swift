@@ -187,15 +187,17 @@ public final class TCPServer: Sendable {
     /// ride out.
     public var acceptError: IOError? { state.value.acceptError }
 
-    /// Return once `shutdown` begins (or the task is cancelled).
-    public func waitForShutdown() async {
-        await shutdownToken.wait()
+    /// Return once `shutdown` begins; throws `CancellationError` if the task
+    /// is cancelled first.
+    public func waitForShutdown() async throws(CancellationError) {
+        try await shutdownToken.wait()
     }
 
     /// Return once the server has stopped: no accept loop running (after
-    /// `shutdown`, or an accept error) and no connection open.
-    public func wait() async {
-        await waitUntil { $0.acceptorsRunning == 0 && $0.connections.isEmpty }
+    /// `shutdown`, or an accept error) and no connection open. Throws
+    /// `CancellationError` if the task is cancelled first.
+    public func wait() async throws(CancellationError) {
+        try await waitUntil { $0.acceptorsRunning == 0 && $0.connections.isEmpty }
     }
 
     /// Stop accepting, give open connections up to `gracePeriod` to finish,
@@ -204,7 +206,7 @@ public final class TCPServer: Sendable {
         stopAccepting()
         if gracePeriod > .zero {
             _ = try? await Runtime.timeout(for: gracePeriod) { [self] in
-                await waitUntil { $0.connections.isEmpty }
+                try? await waitUntil { $0.connections.isEmpty }
             }
         }
         var running: [Task<Void, Never>] = []
@@ -213,7 +215,9 @@ public final class TCPServer: Sendable {
             for case .running(let task) in s.connections.values { running.append(task) }
         }
         for task in running { task.cancel() }
-        await wait()
+        // A cancelled caller stops waiting; the connections are cancelled
+        // already and end on their own.
+        try? await wait()
     }
 
     private func stopAccepting() {
@@ -223,13 +227,14 @@ public final class TCPServer: Sendable {
         for task in acceptors { task.cancel() }
     }
 
-    private func waitUntil(_ done: (State) -> Bool) async {
+    private func waitUntil(_ done: (State) -> Bool) async throws(CancellationError) {
         var r = state.subscribe()
         while !done(r.value) {
             do {
                 try await r.changed()
             } catch {
-                return
+                // The server holds the sender: only cancellation gets here.
+                throw CancellationError()
             }
         }
     }

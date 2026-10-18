@@ -57,9 +57,9 @@ func serve(port: Int) -> Never {
                 let server = try TCPServer.serve(try shard.listener()) { await answer($0, index) }
                 shard.runtime.spawn {
                     var terms = terms
-                    while await terms.recv() { note("term \(index)") }
+                    while (try? await terms.recv()) != nil { note("term \(index)") }
                 }
-                _ = await ints.recv()
+                try? await ints.recv()
                 note("int \(index)")
                 await server.shutdown(gracePeriod: .seconds(1))
             }

@@ -63,7 +63,8 @@ public final class Quiesce: Sendable {
                     if await it.next() != nil { token.trigger() }
                 }
             }
-            await token.wait()
+            // Cancelled, it shuts everything down all the same.
+            try? await token.wait()
             group.cancelAll()
         }
         let all = shutdowns.withLock { $0 }

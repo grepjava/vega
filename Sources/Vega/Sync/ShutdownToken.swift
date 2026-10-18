@@ -49,14 +49,17 @@ public final class ShutdownToken: Sendable {
         triggered.send(true)
     }
 
-    /// Return once triggered (or the calling task is cancelled).
-    public func wait() async {
+    /// Return once triggered; throws `CancellationError` if the calling
+    /// task is cancelled first.
+    public func wait() async throws(CancellationError) {
         var r = triggered.subscribe()
         while !r.value {
             do {
                 try await r.changed()
             } catch {
-                return
+                // The token holds its sender, so the channel never closes:
+                // only cancellation ends the wait.
+                throw CancellationError()
             }
         }
     }

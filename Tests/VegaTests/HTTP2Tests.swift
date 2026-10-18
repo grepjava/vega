@@ -342,7 +342,7 @@ private func get(_ path: String) -> HTTPRequest {
             let (slow, late) = try await HTTP2Client.withConnection(reader: halves.reader, writer: halves.writer,
                                                                     scheme: "http", authority: "x") { client in
                 let first = rt.spawn { try await client.send(get("/slow")).text }
-                await entered.notified()
+                try? await entered.notified()
                 signal.trigger()
                 // Served until the loop hears of the trigger, then refused, by
                 // GOAWAY or (if sent before it arrived) RST_STREAM.

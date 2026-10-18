@@ -61,7 +61,7 @@ import Testing
         let outcome = try rt.block { () async throws -> String in
             let gate = Notify()
             let holder = rt.spawn {
-                try? await m.withLock { _ in await gate.notified() }
+                try? await m.withLock { _ in try? await gate.notified() }
             }
             try await Runtime.sleep(for: .milliseconds(10))
             let waiter = rt.spawn { () async -> String in
@@ -318,7 +318,7 @@ import Testing
         let signal = ShutdownToken()
         let (woke, cut, leftAlone, late) = try rt.block { () async throws -> (Bool, Bool, Bool, Bool) in
             let waiter = rt.spawn { () async -> Bool in
-                await signal.wait()
+                try? await signal.wait()
                 return signal.isTriggered
             }
             let sleeper = rt.spawn { () async -> Bool in

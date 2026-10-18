@@ -33,7 +33,7 @@ struct TaskLocalTests {
                 // JoinSet and LocalExecutor.
                 let set = JoinSet<String?, Never>(runtime: rt)
                 set.spawn { Trace.id }
-                seen.append(await set.nextValue()!)
+                seen.append((try? await set.nextValue())!)
                 seen.append(await LocalExecutor(runtime: rt).spawn { _ in Trace.id }.value)
                 return seen
             }

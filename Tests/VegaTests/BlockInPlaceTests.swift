@@ -42,7 +42,7 @@ struct BlockInPlaceTests {
             await rt.spawn {
                 let notify = Notify()
                 let waiter = rt.spawn {
-                    await notify.notified()
+                    try? await notify.notified()
                     ran.value.add(1, ordering: .relaxed)
                 }
                 try? await Runtime.sleep(for: .milliseconds(20))

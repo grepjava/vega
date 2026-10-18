@@ -44,12 +44,12 @@ public struct SignalStream: AsyncSequence, Sendable {
 
     public func makeAsyncIterator() -> Iterator { Iterator(signal: signal, seen: seen) }
 
-    /// Wait for the next delivery, as Tokio's `recv()`; false if the task was
-    /// cancelled first.
-    public mutating func recv() async -> Bool {
+    /// Wait for the next delivery, as Tokio's `recv()`. Throws
+    /// `CancellationError` if the task is cancelled first.
+    public mutating func recv() async throws(CancellationError) {
         var it = makeAsyncIterator()
         defer { seen = it.seen }
-        return await it.next() != nil
+        if await it.next() == nil { throw CancellationError() }
     }
 
     public struct Iterator: AsyncIteratorProtocol {

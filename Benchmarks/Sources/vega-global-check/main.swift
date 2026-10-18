@@ -90,7 +90,7 @@ enum Check {
             // being notified and is removing its handler.
             let racy = Notify()
             for _ in 0..<20 {
-                let waiters = (0..<1_000).map { _ in Task { await racy.notified() } }
+                let waiters = (0..<1_000).map { _ in Task { try? await racy.notified() } }
                 await withTaskGroup(of: Void.self) { g in
                     g.addTask { for w in waiters { w.cancel() } }
                     g.addTask { for _ in 0..<1_000 { racy.notifyOne() } }
@@ -102,8 +102,8 @@ enum Check {
             let notify = Notify(), back = Notify()
             let rounds = 100_000
             await withTaskGroup(of: Void.self) { g in
-                g.addTask { for _ in 0..<rounds { await notify.notified(); back.notifyOne() } }
-                g.addTask { for _ in 0..<rounds { notify.notifyOne(); await back.notified() } }
+                g.addTask { for _ in 0..<rounds { try? await notify.notified(); back.notifyOne() } }
+                g.addTask { for _ in 0..<rounds { notify.notifyOne(); try? await back.notified() } }
             }
 
             await withTaskGroup(of: Void.self) { g in

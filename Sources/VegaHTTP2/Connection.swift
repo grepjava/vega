@@ -47,8 +47,9 @@ public enum HTTP2Server {
             }
             if let shutdown {
                 group.addTask {
-                    await shutdown.wait() // returns early when the group is cancelled
-                    if shutdown.isTriggered { _ = await mailbox.post(.shutdown) }
+                    // Throws when the group is cancelled: the connection is over.
+                    guard (try? await shutdown.wait()) != nil else { return }
+                    _ = await mailbox.post(.shutdown)
                 }
             }
             let writer = writerBox.take()

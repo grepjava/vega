@@ -10,7 +10,7 @@ import CVega
 /// ```swift
 /// let set = JoinSet<Int, IOError>()
 /// for host in hosts { set.spawn { try await probe(host) } }
-/// while let result = await set.next() { ... }
+/// while let result = try await set.next() { ... }
 /// ```
 ///
 /// - `next()` serves one waiter at a time.
@@ -88,10 +88,10 @@ public final class JoinSet<Success: Sendable, Failure: Error>: @unchecked Sendab
     }
 
     /// The next result, in the order the tasks finish; nil when the set is
-    /// empty, or when the task waiting is cancelled (results not yet taken
-    /// stay in the set).
-    public func next() async -> Result<Success, Failure>? {
-        await withTaskCancellationHandler {
+    /// empty. Throws `CancellationError` if the waiting task is cancelled
+    /// first (results not yet taken stay in the set).
+    public func next() async throws(CancellationError) -> Result<Success, Failure>? {
+        let result = await withTaskCancellationHandler {
             await wait(cancellable: true)
         } onCancel: {
             let waiter = lock.withLock { () -> UnsafeContinuation<Result<Success, Failure>?, Never>? in
@@ -101,6 +101,9 @@ public final class JoinSet<Success: Sendable, Failure: Error>: @unchecked Sendab
             }
             waiter?.resume(returning: nil)
         }
+        // nil with tasks still in the set: the wait was cancelled.
+        if result == nil && Task.isCancelled && !isEmpty { throw CancellationError() }
+        return result
     }
 
     /// The next result, or nil once none are left -- or, when
@@ -122,8 +125,9 @@ public final class JoinSet<Success: Sendable, Failure: Error>: @unchecked Sendab
         return result
     }
 
-    /// The next result's value, rethrowing its error; nil as for `next()`.
-    public func nextValue() async throws(Failure) -> Success? {
+    /// The next result's value, rethrowing its error; nil when the set is
+    /// empty. Throws `CancellationError` as `next()` does.
+    public func nextValue() async throws -> Success? {
         try await next()?.get()
     }
 

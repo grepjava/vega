@@ -155,8 +155,8 @@ let yieldMany = Bench(name: "yield_many", ops: 100_000) { ex in
 let pingPongNotify = Bench(name: "ping_pong_notify", ops: 100_000) { ex in
     let a = Notify(), b = Notify()
     await withTaskGroup(of: Void.self) { g in
-        g.addTask(executorPreference: ex) { for _ in 0..<100_000 { await a.notified(); b.notifyOne() } }
-        g.addTask(executorPreference: ex) { for _ in 0..<100_000 { a.notifyOne(); await b.notified() } }
+        g.addTask(executorPreference: ex) { for _ in 0..<100_000 { try? await a.notified(); b.notifyOne() } }
+        g.addTask(executorPreference: ex) { for _ in 0..<100_000 { a.notifyOne(); try? await b.notified() } }
         await g.waitForAll()
     }
 }
@@ -196,7 +196,7 @@ let poolSpawn = Bench(name: "pool_spawn", ops: 100_000) { _ in
     for _ in 0..<100_000 {
         Shared.pool.spawn { if d.left.subtract(1, ordering: .acquiringAndReleasing).newValue == 0 { d.done.notifyOne() } }
     }
-    await d.done.notified()
+    try? await d.done.notified()
 }
 
 /// Carries a `~Copyable` value into a task closure, which can't capture one.

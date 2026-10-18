@@ -155,7 +155,7 @@ private func roundTrip(_ stream: borrowing TCPStream, _ text: String) async thro
             let cancelled = Atomic<Bool>(false)
             let holder = Box<TCPServer>()
             let server = try TCPServer.bind(host: "127.0.0.1", port: 0) { stream in
-                await holder.value!.waitForShutdown()
+                try? await holder.value!.waitForShutdown()
                 if Task.isCancelled { cancelled.store(true, ordering: .relaxed) }
                 try? await stream.write(bytes("bye"))
             }

@@ -238,7 +238,7 @@ public final class Runtime: Sendable {
     /// Off a Vega worker it falls back to `Task.sleep`.
     ///
     /// Timers have millisecond resolution and never fire early.
-    public static func sleep(for duration: Duration) async throws {
+    public static func sleep(for duration: Duration) async throws(CancellationError) {
         let now = nowNanos
         let ns = UInt64(clamping: Scheduler.nanoseconds(duration))
         try await sleep(untilNanos: ns > UInt64.max - now ? UInt64.max - 1 : now + ns, now: now)
@@ -246,7 +246,7 @@ public final class Runtime: Sendable {
 
     /// Suspend the calling task until `deadline`, on Vega's own timers. See
     /// `sleep(for:)`.
-    public static func sleep(until deadline: ContinuousClock.Instant) async throws {
+    public static func sleep(until deadline: ContinuousClock.Instant) async throws(CancellationError) {
         guard let s = Worker.currentScheduler else {
             try await sleep(for: ContinuousClock.now.duration(to: deadline))
             return
@@ -256,7 +256,17 @@ public final class Runtime: Sendable {
     }
 
     /// Sleep until `deadline`, a runtime-clock time.
-    static func sleep(untilNanos deadline: UInt64, now: UInt64) async throws {
+    /// Throws only `CancellationError`: what its continuation and
+    /// `Task.sleep` throw.
+    static func sleep(untilNanos deadline: UInt64, now: UInt64) async throws(CancellationError) {
+        do {
+            try await sleepUntyped(untilNanos: deadline, now: now)
+        } catch {
+            throw CancellationError()
+        }
+    }
+
+    private static func sleepUntyped(untilNanos deadline: UInt64, now: UInt64) async throws {
         guard let worker = Worker.current,
               let scheduler = worker._withUnsafeGuaranteedRef({ $0.scheduler }) else {
             try await Task.sleep(for: .nanoseconds(deadline > now ? Int64(clamping: deadline - now) : 0))

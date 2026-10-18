@@ -179,9 +179,9 @@ final class Counter: Sendable {
         let n = Notify()
         n.notifyOne()
         n.notifyOne() // coalesces with the first
-        rt.block { () async -> Void in await n.notified() }
+        rt.block { () async -> Void in try? await n.notified() }
         let second = Flag()
-        rt.spawn { await n.notified(); second.set() }
+        rt.spawn { try? await n.notified(); second.set() }
         spin(microseconds: 20_000)
         #expect(!second.isSet)
         n.notifyOne()
@@ -195,7 +195,7 @@ final class Counter: Sendable {
         let log = Log<Int>()
         let started = Counter()
         for i in 0..<3 {
-            rt.spawn { started.add(); await n.notified(); log.append(i) }
+            rt.spawn { started.add(); try? await n.notified(); log.append(i) }
             // Let each one queue up before the next, for a known order.
             while started.value <= i { spin(microseconds: 50) }
             spin(microseconds: 2_000)
@@ -208,28 +208,47 @@ final class Counter: Sendable {
         #expect(Set(log.all) == [0, 1, 2])
         // notifyWaiters stores no permit.
         let late = Flag()
-        rt.spawn { await n.notified(); late.set() }
+        rt.spawn { try? await n.notified(); late.set() }
         spin(microseconds: 20_000)
         #expect(!late.isSet)
         n.notifyOne()
     }
 
-    @Test func cancelledWaiterReturns() {
+    @Test func cancelledWaiterThrows() {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
         let n = Notify()
-        rt.block { () async -> Void in
-            let t = Task(executorPreference: rt.executor) { await n.notified() }
+        let (waiting, before) = rt.block { () async -> (Bool, Bool) in
+            func cancelled() async -> Bool {
+                do { try await n.notified() } catch { return true }
+                return false
+            }
+            let t = Task(executorPreference: rt.executor) { await cancelled() }
             try? await Runtime.sleep(for: .milliseconds(5))
             t.cancel()
-            await t.value
-            // Cancelled before waiting: returns at once.
-            let u = Task(executorPreference: rt.executor) {
+            // Cancelled before waiting: throws at once.
+            let u = Task(executorPreference: rt.executor) { () async -> Bool in
                 withUnsafeCurrentTask { $0?.cancel() }
-                await n.notified()
+                return await cancelled()
             }
-            await u.value
+            return (await t.value, await u.value)
         }
+        #expect(waiting)
+        #expect(before)
+    }
+
+    /// A notification that came before the cancellation is not lost to it.
+    @Test func notifiedThenCancelledReturns() {
+        let rt = Runtime(workers: 1)
+        defer { rt.shutdown() }
+        let n = Notify()
+        let threw = rt.block { () async -> Bool in
+            n.notifyOne()
+            withUnsafeCurrentTask { $0?.cancel() }
+            do { try await n.notified() } catch { return true }
+            return false
+        }
+        #expect(!threw)
     }
 
     @Test func notifyPingPong() {
@@ -240,10 +259,10 @@ final class Counter: Sendable {
         rt.block { () async -> Void in
             await withTaskGroup(of: Void.self) { g in
                 g.addTask(executorPreference: rt.executor) {
-                    for _ in 0..<rounds { await a.notified(); b.notifyOne() }
+                    for _ in 0..<rounds { try? await a.notified(); b.notifyOne() }
                 }
                 g.addTask(executorPreference: rt.executor) {
-                    for _ in 0..<rounds { a.notifyOne(); await b.notified() }
+                    for _ in 0..<rounds { a.notifyOne(); try? await b.notified() }
                 }
             }
         }
@@ -264,7 +283,7 @@ final class Counter: Sendable {
                     if count.add() == n { done.notifyOne() }
                 }
             }
-            await done.notified()
+            try? await done.notified()
         }
         #expect(count.value == n)
         #expect(pool.taskCount <= 4 * 64)
@@ -280,7 +299,7 @@ final class Counter: Sendable {
         for _ in 0..<8 {
             pool.spawn {
                 waiting.add()
-                await gate.notified()
+                try? await gate.notified()
                 waiting.add(-1)
             }
         }

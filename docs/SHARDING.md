@@ -31,7 +31,7 @@ Runtime.sharded(config) { shard in
             let server = try TCPServer.serve(try shard.listener()) { await handle($0) }
             // Drain on SIGTERM (a stop, or a SIGHUP reload), inside the
             // supervisor's grace period.
-            _ = await terminate.recv()
+            try? await terminate.recv()
             await server.shutdown(gracePeriod: .seconds(5))
         }
     } catch {

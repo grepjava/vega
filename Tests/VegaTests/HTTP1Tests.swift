@@ -483,7 +483,7 @@ private func encoded(_ body: (inout IOBuffer) throws -> Void) rethrows -> String
             #expect(first.head.fields["connection"] == nil)
 
             rt.spawn {
-                await entered.notified()
+                try? await entered.notified()
                 signal.trigger()
                 release.notifyOne()
             }

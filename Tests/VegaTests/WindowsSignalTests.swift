@@ -25,7 +25,7 @@ import Testing
             #expect(cv_signal_raise(21) == 0)
             #expect(cv_signal_raise(21) == 0)
             var s = stream
-            _ = await s.recv()
+            try await s.recv()
             return [first, s.signal]
         }
         #expect(got == [21, 21])

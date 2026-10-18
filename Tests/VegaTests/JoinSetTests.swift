@@ -23,7 +23,7 @@ struct JoinSetTests {
             }
             #expect(set.count == 3)
             var order: [Int] = []
-            while let r = await set.next() { order.append(r.get()) }
+            while let r = try? await set.next() { order.append(r.get()) }
             #expect(set.isEmpty)
             return order
         }
@@ -42,7 +42,7 @@ struct JoinSetTests {
                 }
             }
             var values: [Int] = [], errors: [Failed] = []
-            while let r = await set.next() {
+            while let r = try? await set.next() {
                 switch r {
                 case .success(let v): values.append(v)
                 case .failure(let e): errors.append(e)
@@ -58,7 +58,7 @@ struct JoinSetTests {
         let rt = Runtime(workers: 1)
         defer { rt.shutdown() }
         let empty = rt.block { () async -> Bool in
-            await JoinSet<Int, Never>().next() == nil
+            (try? await JoinSet<Int, Never>().next()) == nil
         }
         #expect(empty)
     }
@@ -72,7 +72,7 @@ struct JoinSetTests {
             let set = JoinSet<Int, Never>(runtime: rt)
             for n in 1...10_000 { set.spawn { n } }
             var sum = 0
-            while let v = await set.nextValue() { sum += v }
+            while let v = try? await set.nextValue() { sum += v }
             return sum
         }
         #expect(sum == 10_000 * 10_001 / 2)
@@ -92,7 +92,7 @@ struct JoinSetTests {
             set.cancelAll()
             set.spawn { Task.isCancelled }
             var all: [Bool] = []
-            while let v = await set.nextValue() { all.append(v) }
+            while let v = try? await set.nextValue() { all.append(v) }
             return all
         }
         #expect(cancelled == [true, true, true, true, true])
@@ -113,7 +113,7 @@ struct JoinSetTests {
             await set.shutdown()
             let empty = set.isEmpty
             set.spawn { Task.isCancelled }
-            return (empty, await set.nextValue())
+            return (empty, try? await set.nextValue())
         }
         #expect(empty)
         #expect(later == false)
@@ -176,10 +176,13 @@ struct JoinSetTests {
                 try? await Runtime.sleep(for: .milliseconds(100))
                 return 7
             }
-            let waiter = rt.spawn { await set.next() == nil }
+            let waiter = rt.spawn { () async -> Bool in
+                do { _ = try await set.next() } catch { return true }
+                return false
+            }
             try? await Runtime.sleep(for: .milliseconds(10))
             waiter.cancel()
-            return (await waiter.value, await set.nextValue())
+            return (await waiter.value, try? await set.nextValue())
         }
         #expect(first)
         #expect(second == 7)

@@ -440,7 +440,7 @@ extension Runtime {
     ///         Runtime.sharded(config) { shard in
     ///             try! shard.runtime.block { () async throws(IOError) in
     ///                 let server = try TCPServer.serve(try shard.listener()) { await serve($0) }
-    ///                 await server.wait()
+    ///                 try? await server.wait()
     ///             }
     ///         }
     ///     }

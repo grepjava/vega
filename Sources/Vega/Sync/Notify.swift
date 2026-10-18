@@ -4,13 +4,13 @@ import Synchronization
 ///
 /// ```swift
 /// let ready = Notify()
-/// rt.spawn { await ready.notified(); print("go") }
+/// rt.spawn { try await ready.notified(); print("go") }
 /// ready.notifyOne()
 /// ```
 ///
 /// `notifyOne()` with nobody waiting stores a single permit, which the next
 /// `notified()` consumes without suspending. Waiters are woken in FIFO order.
-/// A waiter whose task is cancelled returns early.
+/// A waiter whose task is cancelled throws `CancellationError`.
 ///
 /// As in Tokio, one atomic word says whether a permit is stored or tasks are
 /// waiting: storing and consuming a permit are single CASes, and the lock is
@@ -21,7 +21,8 @@ public final class Notify: @unchecked Sendable {
 
     private struct Waiter {
         let id: UInt
-        let continuation: UnsafeContinuation<Void, Never>
+        /// Resumed with true when notified, false when cancelled.
+        let continuation: UnsafeContinuation<Bool, Never>
     }
 
     private struct State {
@@ -67,8 +68,10 @@ public final class Notify: @unchecked Sendable {
         if s.pointee.waiters.isEmpty { word.store(Notify.empty, ordering: .relaxed) }
     }
 
-    /// Wait for a notification, or consume the stored permit.
-    public func notified() async {
+    /// Wait for a notification, or consume the stored permit. Throws
+    /// `CancellationError` if the task is cancelled first; a notification
+    /// that came first is never lost to it.
+    public func notified() async throws(CancellationError) {
         let s = state.pointer
         if takePermit() {
             await Runtime.consumeBudget()
@@ -76,17 +79,17 @@ public final class Notify: @unchecked Sendable {
         }
 
         let id = currentTaskID()
-        await withTaskCancellationHandler {
-            await withUnsafeContinuation { (c: UnsafeContinuation<Void, Never>) in
-                let resumeNow = lock.withLock { () -> Bool in
+        let notified = await withTaskCancellationHandler {
+            await withUnsafeContinuation { (c: UnsafeContinuation<Bool, Never>) in
+                let resumeNow = lock.withLock { () -> Bool? in
                     // Checked under the lock: either the cancel handler runs
                     // after this and finds us, or the flag is already visible.
-                    if Task.isCancelled { return true }
+                    if Task.isCancelled { return false }
                     if permitOrMarkWaiting() { return true }
                     s.pointee.waiters.pushBack(Waiter(id: id, continuation: c))
-                    return false
+                    return nil
                 }
-                if resumeNow { c.resume() }
+                if let resumeNow { c.resume(returning: resumeNow) }
             }
         } onCancel: {
             let waiter = lock.withLock { () -> Waiter? in
@@ -95,8 +98,9 @@ public final class Notify: @unchecked Sendable {
                 if w != nil { clearWaitingIfEmpty(s) }
                 return w
             }
-            waiter?.continuation.resume()
+            waiter?.continuation.resume(returning: false)
         }
+        if !notified { throw CancellationError() }
     }
 
     /// As `notified()`, but a cancelled task keeps waiting until notified.
@@ -110,13 +114,13 @@ public final class Notify: @unchecked Sendable {
             await Runtime.consumeBudget()
             return
         }
-        await withUnsafeContinuation { (c: UnsafeContinuation<Void, Never>) in
+        _ = await withUnsafeContinuation { (c: UnsafeContinuation<Bool, Never>) in
             let resumeNow = lock.withLock { () -> Bool in
                 if permitOrMarkWaiting() { return true }
                 s.pointee.waiters.pushBack(Waiter(id: 0, continuation: c))
                 return false
             }
-            if resumeNow { c.resume() }
+            if resumeNow { c.resume(returning: true) }
         }
     }
 
@@ -140,7 +144,7 @@ public final class Notify: @unchecked Sendable {
             word.store(Notify.notified, ordering: .releasing)
             return nil
         }
-        waiter?.continuation.resume()
+        waiter?.continuation.resume(returning: true)
     }
 
     /// Wake every task waiting now. Stores no permit.
@@ -153,7 +157,7 @@ public final class Notify: @unchecked Sendable {
             if word.load(ordering: .relaxed) == Notify.waiting { word.store(Notify.empty, ordering: .relaxed) }
             return all
         }
-        while let w = woken.popFront() { w.continuation.resume() }
+        while let w = woken.popFront() { w.continuation.resume(returning: true) }
         woken.destroy()
     }
 }
