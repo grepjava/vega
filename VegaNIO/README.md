@@ -43,7 +43,11 @@ let server = try await VegaServerBootstrap(group: group)
 - `close(mode: .input)` works on pipe channels, not yet on sockets.
 - Writing a `FileRegion` fails with `ChannelError.operationUnsupported`.
 - Libraries that build `NIOPosix.ServerBootstrap` or `ClientBootstrap` themselves need a way to accept a different bootstrap, as they already do for NIOTransportServices. Hummingbird 2 and Vapor 4 each need a small patch for this; see [HUMMINGBIRD2.md](../docs/HUMMINGBIRD2.md) and [VAPOR.md](../docs/VAPOR.md), with working examples in `Examples/`.
-- Linux and macOS. NIO's Windows support is partial, so Windows is not covered yet.
+- Linux and macOS. NIO's Windows support is partial, so Windows is not covered yet. The port
+  is mostly mechanical: about 30 errors in five files, from POSIX calls (`stat`, `errno`,
+  `setsockopt`, `close`, `socklen_t`, the `E*` constants) that want their Winsock and ucrt
+  forms, and from `UnixDatagram`, `SocketAddress(unixPath:)` and `SO_REUSEPORT`, which
+  Windows lacks and which want `#if` around them.
 
 ## Testing
 

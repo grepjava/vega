@@ -41,13 +41,13 @@ You want a Swift networking engine that **fully replaces SwiftNIO**, has **featu
 | **Scheduling** | work stealing, LIFO slot, coop budget, runtime metrics | `Vega/Scheduler` |
 | **Time** | sleep, interval, timeout, paused/mock clock | `Vega/Time` + `VegaTest.MockClock` |
 | **Net** | TCP, UDP (incl. multicast), Unix stream/datagram, `socket2`-style options, `NIOPipeBootstrap`, raw sockets, vsock | `Vega/Net`: `RawSocket` (SOCK_RAW and the unprivileged ICMP ping socket; Linux, Darwin), `VsockListener`/`VsockStream` (Linux) |
-| **Bootstrap** | `ServerBootstrap`, `ClientBootstrap`, `DatagramBootstrap`, happy eyeballs | `VegaNet.Server/Client` + `HappyEyeballs` |
+| **Bootstrap** | `ServerBootstrap`, `ClientBootstrap`, `DatagramBootstrap`, happy eyeballs | `TCPServer`, `TCPClient` (Happy Eyeballs v2) in `Vega` |
 | **DNS** | `lookup_host`, NIO resolver | `Resolver` (blocking-pool getaddrinfo, plus an async UDP resolver; reuse Garuda's `Resolver`) |
 | **IO traits/codecs** | `AsyncRead/Write`, `BufReader/Writer`, `copy`, `split`, `Framed`, `LengthDelimited`, `Lines`, `ByteToMessageDecoder`, `MessageToByteEncoder`, `NIOExtras` (line-based, length-field, JSON-RPC framing, PCAP, write-coalescing) | `VegaIO`: `AsyncReader/Writer` protocols, `FramedRead/FramedWrite`, `BufferedReader/Writer`, `copy`, `copyBidirectional`, lines, length-delimited and Content-Length (JSON-RPC) codecs |
 | **Sync** | `Mutex`, `RwLock`, `Semaphore`, `Notify`, `Barrier`, `oneshot`, `mpsc`, `broadcast`, `watch`, `OnceCell` | `Vega/Sync` |
 | **Process / signal / fs** | `tokio::process`, `tokio::signal`, `tokio::fs`, `NIOFileSystem`, `NIOFileHandle` | `VegaProcess`, `VegaFS` (io_uring/IOCP native; blocking pool on other drivers); signals are `Runtime.signals` in `Vega` itself (a self-pipe and one thread, no driver involved), not a module of their own |
 | **Streams** | `tokio-stream`, `AsyncSequence` bridging, backpressure | `AsyncSequence` adapters (`FramedRead.items()`, `MPSCChannel.Receiver.values()`); a bounded `MPSCChannel` is the `NIOAsyncSequenceProducer` equivalent |
-| **TLS** | `tokio-rustls`, `swift-nio-ssl`, ALPN, SNI, mTLS, session resumption, kTLS | `VegaTLS` (vendored BoringSSL, already in `CAvianSSL`); on Apple's `IOBackend.network`, `NetworkTLS`: Network.framework's own TLS for clients and servers (`TCPStream.connect(host:port:tls:)`, `TCPListener.bind(...tls:)`, ALPN, SNI, system or anchored trust, mutual TLS), as NIOTransportServices' `tlsOptions`. kTLS: `TLSConfiguration.kernelOffload` (`.transmit` / `.transmitAndReceive`) hands records to Linux's kernel TLS after the handshake, with OpenSSL or BoringSSL. Keys come from the key log (TLS 1.3) or the master secret (TLS 1.2), since both libraries run over Vega's own BIO. `sendFile` over TLS uses sendfile(2). close_notify and KeyUpdate are sent as typed records; on receive, alerts, tickets and KeyUpdate are handled, with rekey on Linux 6.14+. Falls back to userspace silently |
+| **TLS** | `tokio-rustls`, `swift-nio-ssl`, ALPN, SNI, mTLS, session resumption, kTLS | `VegaTLS` (OpenSSL 3, or vendored BoringSSL); on Apple's `IOBackend.network`, `NetworkTLS`: Network.framework's own TLS for clients and servers (`TCPStream.connect(host:port:tls:)`, `TCPListener.bind(...tls:)`, ALPN, SNI, system or anchored trust, mutual TLS), as NIOTransportServices' `tlsOptions`. kTLS: `TLSConfiguration.kernelOffload` (`.transmit` / `.transmitAndReceive`) hands records to Linux's kernel TLS after the handshake, with OpenSSL or BoringSSL. Keys come from the key log (TLS 1.3) or the master secret (TLS 1.2), since both libraries run over Vega's own BIO. `sendFile` over TLS uses sendfile(2). close_notify and KeyUpdate are sent as typed records; on receive, alerts, tickets and KeyUpdate are handled, with rekey on Linux 6.14+. Falls back to userspace silently |
 | **HTTP** | `swift-nio-http2`, `NIOHTTP1`, `NIOWebSocket`, `hyper` (h1/h2), `h3` | `VegaHTTP1`, `VegaHTTP2`, `VegaHTTP3`, `VegaWebSocket` over `VegaQUIC` (UDP endpoint); each protocol's sans-I/O logic in its `Core` module (`VegaHTTP2Core`, `VegaHTTP3Core`, `VegaWebSocketCore`, `VegaQUICCore`) |
 | **Extras** | `NIOExtras` (quiescing, debug handlers), SOCKS, HTTP proxy, compression | `Quiesce` (graceful shutdown) in `Vega`; `VegaProxy` (SOCKS5, CONNECT); `VegaCompression` (gzip, deflate, brotli, zstd) |
 | **Testing** | `EmbeddedChannel`, `NIOAsyncTestingChannel`, `tokio::test`, `loom`-style checks, paused time | `VegaTest`: `Runtime.seeded` and `Simulation` (seeded schedules, replayable), `MockClock`, in-memory duplex streams, `FaultyStream` (short reads, split writes, delays, resets) |
@@ -60,7 +60,7 @@ You want a Swift networking engine that **fully replaces SwiftNIO**, has **featu
 Supervisor (existing av_fork_worker machinery: reload, signals) — POSIX servers only
  └─ Shard process × K   (Runtime.sharded; K=1 ⇒ plain Tokio-style multiThread)
      └─ Runtime: T worker threads, pinned to the shard's cores
-         ├─ Worker i: LIFO slot + local queue(256) + Driver i + TimerWheel i + BufferPool i
+         ├─ Worker i: LIFO slot + local queue(256) + Driver i + TimerWheel i
          ├─ Inject queue (MPSC) + Idle set (searching/parked)
          └─ Blocking pool
 ```
@@ -95,7 +95,7 @@ Supervisor (existing av_fork_worker machinery: reload, signals) — POSIX server
 The public I/O API passes **owned buffers** in and returns them out. That is the native model of io_uring, IOCP and Network.framework, and the readiness backends emulate it with try-the-syscall, `EAGAIN`, wait, retry.
 
 ```swift
-public struct IOBuffer: ~Copyable { /* wraps AvianCore.ByteBuffer; kernel may own it mid-op */ }
+public struct IOBuffer: ~Copyable { /* owned bytes; the kernel may own them mid-operation */ }
 public struct TCPStream: ~Copyable, Sendable {
   public func read(into buf: consuming IOBuffer) async throws(IOError) -> IOBuffer
   public func write(_ buf: consuming IOBuffer) async throws(IOError) -> IOBuffer
@@ -109,8 +109,8 @@ public struct Framed<C: Codec>: ~Copyable { /* AsyncSequence of C.Item + send(_:
 
 | Driver | Platform | Key features |
 |---|---|---|
-| `uring` | Linux 6.1 or later (picked by a start-up probe) | one ring per worker (`SINGLE_ISSUER`, `DEFER_TASKRUN`); registered files; multishot accept and recv with provided-buffer rings; `SEND_ZC`; linked timeouts; `ASYNC_CANCEL`; `MSG_RING`. liburing is vendored as `CAvianUring` |
-| `epoll` | Linux fallback (seccomp, old kernels, `AVIAN_NO_URING`) | `EPOLLET`; `ScheduledIO` per fd (atomic readiness + tick + intrusive waiters) |
+| `uring` | Linux 6.1 or later (picked by a start-up probe) | one ring per worker (`SINGLE_ISSUER`, `DEFER_TASKRUN`); `ASYNC_CANCEL`. No liburing: `CVega` makes the system calls itself. Not yet, after 1.0: registered files, multishot accept and recv with provided-buffer rings, `SEND_ZC`, linked timeouts, `MSG_RING` |
+| `epoll` | Linux fallback (seccomp, old kernels, `VEGA_DRIVER=epoll`) | `EPOLLET`; `ScheduledIO` per fd (atomic readiness + tick + intrusive waiters) |
 | `kqueue` | macOS and BSD servers | `EV_CLEAR`, `EVFILT_USER` |
 | `iocp` | Windows | one completion port per runtime; every socket and file operation that would wait is an overlapped request (`AcceptEx`, `ConnectEx`, zero-byte `WSARecv`, `WSASend`, `WSARecvFrom`, `WSASendTo`, `TransmitFile`, `ReadFile`/`WriteFile`), the default (`IOBackend.iocp`); AFD readiness polls, as Tokio's mio does, for the waits with no request (`readable()`, pipes' and batches') and as the whole of `IOBackend.readiness` (`VEGA_DRIVER=afd`); overlapped pipe reads and writes for processes |
 | `network` | iOS, tvOS, watchOS, visionOS, and optionally macOS clients | `NWConnection` and `NWListener`, with TLS handled by Network.framework; current-thread or multi-thread runtime, no shards |
@@ -160,30 +160,25 @@ Not on Windows: `Runtime.sharded` (it needs `fork`); brotli and zstd (gzip and d
   - Waiters are intrusive nodes inside `withUnsafeContinuation` frames, so a wait allocates nothing.
   - They are guarded by `Synchronization.Mutex`, with `Atomic` for counters.
   - Shared atomics are padded to 128 bytes.
-- **Memory.** `IOBuffer` (`~Copyable`) wraps `AvianCore.ByteBuffer`. `BufferPool` per worker backs both pooled buffers and io_uring's provided-buffer rings. `ByteBuffer` itself stays as it is, so Garuda keeps compiling until it migrates.
+- **Memory.** `IOBuffer` (`~Copyable`) owns its bytes; the kernel may own them while an operation is in flight.
 
 ## Package layout (`D:\code\vega`)
 - **`Package.swift`.**
-  - Tools 6.2.
-  - Platforms: macOS 15, iOS 18, plus Linux and Windows (implicit).
-  - Swift 6 language mode.
-  - Zero external dependencies stays the rule; benchmarks and the swift-log/metrics adapters live in separate packages.
+  - Tools 6.2, Swift 6 language mode, nonisolated-nonsending by default.
+  - Platforms: macOS and iOS 26.4 (the custom-executor runtime), plus Linux and Windows.
+  - No external dependencies. The TLS library is a trait: `OpenSSL` (the system's, the default) or `BoringSSL` (vendored).
 - **C layer:**
-  - `Sources/CAvian/` adds `avian_rt.c`/`.h`: futex and `__ulock`, eventfd, `EVFILT_USER`, affinity, topology, and edge-triggered registration.
-  - New `avian_win.c` (Winsock/IOCP/AFD) and `CAvianUring` (vendored liburing with a `VENDORING.md`, like `CAvianSSL`).
-  - Existing calls reused: `av_listen_tcp`, `av_accept`, `av_writev`, `av_sendfile`, `av_udp_recv_batch`, `av_udp_send_segments`, `av_fork_worker`, `av_send_fd`, `av_cpu_count`.
-- **Swift modules:**
-  - `Vega` (runtime, scheduler, drivers, time, net, sync)
-  - `VegaIO` (codecs, framing, buffered I/O)
-  - `VegaFS`, `VegaProcess`, `VegaSignal`
-  - `VegaTLS` (over `CAvianSSL`)
-  - `VegaHTTP1`, `VegaHTTP2`, `VegaHTTP3`, `VegaWebSocket` (evolved from `AvianHTTP` and `AvianQUIC`)
-  - `VegaCompression`, `VegaProxy`, `VegaMetrics`, `VegaTest`
-  - `AvianCore`, `AvianHTTP` and `AvianQUIC` stay as the sans-I/O protocol layers the `Vega*` modules sit on.
-- **Docs and releases.**
-  - `docs/VEGA.md` (design), `docs/MIGRATING-FROM-NIO.md` (concept mapping: `MPSCChannel` → `TCPStream` + `Framed`, `ChannelHandler` → `Codec`/async function, `EventLoopFuture` → `async`).
-  - `RELEASE.md` entries.
-- `D:\code\vega` stays empty unless you'd rather keep the design docs there.
+  - `CVega`: the drivers' system calls (futex and `__ulock`, eventfd, affinity, topology, io_uring through its raw system calls, epoll, kqueue, IOCP/AFD and Winsock).
+  - `CVegaTLS` over OpenSSL or `CVegaBoringSSL`; `CVegaCompress`, with `CVegaZlib` vendored for Windows.
+- **Swift modules.** A protocol's networked module has its plain name; its logic, sans I/O, is in its `Core` module, for servers that bring their own I/O.
+  - `Vega`: runtime, scheduler, drivers, time, net, sync, signals, `NetworkTLS`.
+  - `VegaIO` (codecs, framing, buffered I/O), `VegaFS`, `VegaProcess`, `VegaMetrics`.
+  - `VegaTLS`; `VegaCrypto` (hashes, AEADs, key exchange, signatures, certificate checks, and `Digest` on every platform).
+  - `VegaHTTP` (the shared HTTP types); `VegaHTTP1`, `VegaHTTP2`, `VegaHTTP3`, `VegaWebSocket` and `VegaQUIC`, each over its `Core` module; `VegaWire` (varints and frames).
+  - `VegaCompression`, `VegaProxy`, `VegaTest`.
+- **Access tiers.** The public API is the vocabulary. What Garuda alone needs is `@_spi(Garuda)`; what the modules share is `package`.
+- **Separate packages:** `Benchmarks/`; `Adapters/` (swift-log and swift-metrics); `VegaNIO/` (SwiftNIO's API over Vega). Adapters and VegaNIO move to repositories of their own for 1.0.
+- **Docs:** `docs/MIGRATING-FROM-NIO.md`, `docs/SHARDING.md`, `docs/BENCHMARKS.md`, and the Hummingbird and Vapor notes.
 
 ## Phase 0 findings (2026-10-12, Swift 6.3.3)
 Spike: `scratchpad/spike` (built in WSL, run on the bench box 192.168.100.100: i5-8250U, 8 CPUs, kernel 7.0).
@@ -235,7 +230,7 @@ Spike: `scratchpad/spike` (built in WSL, run on the bench box 192.168.100.100: i
   - queue push/pop/steal invariants;
   - timer wheel cascading and cancellation;
   - cancellation returns the buffer.
-  - The **same test suite runs against every driver**, selected by `AVIAN_DRIVER=epoll|uring|kqueue|iocp|network`.
+  - The **same test suite runs against every driver**, selected by `VEGA_DRIVER=epoll|uring|kqueue|iocp|network`.
 - **Concurrency:**
   - `--sanitize=thread`;
   - steal and wake stress loops (millions of cross-worker ping-pong rounds);

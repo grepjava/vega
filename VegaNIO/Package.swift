@@ -1,7 +1,15 @@
 // swift-tools-version: 6.2
 // VegaNIO: SwiftNIO's EventLoopGroup, Channel and bootstraps over Vega. Its
 // own package, so Vega itself keeps no dependencies.
+import Foundation
 import PackageDescription
+
+// Inside Vega's repository, the Vega beside it; in a repository of its own,
+// the release.
+let vega: Package.Dependency =
+    FileManager.default.fileExists(atPath: Context.packageDirectory + "/../Sources/Vega")
+    ? .package(path: "..")
+    : .package(url: "https://github.com/grepjava/vega.git", from: "1.0.0")
 
 let package = Package(
     name: "VegaNIO",
@@ -10,7 +18,7 @@ let package = Package(
         .library(name: "VegaNIO", targets: ["VegaNIO"]),
     ],
     dependencies: [
-        .package(path: ".."),
+        vega,
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.86.0"),
     ],
     targets: [

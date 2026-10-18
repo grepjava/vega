@@ -1,7 +1,15 @@
 // swift-tools-version: 6.2
 // Vega's runtime metrics and slow polls, reported through swift-metrics and
 // swift-log. Its own package, so Vega itself keeps no dependencies.
+import Foundation
 import PackageDescription
+
+// Inside Vega's repository, the Vega beside it; in a repository of its own,
+// the release.
+let vega: Package.Dependency =
+    FileManager.default.fileExists(atPath: Context.packageDirectory + "/../Sources/Vega")
+    ? .package(path: "..")
+    : .package(url: "https://github.com/grepjava/vega.git", from: "1.0.0")
 
 let package = Package(
     name: "VegaAdapters",
@@ -11,7 +19,7 @@ let package = Package(
         .library(name: "VegaLogging", targets: ["VegaLogging"]),
     ],
     dependencies: [
-        .package(path: ".."),
+        vega,
         .package(url: "https://github.com/apple/swift-metrics.git", from: "2.5.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
     ],
