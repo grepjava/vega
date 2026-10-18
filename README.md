@@ -13,10 +13,11 @@ epoll and kqueue. It targets Swift 6.2 and newer, and is tuned for Swift 6.3.
 and Vapor can run on it through [VegaNIO](VegaNIO/README.md), which keeps
 their SwiftNIO code as it is and hands Vega the scheduling and the socket I/O.
 
-**Status:** 0.5. Young, used in production by one framework so far, and
-measured more than it has been battle-tested. The API may still change between
-minor versions. See [docs/PLAN.md](docs/PLAN.md) for the design and the parity
-matrix, [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for measurements against
+**Status:** 1.0. The API is frozen: from here Vega follows semantic
+versioning, and [RELEASE.md](RELEASE.md) lists what 1.0 renamed from 0.5. Used
+in production by one framework so far, and measured more than it has been
+battle-tested. See [ARCHITECTURE.md](ARCHITECTURE.md) for how it is built,
+[docs/PLAN.md](docs/PLAN.md) for the plan and the parity matrix, [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for measurements against
 SwiftNIO and Tokio, [docs/MIGRATING-FROM-NIO.md](docs/MIGRATING-FROM-NIO.md) for
 moving SwiftNIO code over, and [docs/SHARDING.md](docs/SHARDING.md) for running
 a server as supervised shard processes.
@@ -67,12 +68,12 @@ mature, widely deployed and far more proven than Vega.
 | Linux I/O | io_uring (default), epoll | epoll | epoll (io_uring through `tokio-uring`) |
 | Apple I/O | kqueue, Network.framework | kqueue, Network.framework (NIOTransportServices) | kqueue |
 | Windows | IOCP: overlapped `AcceptEx`, `ConnectEx`, `WSARecv`, `WSASend`, `WSARecvFrom`, `WSASendTo`, `TransmitFile`, file reads and writes (default); AFD readiness | in progress upstream | IOCP (AFD readiness) |
-| Blocking work | `Runtime.blocking` | `NIOThreadPool` | `spawn_blocking` |
+| Blocking work | `Runtime.blocking`, `Runtime.tryBlocking` | `NIOThreadPool` | `spawn_blocking` |
 | Timers and tests | timer wheel; `MockClock` paused time, in-memory `duplex()` streams | `EmbeddedEventLoop`, `NIOAsyncTestingChannel` | timer wheel; `time::pause`, `tokio-test` |
 | TLS | VegaTLS on OpenSSL 3 or vendored BoringSSL; kernel TLS offload on Linux; Network.framework's TLS on Apple (`NetworkTLS`) | swift-nio-ssl (BoringSSL) | rustls or native-tls, separate crates |
 | HTTP | VegaHTTP1, VegaHTTP2, VegaHTTP3, VegaWebSocket | NIOHTTP1, swift-nio-http2, NIOWebSocket | hyper, tungstenite, separate crates |
 | QUIC and HTTP/3 | VegaQUIC (client and server on Vega's UDP sockets), VegaHTTP3 (server and client); their sans-I/O cores VegaQUICCore and VegaHTTP3Core | not in SwiftNIO itself; on Apple platforms, Network.framework's QUIC | quinn, h3, separate crates |
-| Maturity | 0.5, since 2026 | since 2018, the base of Vapor, Hummingbird, gRPC Swift and more | since 2016, the base of most async Rust |
+| Maturity | 1.0, since 2026 | since 2018, the base of Vapor, Hummingbird, gRPC Swift and more | since 2016, the base of most async Rust |
 
 **What has been measured** ([docs/BENCHMARKS.md](docs/BENCHMARKS.md), one
 i5-8250U, Linux 7.0, Swift 6.3.3):
@@ -106,16 +107,18 @@ Measure your own.
 | `Sources/VegaCrypto` | over the same library: `Hash`, `HMAC`, `PBKDF2`, `HKDF`, `AEAD`, QUIC `HeaderProtection`, `KeyExchange`, JWS/TLS `SigningKey` and `PublicKey`, `CertificateKey`, `SecureRandom` |
 | `Sources/VegaCompression` | HTTP content codings: gzip, deflate, brotli, zstd |
 | `Sources/VegaProxy` | connecting through SOCKS5 and HTTP CONNECT proxies |
+| `Sources/VegaHTTP` | the HTTP types the three versions share: requests, responses, fields |
 | `Sources/VegaHTTP1`, `Sources/VegaHTTP2`, `Sources/VegaHTTP3` | HTTP/1.1, HTTP/2 and HTTP/3 servers and clients; HTTP/3 with whole bodies, as HTTP/2's |
 | `Sources/VegaWebSocket` | WebSocket connections and permessage-deflate compression |
 | `Sources/VegaQUIC` | QUIC on Vega's UDP sockets: `QUICEndpoint` (bind, accept, connect), `QUICConnection`, and `QUICStream`, an `AsyncReader` and `AsyncWriter` |
 | `Sources/Vega*Core` | each protocol's logic, sans I/O, for servers that bring their own I/O: `VegaHTTP2Core` (HPACK, frame headers), `VegaHTTP3Core` (frames, QPACK), `VegaWebSocketCore` (frames, permessage-deflate negotiation), `VegaQUICCore` (QUIC v1 and v2 as a state machine: packets and their protection, loss recovery and congestion control, streams, path validation, Retry, and both sides of the TLS 1.3 handshake; datagrams in, datagrams out, no clock) |
-| `Sources/VegaWire` | the bytes the Core modules share: `ByteBuffer`, `ByteSpan`, parsing helpers |
-| `Sources/VegaTest` | test support: `MockClock` (paused time), `duplex()` (in-memory byte streams) |
+| `Sources/VegaWire` | the bytes the protocols share: `ByteBuffer` and `ByteSpan` (public), parsing helpers |
+| `Sources/VegaTest` | test support: `Runtime.seeded` (reproducible schedules), `MockClock` (paused time), `duplex()` (in-memory byte streams), `FaultyStream` |
 | `Sources/CVega` | C shim: parking, threads, the epoll/kqueue/io_uring/IOCP drivers, sockets |
 | `Sources/CVegaTLS`, `Sources/CVegaCompress` | C shims for the TLS library and for compression |
 | `Sources/CVegaBoringSSL` | vendored BoringSSL, used only with the `BoringSSL` trait (see its `VENDORING.md`) |
 | `VegaNIO` | separate package: SwiftNIO's `EventLoopGroup` and bootstraps on Vega |
+| `Adapters` | separate package: `Runtime.metrics` through swift-metrics, slow polls through swift-log |
 | `Tests/VegaTests`, `Tests/VegaWireTests`, `Tests/VegaQUICTests` | swift-testing suites; `Tests/QUICTestPeer` is the QUIC tests' own client |
 | `Benchmarks/` | separate package, so Vega itself keeps zero dependencies |
 | `Spikes/` | the Phase 0 probes: which Swift 6.3 executor hooks reach a custom executor, and which io_uring features a host has |
@@ -155,7 +158,7 @@ TSAN_OPTIONS=suppressions=$PWD/Tests/tsan.supp VEGA_MODEL_N=50000 \
 VegaTLS runs on the system's OpenSSL 3 by default (`libssl-dev` on Linux, Homebrew's `openssl@3` on macOS). The `BoringSSL` package trait builds it on a vendored BoringSSL instead, with no system OpenSSL needed:
 
 ```swift
-.package(url: "https://github.com/grepjava/vega.git", from: "0.5.0", traits: ["BoringSSL"])
+.package(url: "https://github.com/grepjava/vega.git", from: "1.0.0", traits: ["BoringSSL"])
 ```
 
 or, building Vega itself, `swift build --traits BoringSSL`.

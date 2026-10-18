@@ -1,5 +1,9 @@
 # Vega: a high-speed Swift I/O engine with Tokio and SwiftNIO feature parity
 
+> The plan Vega was built from, kept with what was learned on the way. For Vega as
+> it is, read [ARCHITECTURE.md](../ARCHITECTURE.md); for what each release changed,
+> [RELEASE.md](../RELEASE.md).
+
 ## Context
 
 You want a Swift networking engine that **fully replaces SwiftNIO**, has **feature parity with Tokio and SwiftNIO**, and is faster than both on Swift. It should be built on Swift 6.2+ concurrency and a Tokio-style work-stealing scheduler, with no backward-compatibility burden. Later it will be Garuda's engine.
@@ -109,7 +113,7 @@ public struct Framed<C: Codec>: ~Copyable { /* AsyncSequence of C.Item + send(_:
 
 | Driver | Platform | Key features |
 |---|---|---|
-| `uring` | Linux 6.1 or later (picked by a start-up probe) | one ring per worker (`SINGLE_ISSUER`, `DEFER_TASKRUN`); `ASYNC_CANCEL`. No liburing: `CVega` makes the system calls itself. Not yet, after 1.0: registered files, multishot accept and recv with provided-buffer rings, `SEND_ZC`, linked timeouts, `MSG_RING` |
+| `uring` | Linux 6.7 or later (picked by a start-up probe) | one ring per worker (`SINGLE_ISSUER`, `DEFER_TASKRUN`); `ASYNC_CANCEL`. No liburing: `CVega` makes the system calls itself. Not yet, after 1.0: registered files, multishot accept and recv with provided-buffer rings, `SEND_ZC`, linked timeouts, `MSG_RING` |
 | `epoll` | Linux fallback (seccomp, old kernels, `VEGA_DRIVER=epoll`) | `EPOLLET`; `ScheduledIO` per fd (atomic readiness + tick + intrusive waiters) |
 | `kqueue` | macOS and BSD servers | `EV_CLEAR`, `EVFILT_USER` |
 | `iocp` | Windows | one completion port per runtime; every socket and file operation that would wait is an overlapped request (`AcceptEx`, `ConnectEx`, zero-byte `WSARecv`, `WSASend`, `WSARecvFrom`, `WSASendTo`, `TransmitFile`, `ReadFile`/`WriteFile`), the default (`IOBackend.iocp`); AFD readiness polls, as Tokio's mio does, for the waits with no request (`readable()`, pipes' and batches') and as the whole of `IOBackend.readiness` (`VEGA_DRIVER=afd`); overlapped pipe reads and writes for processes |
