@@ -1,5 +1,5 @@
 import CVegaCompress
-import VegaHTTP1
+import VegaHTTP
 
 /// A content coding (RFC 9110 section 8.4.1). gzip and deflate come from
 /// zlib (the system's; on Windows, a vendored copy), so they are always

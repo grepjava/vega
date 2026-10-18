@@ -3,7 +3,7 @@
 import Synchronization
 import Vega
 import VegaIO
-import VegaHTTP1
+import VegaHTTP
 import VegaHTTP3Core
 import VegaQUICCore
 import VegaQUIC

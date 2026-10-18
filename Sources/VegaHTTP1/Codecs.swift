@@ -1,5 +1,7 @@
 import Vega
 import VegaIO
+import VegaHTTP1Core
+import VegaWire
 
 /// Limits on what a decoder will buffer for one message.
 public struct HTTP1Limits: Sendable {
@@ -54,7 +56,9 @@ public struct HTTP1RequestDecoder: Decoder, Sendable {
                 return nil
             }
             if end - lead > limits.maxHeadSize { throw .headTooLarge }
-            let (head, framing) = try parseRequestHead(bytes, start: lead, end: end, maxFields: limits.maxFields)
+            let (head, framing) = try parsed { () throws(HTTP1ParseError) in
+                try parseRequestHead(bytes, start: lead, end: end, maxFields: limits.maxFields)
+            }
             let body: BodyReader.State
             if framing.transferEncoding == .chunked {
                 body = .chunkHeader(afterData: false)
@@ -66,7 +70,7 @@ public struct HTTP1RequestDecoder: Decoder, Sendable {
             state = .body(BodyReader(state: body, maxFields: limits.maxFields, maxTrailerSize: limits.maxTrailerSize))
             return (.head(head), end)
         case .body(var reader):
-            guard let (part, used) = try reader.next(bytes) else { return nil }
+            guard let (part, used) = try parsed({ () throws(HTTP1ParseError) in try reader.next(bytes) }) else { return nil }
             switch part {
             case .body(let b):
                 state = .body(reader)
@@ -137,7 +141,9 @@ public struct HTTP1ResponseDecoder: Decoder, Sendable {
                 return nil
             }
             if end > limits.maxHeadSize { throw .headTooLarge }
-            let (head, framing) = try parseResponseHead(bytes, start: 0, end: end, maxFields: limits.maxFields)
+            let (head, framing) = try parsed { () throws(HTTP1ParseError) in
+                try parseResponseHead(bytes, start: 0, end: end, maxFields: limits.maxFields)
+            }
             let status = head.status
             // An interim response comes before the real one to the same request.
             let interim = status < 200 && status != 101
@@ -169,7 +175,7 @@ public struct HTTP1ResponseDecoder: Decoder, Sendable {
             state = .body(BodyReader(state: body, maxFields: limits.maxFields, maxTrailerSize: limits.maxTrailerSize))
             return (.head(head), end)
         case .body(var reader):
-            guard let (part, used) = try reader.next(bytes) else { return nil }
+            guard let (part, used) = try parsed({ () throws(HTTP1ParseError) in try reader.next(bytes) }) else { return nil }
             switch part {
             case .body(let b):
                 state = .body(reader)
@@ -418,4 +424,10 @@ extension IOBuffer {
         }
         if final { write("\r\n") }
     }
+}
+
+/// The parser's result, its refusal as an `HTTP1Error`.
+@inline(__always)
+private func parsed<T>(_ body: () throws(HTTP1ParseError) -> T) throws(HTTP1Error) -> T {
+    do { return try body() } catch { throw HTTP1Error(error) }
 }

@@ -26,12 +26,14 @@ let package = Package(
         .library(name: "VegaProxy", targets: ["VegaProxy"]),
         // A protocol's networked module has its plain name; its logic, sans
         // I/O, is in its Core module, for servers that bring their own I/O.
+        .library(name: "VegaHTTP", targets: ["VegaHTTP"]),
         .library(name: "VegaHTTP1", targets: ["VegaHTTP1"]),
         .library(name: "VegaHTTP2", targets: ["VegaHTTP2"]),
         .library(name: "VegaHTTP3", targets: ["VegaHTTP3"]),
         .library(name: "VegaWebSocket", targets: ["VegaWebSocket"]),
         .library(name: "VegaQUIC", targets: ["VegaQUIC"]),
         .library(name: "VegaWire", targets: ["VegaWire"]),
+        .library(name: "VegaHTTP1Core", targets: ["VegaHTTP1Core"]),
         .library(name: "VegaHTTP2Core", targets: ["VegaHTTP2Core"]),
         .library(name: "VegaHTTP3Core", targets: ["VegaHTTP3Core"]),
         .library(name: "VegaWebSocketCore", targets: ["VegaWebSocketCore"]),
@@ -118,6 +120,8 @@ let package = Package(
         // ByteSpan and the parsing helpers. Vendored from aviancore through
         // Garuda; see its VENDORED.md.
         .target(name: "VegaWire", exclude: ["VENDORED.md"], swiftSettings: swiftSettings),
+        // HTTP/1.1 (RFC 9112) head and body parsing.
+        .target(name: "VegaHTTP1Core", dependencies: ["VegaHTTP", "VegaWire"], swiftSettings: swiftSettings),
         // HPACK (RFC 7541) and HTTP/2 frame headers (RFC 9113).
         .target(name: "VegaHTTP2Core", dependencies: ["VegaWire"], swiftSettings: swiftSettings),
         // HTTP/3 (RFC 9114) framing, QPACK (RFC 9204, on HPACK's Huffman
@@ -129,10 +133,14 @@ let package = Package(
         // QUIC (RFC 9000, 9001, 9002): a connection is handed datagrams and
         // asked for them. TLS 1.3 is its own, over VegaCrypto.
         .target(name: "VegaQUICCore", dependencies: ["VegaWire", "VegaCrypto"], swiftSettings: swiftSettings),
-        .target(name: "VegaHTTP1", dependencies: ["Vega", "VegaIO"], swiftSettings: swiftSettings),
-        .target(name: "VegaHTTP2", dependencies: ["Vega", "VegaIO", "VegaHTTP1", "VegaWire", "VegaHTTP2Core"],
+        // The types every HTTP version shares: methods, heads, fields, whole
+        // requests and responses. VegaHTTP1, VegaHTTP2 and VegaHTTP3 re-export it.
+        .target(name: "VegaHTTP", dependencies: ["VegaWire"], swiftSettings: swiftSettings),
+        .target(name: "VegaHTTP1", dependencies: ["Vega", "VegaIO", "VegaHTTP", "VegaHTTP1Core", "VegaWire"],
                 swiftSettings: swiftSettings),
-        .target(name: "VegaWebSocket", dependencies: ["Vega", "VegaIO", "VegaHTTP1", "VegaWire", "VegaWebSocketCore",
+        .target(name: "VegaHTTP2", dependencies: ["Vega", "VegaIO", "VegaHTTP", "VegaWire", "VegaHTTP2Core"],
+                swiftSettings: swiftSettings),
+        .target(name: "VegaWebSocket", dependencies: ["Vega", "VegaIO", "VegaHTTP", "VegaHTTP1", "VegaWire", "VegaWebSocketCore",
                                                      "CVegaCompress"],
                 swiftSettings: swiftSettings),
         // VegaQUICCore's connections on Vega's UDP sockets: an endpoint task
@@ -140,24 +148,24 @@ let package = Package(
         .target(name: "VegaQUIC", dependencies: ["Vega", "VegaIO", "VegaQUICCore", "VegaWire", "VegaCrypto", "CVega"],
                 swiftSettings: swiftSettings),
         // HTTP/3 over VegaQUIC: a server and a client with whole bodies, as VegaHTTP2's.
-        .target(name: "VegaHTTP3", dependencies: ["Vega", "VegaIO", "VegaHTTP1", "VegaHTTP3Core", "VegaHTTP2Core",
+        .target(name: "VegaHTTP3", dependencies: ["Vega", "VegaIO", "VegaHTTP", "VegaHTTP3Core", "VegaHTTP2Core",
                                                  "VegaQUICCore", "VegaQUIC", "VegaWire", "VegaCrypto"],
                 swiftSettings: swiftSettings),
         // Content codings: gzip, deflate, brotli, zstd.
-        .target(name: "VegaCompression", dependencies: ["VegaHTTP1", "CVegaCompress"], swiftSettings: swiftSettings),
+        .target(name: "VegaCompression", dependencies: ["VegaHTTP", "CVegaCompress"], swiftSettings: swiftSettings),
         // Connecting through SOCKS5 and HTTP CONNECT proxies.
-        .target(name: "VegaProxy", dependencies: ["Vega", "VegaIO", "VegaHTTP1"], swiftSettings: swiftSettings),
+        .target(name: "VegaProxy", dependencies: ["Vega", "VegaIO", "VegaHTTP", "VegaHTTP1"], swiftSettings: swiftSettings),
         // The servers h2spec, Autobahn and aioquic test (ci/conformance.sh).
-        .executableTarget(name: "vega-conformance", dependencies: ["Vega", "VegaHTTP1", "VegaHTTP2", "VegaWebSocket", "VegaTLS",
+        .executableTarget(name: "vega-conformance", dependencies: ["Vega", "VegaHTTP", "VegaHTTP1", "VegaHTTP2", "VegaWebSocket", "VegaTLS",
                                                                 "VegaCrypto", "VegaQUICCore", "VegaQUIC", "VegaHTTP3"],
                           swiftSettings: swiftSettings),
-        .testTarget(name: "VegaTests", dependencies: ["Vega", "VegaIO", "VegaFS", "VegaProcess", "VegaMetrics", "VegaTest", "VegaTLS", "VegaCrypto", "VegaHTTP1", "VegaHTTP2", "VegaHTTP2Core", "VegaWebSocket", "VegaWebSocketCore", "VegaCompression", "VegaProxy", "VegaWire", "CVega"], swiftSettings: swiftSettings),
+        .testTarget(name: "VegaTests", dependencies: ["Vega", "VegaIO", "VegaFS", "VegaProcess", "VegaMetrics", "VegaTest", "VegaTLS", "VegaCrypto", "VegaHTTP", "VegaHTTP1", "VegaHTTP2", "VegaHTTP2Core", "VegaWebSocket", "VegaWebSocketCore", "VegaCompression", "VegaProxy", "VegaWire", "CVega"], swiftSettings: swiftSettings),
         .testTarget(name: "VegaWireTests", dependencies: ["VegaWire", "VegaHTTP2Core", "VegaHTTP3Core", "VegaWebSocketCore"], swiftSettings: swiftSettings),
         // A QUIC client for the tests: a handshake and streams against a VegaQUICCore server.
         .target(name: "QUICTestPeer", dependencies: ["VegaQUICCore", "VegaWire", "VegaCrypto", "VegaTLS"],
                 path: "Tests/QUICTestPeer", swiftSettings: swiftSettings),
         .testTarget(name: "VegaQUICTests", dependencies: ["VegaQUICCore", "VegaWire", "QUICTestPeer", "VegaCrypto", "VegaTLS",
-                                                         "VegaQUIC", "VegaHTTP3", "VegaHTTP3Core", "VegaHTTP1",
+                                                         "VegaQUIC", "VegaHTTP3", "VegaHTTP3Core", "VegaHTTP", "VegaHTTP1",
                                                          "Vega", "VegaIO"],
                     swiftSettings: swiftSettings),
     ],

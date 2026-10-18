@@ -1,44 +1,6 @@
 import Vega
 import VegaIO
 
-/// A request with its whole body.
-public struct HTTPRequest: Sendable, Equatable {
-    public var head: HTTPRequestHead
-    public var body: [UInt8]
-
-    public init(head: HTTPRequestHead, body: [UInt8] = []) {
-        self.head = head
-        self.body = body
-    }
-
-    public init(method: HTTPMethod = .get, target: String, fields: HTTPFields = [:], body: [UInt8] = []) {
-        self.init(head: HTTPRequestHead(method: method, target: target, fields: fields), body: body)
-    }
-}
-
-/// A response with its whole body.
-public struct HTTPResponse: Sendable, Equatable {
-    public var head: HTTPResponseHead
-    public var body: [UInt8]
-
-    public init(head: HTTPResponseHead, body: [UInt8] = []) {
-        self.head = head
-        self.body = body
-    }
-
-    public init(status: Int = 200, fields: HTTPFields = [:], body: [UInt8] = []) {
-        self.init(head: HTTPResponseHead(status: status, fields: fields), body: body)
-    }
-
-    public init(status: Int = 200, fields: HTTPFields = [:], body: String) {
-        self.init(status: status, fields: fields, body: Array(body.utf8))
-    }
-
-    public var status: Int { head.status }
-    /// The body as UTF-8 text.
-    public var text: String { String(decoding: body, as: UTF8.self) }
-}
-
 /// HTTP/1.1 serving with whole bodies: each request is read in full, the
 /// handler answers it, and the response goes out with a Content-Length.
 ///

@@ -1,7 +1,7 @@
 import Synchronization
 import Vega
 import VegaIO
-import VegaHTTP1
+@_exported import VegaHTTP
 
 /// HTTP/2 serving with whole bodies: each request runs its handler in a
 /// task of its own, so slow requests don't hold up the others.

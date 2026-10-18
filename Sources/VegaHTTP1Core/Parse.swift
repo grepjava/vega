@@ -10,68 +10,18 @@
 //   * obs-fold (a continuation line) is refused, not unfolded
 //   * bare CR, NUL and other control bytes in a field value are refused
 
-let cCR: UInt8 = 13
-let cLF: UInt8 = 10
-let cSP: UInt8 = 32
-let cHT: UInt8 = 9
-let cColon = UInt8(ascii: ":")
-let cComma = UInt8(ascii: ",")
-let cSemicolon = UInt8(ascii: ";")
+import VegaHTTP
+import VegaWire
 
-/// RFC 9110 `tchar`, as two bitmasks.
-@inline(__always)
-func isTokenChar(_ c: UInt8) -> Bool {
-    if c < 64 { return (0x03FF6CFA00000000 as UInt64) >> UInt64(c) & 1 == 1 }
-    if c < 128 { return (0x57FFFFFFC7FFFFFE as UInt64) >> UInt64(c &- 64) & 1 == 1 }
-    return false
-}
-
-/// Allowed in a field value: VCHAR, SP, HTAB and obs-text.
-@inline(__always)
-func isFieldValueChar(_ c: UInt8) -> Bool {
-    c >= 0x20 ? c != 0x7F : c == cHT
-}
-
-@inline(__always)
-func asciiLower(_ c: UInt8) -> UInt8 {
-    c &- 65 < 26 ? c | 0x20 : c
-}
-
-func equalsIgnoringCase(_ a: UnsafeRawBufferPointer, _ b: UnsafeRawBufferPointer) -> Bool {
-    guard a.count == b.count else { return false }
-    for i in 0..<a.count where asciiLower(a[i]) != asciiLower(b[i]) { return false }
-    return true
-}
-
-func equalsIgnoringCase(_ a: UnsafeRawBufferPointer, _ b: StaticString) -> Bool {
-    equalsIgnoringCase(a, UnsafeRawBufferPointer(start: b.utf8Start, count: b.utf8CodeUnitCount))
-}
-
-/// Whether the comma-separated `list` has an element equal to `token`,
-/// ignoring case and surrounding whitespace.
-func listContains(_ list: UnsafeRawBufferPointer, _ token: UnsafeRawBufferPointer) -> Bool {
-    var found = false
-    forEachElement(list) { if equalsIgnoringCase($0, token) { found = true } }
-    return found
-}
-
-/// Each non-empty element of a comma-separated list, trimmed.
-func forEachElement(_ list: UnsafeRawBufferPointer, _ body: (UnsafeRawBufferPointer) -> Void) {
-    var i = 0
-    while i <= list.count {
-        var end = i
-        while end < list.count, list[end] != cComma { end += 1 }
-        var s = i, e = end
-        while s < e, list[s] == cSP || list[s] == cHT { s += 1 }
-        while e > s, list[e - 1] == cSP || list[e - 1] == cHT { e -= 1 }
-        if e > s { body(UnsafeRawBufferPointer(rebasing: list[s..<e])) }
-        i = end + 1
-    }
+/// What the parser refused. VegaHTTP1's `HTTP1Error` has the same cases.
+package enum HTTP1ParseError: Error {
+    case badRequestLine, badStatusLine, badVersion, badHeader, headTooLarge, tooManyFields
+    case conflictingFraming, unsupportedTransferEncoding, missingHost, duplicateHost, badChunk
 }
 
 /// The index just past the empty line that ends a head (or trailer section)
 /// starting at or before `from`, or nil if it hasn't arrived.
-func findHeadEnd(_ b: UnsafeRawBufferPointer, from: Int) -> Int? {
+package func findHeadEnd(_ b: UnsafeRawBufferPointer, from: Int) -> Int? {
     var i = from
     while i < b.count {
         guard let lf = b[i...].firstIndex(of: cLF) else { return nil }
@@ -83,17 +33,19 @@ func findHeadEnd(_ b: UnsafeRawBufferPointer, from: Int) -> Int? {
 }
 
 /// How a message's fields say its body is framed.
-struct Framing {
-    enum TransferEncoding { case none, chunked, notChunked, chunkedOverOther }
-    var contentLength: Int?
-    var transferEncoding = TransferEncoding.none
-    var hosts = 0
+package struct Framing {
+    package enum TransferEncoding { case none, chunked, notChunked, chunkedOverOther }
+    package var contentLength: Int?
+    package var transferEncoding = TransferEncoding.none
+    package var hosts = 0
+
+    package init() {}
 }
 
 /// Parse field lines from `i` through the empty line that ends them, which
 /// is known to be before `end`.
-func parseFields(_ b: UnsafeRawBufferPointer, _ i: inout Int, end: Int, maxFields: Int,
-                 into fields: inout HTTPFields, framing: inout Framing) throws(HTTP1Error) {
+package func parseFields(_ b: UnsafeRawBufferPointer, _ i: inout Int, end: Int, maxFields: Int,
+                 into fields: inout HTTPFields, framing: inout Framing) throws(HTTP1ParseError) {
     while true {
         guard i < end else { throw .badHeader }
         if b[i] == cCR {
@@ -152,7 +104,7 @@ func parseFields(_ b: UnsafeRawBufferPointer, _ i: inout Int, end: Int, maxField
 
 /// A Content-Length value: digits only. A list of equal values ("5, 5"),
 /// which RFC 9110 lets a recipient accept, is refused too.
-private func contentLength(_ v: UnsafeRawBufferPointer) throws(HTTP1Error) -> Int {
+private func contentLength(_ v: UnsafeRawBufferPointer) throws(HTTP1ParseError) -> Int {
     guard !v.isEmpty, v.count <= 18 else { throw .badHeader }
     var n = 0
     for c in v {
@@ -177,7 +129,7 @@ private func transferEncoding(_ v: UnsafeRawBufferPointer) -> Framing.TransferEn
 }
 
 /// "HTTP/1.0" or "HTTP/1.1" at `i`.
-private func version(_ b: UnsafeRawBufferPointer, _ i: Int, end: Int) throws(HTTP1Error) -> HTTPVersion {
+private func version(_ b: UnsafeRawBufferPointer, _ i: Int, end: Int) throws(HTTP1ParseError) -> HTTPVersion {
     guard end - i >= 8 else { throw .badVersion }
     let prefix: StaticString = "HTTP/1."
     for k in 0..<7 where b[i + k] != prefix.utf8Start[k] { throw .badVersion }
@@ -189,15 +141,15 @@ private func version(_ b: UnsafeRawBufferPointer, _ i: Int, end: Int) throws(HTT
 }
 
 /// CRLF (or a bare LF) at `i`.
-private func lineEnd(_ b: UnsafeRawBufferPointer, _ i: inout Int, end: Int, _ error: HTTP1Error) throws(HTTP1Error) {
+private func lineEnd(_ b: UnsafeRawBufferPointer, _ i: inout Int, end: Int, _ error: HTTP1ParseError) throws(HTTP1ParseError) {
     if i < end, b[i] == cLF { i += 1; return }
     guard i + 1 < end, b[i] == cCR, b[i + 1] == cLF else { throw error }
     i += 2
 }
 
 /// A whole request head, `b[start..<end]`, `end` just past its empty line.
-func parseRequestHead(_ b: UnsafeRawBufferPointer, start: Int, end: Int,
-                      maxFields: Int) throws(HTTP1Error) -> (HTTPRequestHead, Framing) {
+package func parseRequestHead(_ b: UnsafeRawBufferPointer, start: Int, end: Int,
+                      maxFields: Int) throws(HTTP1ParseError) -> (HTTPRequestHead, Framing) {
     var i = start
     let methodStart = i
     while i < end, isTokenChar(b[i]) { i += 1 }
@@ -231,11 +183,11 @@ func parseRequestHead(_ b: UnsafeRawBufferPointer, start: Int, end: Int,
 }
 
 /// A whole response head, `b[start..<end]`.
-func parseResponseHead(_ b: UnsafeRawBufferPointer, start: Int, end: Int,
-                       maxFields: Int) throws(HTTP1Error) -> (HTTPResponseHead, Framing) {
+package func parseResponseHead(_ b: UnsafeRawBufferPointer, start: Int, end: Int,
+                       maxFields: Int) throws(HTTP1ParseError) -> (HTTPResponseHead, Framing) {
     var i = start
     let v: HTTPVersion
-    do throws(HTTP1Error) { v = try version(b, i, end: end) } catch { throw .badStatusLine }
+    do throws(HTTP1ParseError) { v = try version(b, i, end: end) } catch { throw .badStatusLine }
     i += 8
     guard end - i >= 4, b[i] == cSP else { throw .badStatusLine }
     var status = 0
@@ -263,8 +215,8 @@ func parseResponseHead(_ b: UnsafeRawBufferPointer, start: Int, end: Int,
 }
 
 /// A message body being read.
-struct BodyReader {
-    enum State {
+package struct BodyReader {
+    package enum State {
         /// This many bytes to go (more than zero).
         case fixed(Int)
         /// Up to the next chunk-size line (after the CRLF ending a chunk,
@@ -278,15 +230,21 @@ struct BodyReader {
         case done
     }
 
-    var state: State
+    package var state: State
     var maxFields: Int
     var maxTrailerSize: Int
 
-    enum Part { case body([UInt8]), end(HTTPFields?) }
+    package init(state: State, maxFields: Int, maxTrailerSize: Int) {
+        self.state = state
+        self.maxFields = maxFields
+        self.maxTrailerSize = maxTrailerSize
+    }
+
+    package enum Part { case body([UInt8]), end(HTTPFields?) }
 
     /// The next part from `b`, or nil if it needs more bytes. Chunk framing
     /// is only consumed together with a part, so nothing is lost on nil.
-    mutating func next(_ b: UnsafeRawBufferPointer) throws(HTTP1Error) -> (Part, Int)? {
+    package mutating func next(_ b: UnsafeRawBufferPointer) throws(HTTP1ParseError) -> (Part, Int)? {
         var i = 0
         var st = state
         while true {
@@ -336,7 +294,7 @@ struct BodyReader {
     }
 
     /// The trailer section after the last chunk, at `i`.
-    private mutating func trailers(_ b: UnsafeRawBufferPointer, _ start: Int) throws(HTTP1Error) -> (Part, Int)? {
+    private mutating func trailers(_ b: UnsafeRawBufferPointer, _ start: Int) throws(HTTP1ParseError) -> (Part, Int)? {
         guard start < b.count else { return nil }
         if b[start] == cLF {
             state = .done

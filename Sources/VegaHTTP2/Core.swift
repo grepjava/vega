@@ -1,6 +1,6 @@
 import Vega
 import VegaIO
-import VegaHTTP1
+import VegaHTTP
 import VegaWire
 import VegaHTTP2Core
 
