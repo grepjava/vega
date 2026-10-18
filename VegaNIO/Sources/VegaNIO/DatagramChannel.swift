@@ -227,7 +227,7 @@ final class VegaDatagramChannel: Channel, ChannelCore, @unchecked Sendable {
                 return
             }
             do throws(VegaIOError) {
-                try socket.connect(to: target)
+                try socket.setPeer(target)
             } catch {
                 promise?.fail(nioError(error))
                 return
@@ -458,15 +458,15 @@ protocol DatagramSocket: ~Copyable, Sendable {
     func send(_ bytes: UnsafeRawBufferPointer) async throws(VegaIOError) -> Int
     func send(_ bytes: UnsafeRawBufferPointer, to address: VegaAddress) async throws(VegaIOError) -> Int
     func receiveFrom(into buffer: inout IOBuffer) async throws(VegaIOError) -> (count: Int, from: VegaAddress)
-    func connect(to address: VegaAddress) throws(VegaIOError)
+    func setPeer(_ address: VegaAddress) throws(VegaIOError)
 }
 
 extension UDPSocket: DatagramSocket {}
 
 extension UnixDatagram: DatagramSocket {
     /// A Unix address's host is its path.
-    func connect(to address: VegaAddress) throws(VegaIOError) {
-        try connect(path: address.host)
+    func setPeer(_ address: VegaAddress) throws(VegaIOError) {
+        try setPeer(path: address.host)
     }
 }
 
@@ -648,7 +648,7 @@ final class DatagramIO<Socket: DatagramSocket & ~Copyable>: Sendable {
     /// Set the default peer.
     func connect(to address: VegaAddress) throws(VegaIOError) {
         guard let box = box.withLockedValue({ $0 }) else { throw .cancelled }
-        try box.socket.connect(to: address)
+        try box.socket.setPeer(address)
     }
 
     func wantRead() {

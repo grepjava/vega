@@ -5,7 +5,7 @@ import class Vega.Runtime
 import struct Vega.TCPStream
 import struct Vega.UnixStream
 import struct Vega.IOBuffer
-import struct Vega.SplitStream
+import struct Vega.StreamHalves
 import struct Vega.ReadHalf
 import struct Vega.WriteHalf
 import struct Vega.PipeReader
@@ -554,7 +554,7 @@ struct Options {
 /// A connected stream on its way to its channel, split into halves, with
 /// what the channel needs to know about it.
 final class StreamBox: @unchecked Sendable {
-    var halves: SplitStream?
+    var halves: StreamHalves<ReadHalf, WriteHalf>?
     /// The socket, for options: -1 without one (Network.framework).
     let fd: Int32
     let local: SocketAddress?
