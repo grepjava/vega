@@ -35,9 +35,9 @@ public struct PipeReader: ~Copyable, Sendable {
     public var descriptor: Int32 { reg.fd }
 
     /// Read into `buffer`'s spare capacity. Returns the bytes read: 0 once
-    /// every writer has closed (or with a full buffer).
+    /// every writer has closed; a full buffer throws `IOError.limitExceeded`.
     public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
-        guard buffer.spareCapacity > 0 else { return 0 }
+        guard buffer.spareCapacity > 0 else { throw IOError.readIntoFullBuffer }
         #if os(Windows)
         let io = reg.io
         let n = try await reg.perform(CV_IO_READ) {

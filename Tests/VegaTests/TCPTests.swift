@@ -43,6 +43,30 @@ func roundTrip(port: Int, message: String) async throws(IOError) -> String {
         #expect(reply == "hello vega")
     }
 
+    /// A full buffer can't be told from end of stream by a 0, so the read
+    /// throws instead.
+    @Test func readIntoAFullBufferThrows() throws {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let error = try rt.block { () async throws(IOError) -> IOError? in
+            let listener = try TCPListener.bind(host: "127.0.0.1", port: 0)
+            let client = try await TCPStream.connect(host: "127.0.0.1", port: listener.localPort)
+            let conn = try await listener.accept()
+            var out = IOBuffer(capacity: 4)
+            out.append("vega")
+            try await client.write(out)
+            var buf = IOBuffer(capacity: 4)
+            try await readExactly(conn, 4, into: &buf)
+            do throws(IOError) {
+                _ = try await conn.read(into: &buf)
+                return nil
+            } catch {
+                return error
+            }
+        }
+        #expect(error == .limitExceeded)
+    }
+
     @Test func manyConnectionsEachServedByOwnTask() throws {
         let rt = Runtime(workers: 4)
         defer { rt.shutdown() }

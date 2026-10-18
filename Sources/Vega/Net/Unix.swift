@@ -77,7 +77,7 @@ public struct UnixStream: ~Copyable, Sendable {
     deinit { reg.close() }
 
     /// Read into `buffer`'s spare capacity. Returns the bytes read: 0 means
-    /// the peer closed its side (or the buffer has no room left).
+    /// the peer closed its side; a full buffer throws `IOError.limitExceeded`.
     @inlinable
     public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
         // Inlined, a read on the ring suspends the caller directly: see

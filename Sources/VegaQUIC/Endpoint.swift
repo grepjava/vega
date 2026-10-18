@@ -30,6 +30,13 @@ import CVega
 import Synchronization
 import Vega
 import VegaIO
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#elseif os(Windows)
+import ucrt
+#endif
 @_spi(Garuda) @_exported import VegaQUICCore
 @_spi(Garuda) import VegaWire
 
@@ -176,7 +183,7 @@ public final class QUICEndpoint: @unchecked Sendable {
             throw .io(error)
         }
         guard let peer = addresses.first(where: { $0.isIPv6 == localIsIPv6 }) else {
-            throw .io(IOError(code: -3, message: "\(host) has no \(localIsIPv6 ? "IPv6" : "IPv4") address for this endpoint"))
+            throw .io(IOError(code: EADDRNOTAVAIL, message: "\(host) has no \(localIsIPv6 ? "IPv6" : "IPv4") address for this endpoint"))
         }
         guard let quic = QUICConnectionState(client: configuration, nowMs: Self.nowMs()) else {
             throw .connectionClosed(code: QUICErrorCode.internalError.rawValue, application: false)

@@ -59,8 +59,8 @@ public struct DuplexStream: ~Copyable, Sendable, AsyncReader, AsyncWriter {
     }
 
     /// Read into `buffer`'s spare capacity, waiting while nothing is
-    /// buffered. Returns the bytes read: 0 at end of stream or with a full
-    /// buffer.
+    /// buffered. Returns the bytes read: 0 at end of stream;
+    /// a full buffer throws `IOError.limitExceeded`.
     public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
         try await incoming.read(into: &buffer)
     }
@@ -172,7 +172,7 @@ fileprivate final class Pipe: @unchecked Sendable {
     var buffered: Int { state.withLock { $0.buffered } }
 
     func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
-        guard buffer.spareCapacity > 0 else { return 0 }
+        guard buffer.spareCapacity > 0 else { throw IOError.readIntoFullBuffer }
         while true {
             let want = buffer.spareCapacity, before = buffer.count
             var woken: [Waiter] = []

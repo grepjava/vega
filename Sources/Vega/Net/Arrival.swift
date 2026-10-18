@@ -99,7 +99,7 @@ extension IORegistration {
     func readStamped(into buffer: inout IOBuffer,
                      _ arrival: UnsafeMutablePointer<cv_arrival>) async throws(IOError) -> Int {
         arrival.pointee.micros = 0
-        guard buffer.spareCapacity > 0 else { return 0 }
+        guard buffer.spareCapacity > 0 else { throw IOError.readIntoFullBuffer }
         #if canImport(Network)
         if let nw { return try await nwRead(into: &buffer, nw) }
         #endif

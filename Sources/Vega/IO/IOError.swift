@@ -46,6 +46,18 @@ public struct IOError: Error, Hashable, CustomStringConvertible {
     /// The peer closed the connection without a TLS close_notify, so the
     /// data may have been cut short.
     public static let tlsTruncated = IOError(code: -5)
+    /// Something grew past the limit the caller set on it (a line with no
+    /// delimiter, a message longer than allowed): `message` says what.
+    public static let limitExceeded = IOError(code: -6)
+    /// The stream ended part-way through something the caller asked for in
+    /// full, such as `readExactly`'s bytes.
+    public static let unexpectedEndOfStream = IOError(code: -7)
+
+    /// What a stream read into an `IOBuffer` with no spare capacity throws:
+    /// returning 0 would read as end of stream.
+    package static var readIntoFullBuffer: IOError {
+        IOError(code: limitExceeded.code, message: "read into a full IOBuffer")
+    }
 
     /// A `Runtime.withIOTimeout` deadline passed while waiting (or a
     /// connect timed out). As with `cancelled`, that operation was abandoned.
@@ -66,6 +78,8 @@ public struct IOError: Error, Hashable, CustomStringConvertible {
         case -3: base = "no I/O driver on this platform"
         case -4: base = "TLS failure"
         case -5: base = "connection closed without TLS close_notify"
+        case -6: base = "limit exceeded"
+        case -7: base = "unexpected end of stream"
         default: base = "\(String(cString: strerror(code))) (errno \(code))"
         }
         guard let message else { return base }

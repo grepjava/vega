@@ -26,6 +26,7 @@ public struct BufferedReader<Reader: AsyncReader & ~Copyable>: ~Copyable, AsyncR
     /// Read into `buffer`: from what is buffered, or, when nothing is and
     /// `buffer` has room for a buffer's worth, straight from the stream.
     public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
+        guard buffer.spareCapacity > 0 else { throw IOError.readIntoFullBuffer }
         if storage.count == 0 && buffer.spareCapacity >= storage.capacity {
             return try await reader.read(into: &buffer)
         }
@@ -50,7 +51,7 @@ public struct BufferedReader<Reader: AsyncReader & ~Copyable>: ~Copyable, AsyncR
             if let found = storage.take(through: delimiter, appendingTo: &out) {
                 return found
             }
-            if out.count > limit { throw IOError(code: -6, message: "no delimiter in \(limit) bytes") }
+            if out.count > limit { throw IOError(code: IOError.limitExceeded.code, message: "no delimiter in \(limit) bytes") }
             if try await fill() == 0 { return out.isEmpty ? nil : out }
         }
     }
@@ -64,13 +65,13 @@ public struct BufferedReader<Reader: AsyncReader & ~Copyable>: ~Copyable, AsyncR
         return String(decoding: line, as: UTF8.self)
     }
 
-    /// Exactly `count` bytes; throws `.connectionReset` if the stream ends
-    /// first.
+    /// Exactly `count` bytes; throws `.unexpectedEndOfStream` if the stream
+    /// ends first.
     public func readExactly(_ count: Int) async throws(IOError) -> [UInt8] {
         var out: [UInt8] = []
         out.reserveCapacity(count)
         while out.count < count {
-            if storage.count == 0, try await fill() == 0 { throw .connectionReset }
+            if storage.count == 0, try await fill() == 0 { throw .unexpectedEndOfStream }
             storage.take(upTo: count - out.count, appendingTo: &out)
         }
         return out

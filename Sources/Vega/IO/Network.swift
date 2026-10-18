@@ -364,7 +364,7 @@ final class NetworkStream: NetworkHandle, @unchecked Sendable {
     }
 
     func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
-        guard buffer.spareCapacity > 0 else { return 0 }
+        guard buffer.spareCapacity > 0 else { throw IOError.readIntoFullBuffer }
         while true {
             lock.lock()
             if stashStart < stash.count {

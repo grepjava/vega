@@ -27,7 +27,7 @@ private func byte(_ value: UInt8) -> IOBuffer {
 }
 
 @Suite("Runtime.withIOTimeout")
-struct IODeadlineTests {
+struct IOTimeoutTests {
     /// A read with nothing to read gives up at the deadline. The task is not
     /// cancelled, and the stream still works.
     @Test func aWaitGivesUpAtTheDeadline() throws {

@@ -50,7 +50,7 @@ struct BufferedTests {
                 return error
             }
         }
-        #expect(error == .connectionReset)
+        #expect(error == .unexpectedEndOfStream)
     }
 
     @Test func contentLengthFraming() throws {

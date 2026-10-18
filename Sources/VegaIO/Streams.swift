@@ -5,7 +5,9 @@ import Vega
 /// duplex stream.
 public protocol AsyncReader: ~Copyable {
     /// Read into `buffer`'s spare capacity. Returns the bytes read: 0 means
-    /// end of stream (or a full buffer).
+    /// end of stream. A buffer with no spare capacity throws
+    /// `IOError.limitExceeded`: make room first (`reserveCapacity(_:)`,
+    /// `consume(_:)`), so that 0 can only mean the end.
     func read(into buffer: inout IOBuffer) async throws(IOError) -> Int
 
     /// `read(into:)`, saying in `arrival` when the bytes read arrived where

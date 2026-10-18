@@ -121,7 +121,7 @@ public struct VsockStream: ~Copyable, Sendable {
     public var peerAddress: VsockAddress { get throws(IOError) { try reg.vsockAddress(local: false) } }
 
     /// Read into `buffer`'s spare capacity. Returns the bytes read: 0 means
-    /// the peer closed its side (or the buffer has no room left).
+    /// the peer closed its side; a full buffer throws `IOError.limitExceeded`.
     @inlinable
     public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
         // Inlined, a read on the ring suspends the caller directly: see

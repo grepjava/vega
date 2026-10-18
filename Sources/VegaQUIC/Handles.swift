@@ -311,7 +311,7 @@ public final class QUICStream: AsyncReader, AsyncWriter, Sendable {
             case .failed(let error): throw error.asIOError
             case nil: break
             }
-            if buffer.spareCapacity == 0 { return 0 }
+            if buffer.spareCapacity == 0 { throw IOError.readIntoFullBuffer }
             try await waitToRead()
         }
     }
@@ -346,7 +346,7 @@ public final class QUICStream: AsyncReader, AsyncWriter, Sendable {
             let n = try await read(into: &buffer)
             if n == 0 { return all }
             buffer.withUnsafeBytes { all.append(contentsOf: $0) }
-            if all.count > limit { throw IOError(code: -6, message: "QUIC stream longer than \(limit) bytes") }
+            if all.count > limit { throw IOError(code: IOError.limitExceeded.code, message: "QUIC stream longer than \(limit) bytes") }
         }
     }
 

@@ -203,7 +203,8 @@ public struct File: ~Copyable, Sendable {
     // MARK: - Reading
 
     /// Read into `buffer`'s spare capacity at the file position, advancing
-    /// it. Returns the bytes read: 0 at end of file (or with a full buffer).
+    /// it. Returns the bytes read: 0 at end of file;
+    /// a full buffer throws `IOError.limitExceeded`.
     public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
         try await read(into: &buffer, offset: -1)
     }
@@ -232,7 +233,7 @@ public struct File: ~Copyable, Sendable {
 
     private func read(into buffer: inout IOBuffer, offset: Int64) async throws(IOError) -> Int {
         let want = buffer.spareCapacity
-        guard want > 0 else { return 0 }
+        guard want > 0 else { throw IOError.readIntoFullBuffer }
         let fd = descriptor
         let n: Int
         if let res = await FileIO.read(fd, into: buffer.spareBytes, count: want, at: offset) {

@@ -110,9 +110,9 @@ public struct TLSStream<Transport: AsyncReader & AsyncWriter & ~Copyable>: ~Copy
     // MARK: - Data
 
     /// Read plaintext into `buffer`'s spare capacity: the bytes read, or 0
-    /// once the peer has closed with close_notify (or with a full buffer).
+    /// once the peer has closed with close_notify; a full buffer throws `IOError.limitExceeded`.
     public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
-        guard buffer.spareCapacity > 0 else { return 0 }
+        guard buffer.spareCapacity > 0 else { throw IOError.readIntoFullBuffer }
         #if os(Linux)
         if state.kernelReceivePending { state.startKernelReceive() }
         if state.kernelReceives { return try await state.kernelRead(from: transport, into: &buffer) }
@@ -244,7 +244,7 @@ public struct TLSReader<Transport: AsyncReader & ~Copyable>: ~Copyable, AsyncRea
 
     /// Read plaintext: the bytes read, or 0 after the peer's close_notify.
     public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
-        guard buffer.spareCapacity > 0 else { return 0 }
+        guard buffer.spareCapacity > 0 else { throw IOError.readIntoFullBuffer }
         #if os(Linux)
         if state.kernelReceivePending { state.startKernelReceive() }
         if state.kernelReceives { return try await state.kernelRead(from: transport, into: &buffer) }

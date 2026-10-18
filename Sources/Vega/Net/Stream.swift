@@ -99,7 +99,7 @@ extension IORegistration {
     /// Read into `buffer`'s spare capacity: bytes read, 0 at end of stream.
     @inline(__always)
     func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
-        guard buffer.spareCapacity > 0 else { return 0 }
+        guard buffer.spareCapacity > 0 else { throw IOError.readIntoFullBuffer }
         #if canImport(Network)
         if let nw { return try await nwRead(into: &buffer, nw) }
         #endif
@@ -911,7 +911,7 @@ public struct ReadHalf: ~Copyable, Sendable {
     deinit { reg.close() }
 
     /// Read into `buffer`'s spare capacity. Returns the bytes read: 0 means
-    /// the peer closed its side (or the buffer has no room left).
+    /// the peer closed its side; a full buffer throws `IOError.limitExceeded`.
     @inlinable
     public func read(into buffer: inout IOBuffer) async throws(IOError) -> Int {
         // Inlined, a read on the ring suspends the caller directly: see
