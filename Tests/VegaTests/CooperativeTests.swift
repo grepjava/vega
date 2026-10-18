@@ -1,6 +1,6 @@
 import Synchronization
 import Testing
-@testable import Vega
+@_spi(Garuda) @testable import Vega
 
 /// Atomics in a box, so escaping closures can share them.
 final class Flag: Sendable {

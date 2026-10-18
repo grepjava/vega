@@ -1,4 +1,4 @@
-@_spi(VegaTest) import Vega
+import Vega
 
 /// Paused time for a runtime, for tests: Tokio's `time::pause`, `advance`
 /// and auto-advance.

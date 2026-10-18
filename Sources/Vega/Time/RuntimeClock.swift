@@ -113,36 +113,35 @@ extension Scheduler {
     }
 }
 
-// Hooks for VegaTest's MockClock. SPI: paused time is for tests only.
-@_spi(VegaTest)
+// Hooks for VegaTest's MockClock and seeded runtime: paused time is for tests only.
 extension Runtime {
     /// Freeze the runtime's timers at the current time.
-    public func pauseClock(autoAdvance: Bool) {
+    package func pauseClock(autoAdvance: Bool) {
         scheduler.clock.pause(autoAdvance: autoAdvance, origin: scheduler.timers.origin,
                               tick: TimerWheel.tickNanos)
         scheduler.clockAdvanced() // the timer owner re-plans its sleep
     }
 
     /// Let the clock run again, at real speed, from the paused time.
-    public func resumeClock() {
+    package func resumeClock() {
         scheduler.clock.resume()
         scheduler.clockAdvanced()
     }
 
-    public var isClockPaused: Bool { scheduler.clock.isPaused }
+    package var isClockPaused: Bool { scheduler.clock.isPaused }
 
     /// The runtime clock's time.
-    public var clockNow: ContinuousClock.Instant { scheduler.clock.instant(scheduler.clock.now) }
+    package var clockNow: ContinuousClock.Instant { scheduler.clock.instant(scheduler.clock.now) }
 
     /// Move paused time forward by `duration` and fire the timers that came due.
-    public func advanceClock(by duration: Duration) {
+    package func advanceClock(by duration: Duration) {
         let now = scheduler.clock.now
         let ns = UInt64(clamping: Scheduler.nanoseconds(duration))
         advanceClock(toNanos: ns > UInt64.max - now ? UInt64.max - 1 : now + ns)
     }
 
     /// Move paused time forward to `deadline` (never back).
-    public func advanceClock(to deadline: ContinuousClock.Instant) {
+    package func advanceClock(to deadline: ContinuousClock.Instant) {
         advanceClock(toNanos: scheduler.clock.nanos(deadline))
     }
 

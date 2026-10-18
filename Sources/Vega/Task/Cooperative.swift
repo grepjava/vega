@@ -1,6 +1,6 @@
 /// Something to do once the job running now has returned: see
 /// `Runtime.afterJob(_:)`.
-public protocol JobEndAction: AnyObject, Sendable {
+@_spi(Garuda) public protocol JobEndAction: AnyObject, Sendable {
     /// The job that asked has returned. Runs on the worker that ran it,
     /// outside any task: start a task for anything that waits.
     func jobEnded()
@@ -16,7 +16,7 @@ extension Runtime {
     /// held until it has run. False off a Vega worker, and when the worker
     /// is holding as many actions as it has room for: then do the work
     /// another way.
-    public static func afterJob(_ action: some JobEndAction) -> Bool {
+    @_spi(Garuda) public static func afterJob(_ action: some JobEndAction) -> Bool {
         guard let w = Worker.current else { return false }
         return w._withUnsafeGuaranteedRef { $0.afterJob(action) }
     }
