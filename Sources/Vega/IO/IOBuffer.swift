@@ -80,6 +80,12 @@ public struct IOBuffer: ~Copyable, @unchecked Sendable {
         readable -= n
     }
 
+    /// Drop the last `n` readable bytes.
+    public mutating func removeLast(_ n: Int) {
+        precondition(n >= 0 && n <= count, "removeLast past the readable bytes")
+        readable -= n
+    }
+
     /// The readable bytes.
     @inlinable
     public func withUnsafeBytes<R, E: Error>(_ body: (UnsafeRawBufferPointer) throws(E) -> R) throws(E) -> R {
