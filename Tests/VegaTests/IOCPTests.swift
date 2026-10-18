@@ -238,7 +238,7 @@ private struct Bytes: @unchecked Sendable {
             // A connected pair: send and receive to the default peer.
             let a = try UDPSocket.bind(host: "127.0.0.1", port: 0)
             let b = try UDPSocket.connect(to: try a.localAddress)
-            try a.connect(to: try b.localAddress)
+            try a.setPeer(try b.localAddress)
             let echo = rt.spawn(with: b) { b async -> Bool in
                 try? await Runtime.sleep(for: .milliseconds(50))
                 return (try? await b.send(one.all)) == 1

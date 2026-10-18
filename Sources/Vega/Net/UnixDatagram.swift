@@ -81,8 +81,9 @@ public struct UnixDatagram: ~Copyable, Sendable {
     /// Its own address ("" for an unbound socket).
     public var localAddress: SocketAddress { get throws(IOError) { try reg.localAddress } }
 
-    /// Set the default peer, for `send(_:)` and `receive(into:)`.
-    public func connect(path: String) throws(IOError) {
+    /// Set the default peer, for `send(_:)` and `receive(into:)` (POSIX
+    /// `connect`).
+    public func setPeer(path: String) throws(IOError) {
         let to = try SocketAddress(unixPath: path)
         let e = withUnsafePointer(to: to.raw) { cv_connect_address(reg.fd, $0) }
         if e != 0 { throw IOError(code: e) }

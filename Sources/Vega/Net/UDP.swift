@@ -62,8 +62,9 @@ public struct UDPSocket: ~Copyable, Sendable {
 
     public var localAddress: SocketAddress { get throws(IOError) { try reg.localAddress } }
 
-    /// Set the default peer (see `connect(host:port:)`).
-    public func connect(to address: SocketAddress) throws(IOError) {
+    /// Set the default peer, for `send(_:)` and `receive(into:)`, as
+    /// `connect(to:)` does for a new socket (POSIX `connect` on this one).
+    public func setPeer(_ address: SocketAddress) throws(IOError) {
         let e = withUnsafePointer(to: address.raw) { cv_connect_address(reg.fd, $0) }
         if e != 0 { throw IOError(code: e) }
     }

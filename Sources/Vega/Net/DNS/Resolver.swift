@@ -76,12 +76,14 @@ public struct ResolveError: Error, Hashable, Sendable, CustomStringConvertible {
         }
     }
 
-    /// As an `IOError`, for APIs that throw those.
+    /// As an `IOError`, for APIs that throw those: in the terms
+    /// `SocketAddress.lookup` uses for `getaddrinfo`'s failures.
     var ioError: IOError {
         switch code {
         case .cancelled: .cancelled
-        case .unanswered: IOError(code: ETIMEDOUT)
-        default: IOError(code: EADDRNOTAVAIL)
+        case .noSuchName, .noAddress: .hostNotFound
+        case .badName: IOError(code: EINVAL)
+        default: .lookupFailed
         }
     }
 }

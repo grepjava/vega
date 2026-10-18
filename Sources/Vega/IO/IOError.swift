@@ -52,6 +52,11 @@ public struct IOError: Error, Hashable, CustomStringConvertible {
     /// The stream ended part-way through something the caller asked for in
     /// full, such as `readExactly`'s bytes.
     public static let unexpectedEndOfStream = IOError(code: -7)
+    /// A name lookup found no such host, or no address for it.
+    public static let hostNotFound = IOError(code: -8)
+    /// A name lookup failed for some other reason: the resolver couldn't be
+    /// reached, or gave up. Often temporary.
+    public static let lookupFailed = IOError(code: -9)
 
     /// What a stream read into an `IOBuffer` with no spare capacity throws:
     /// returning 0 would read as end of stream.
@@ -80,6 +85,8 @@ public struct IOError: Error, Hashable, CustomStringConvertible {
         case -5: base = "connection closed without TLS close_notify"
         case -6: base = "limit exceeded"
         case -7: base = "unexpected end of stream"
+        case -8: base = "host not found"
+        case -9: base = "name lookup failed"
         default: base = "\(String(cString: strerror(code))) (errno \(code))"
         }
         guard let message else { return base }

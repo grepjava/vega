@@ -124,6 +124,24 @@ func tempSocketPath() -> String {
     }
 }
 
+@Suite struct LookupTests {
+    /// `.invalid` never resolves (RFC 6761). Without a network the lookup
+    /// may fail instead of finding nothing; either is named, not an errno.
+    @Test func anUnknownHostIsNotFound() throws {
+        let rt = Runtime(workers: 1)
+        defer { rt.shutdown() }
+        let error = rt.block { () async -> IOError? in
+            do throws(IOError) {
+                _ = try await SocketAddress.lookup(host: "no-such-host.invalid", port: 80)
+                return nil
+            } catch {
+                return error
+            }
+        }
+        #expect(error == .hostNotFound || error == .lookupFailed, "\(String(describing: error))")
+    }
+}
+
 @Suite struct UDPTests {
     @Test func sendToAndReceiveFrom() throws {
         let rt = Runtime(workers: 2)

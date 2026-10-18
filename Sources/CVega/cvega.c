@@ -2111,7 +2111,14 @@ int cv_resolve_all(const char *host, int port, int numeric_only, cv_sockaddr *ou
     int rc = getaddrinfo(host && *host ? host : NULL, service, &hints, &res);
     if (rc != 0) {
         if (numeric_only && rc == EAI_NONAME) return -1;
-        return rc == EAI_SYSTEM ? errno : EADDRNOTAVAIL;
+        // IOError's codes: -8 host not found, -9 the lookup failed.
+        if (rc == EAI_NONAME) return -8;
+#if defined(EAI_NODATA) && EAI_NODATA != EAI_NONAME
+        if (rc == EAI_NODATA) return -8;
+#endif
+        if (rc == EAI_SYSTEM) return errno;
+        if (rc == EAI_MEMORY) return ENOMEM;
+        return -9;
     }
     for (struct addrinfo *a = res; a && *count < max; a = a->ai_next) {
         if (a->ai_addrlen > sizeof out->storage) continue;
