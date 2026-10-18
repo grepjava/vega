@@ -60,7 +60,7 @@ struct CurlInteropTests {
         for i in 0..<40 { arguments.append("$URL/\(i)") }
         let out = try curl(tls: true, arguments) { conn in
             guard let tls = try? await TLSStream.accept(conn, context: server) else { return }
-            try? await HTTP2Server.serve(tls.halves(), Self.handler)
+            try? await HTTP2Server.serve(tls.split(), Self.handler)
         }
         #expect(out.status.isSuccess, "\(out.stderrString)")
         let text = out.stdoutString
@@ -74,7 +74,7 @@ struct CurlInteropTests {
         let server = try TLSContext(.server(identity: identity, applicationProtocols: ["h2"]))
         let out = try curl(tls: true, ["-k", "--http2", "--data-binary", String(repeating: "x", count: 100_000), "$URL/big"]) { conn in
             guard let tls = try? await TLSStream.accept(conn, context: server) else { return }
-            try? await HTTP2Server.serve(tls.halves(), Self.handler)
+            try? await HTTP2Server.serve(tls.split(), Self.handler)
         }
         #expect(out.status.isSuccess, "\(out.stderrString)")
         #expect(out.stdoutString == "POST /big 100000\n")

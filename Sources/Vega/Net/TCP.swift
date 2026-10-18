@@ -198,11 +198,11 @@ public struct TCPStream: ~Copyable, Sendable {
     /// Split into a reading half and a writing half that different tasks
     /// can use at the same time. No reference counting: the halves share
     /// the registration, and the second to be dropped closes the socket.
-    public consuming func split() -> SplitStream {
+    public consuming func split() -> StreamHalves<ReadHalf, WriteHalf> {
         let reg = self.reg
         discard self
         cv_io_split(reg.io)
-        return SplitStream(reader: ReadHalf(reg: reg), writer: WriteHalf(reg: reg))
+        return StreamHalves(reader: ReadHalf(reg: reg), writer: WriteHalf(reg: reg))
     }
 }
 

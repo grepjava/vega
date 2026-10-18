@@ -236,7 +236,7 @@ public enum SOCKS5 {
         }
         try await reply(.succeeded, bound: try? upstream.localAddress, on: client)
         do throws(IOError) {
-            try await copyBidirectional(client.halves(), upstream.halves())
+            try await copyBidirectional(client.split(), upstream.split())
         } catch {
             throw .io(error)
         }

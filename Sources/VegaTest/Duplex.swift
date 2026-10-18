@@ -38,13 +38,6 @@ public struct DuplexStream: ~Copyable, Sendable, AsyncReader, AsyncWriter {
         public var second: DuplexStream
     }
 
-    /// The two sides `split()` returns.
-    @frozen
-    public struct Split: ~Copyable, Sendable {
-        public var reader: DuplexReader
-        public var writer: DuplexWriter
-    }
-
     private let incoming: Pipe
     private let outgoing: Pipe
 
@@ -84,16 +77,8 @@ public struct DuplexStream: ~Copyable, Sendable, AsyncReader, AsyncWriter {
 
     /// The read and write sides, to use from separate tasks. The peer reads
     /// end of stream once the writer is dropped.
-    public consuming func split() -> Split {
-        Split(reader: DuplexReader(incoming), writer: DuplexWriter(outgoing))
-    }
-}
-
-extension DuplexStream {
-    /// `split()`, as `StreamHalves`.
-    public consuming func halves() -> StreamHalves<DuplexReader, DuplexWriter> {
-        let split = split()
-        return StreamHalves(reader: split.reader, writer: split.writer)
+    public consuming func split() -> StreamHalves<DuplexReader, DuplexWriter> {
+        StreamHalves(reader: DuplexReader(incoming), writer: DuplexWriter(outgoing))
     }
 }
 

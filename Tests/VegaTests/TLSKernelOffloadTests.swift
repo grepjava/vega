@@ -302,7 +302,7 @@ private let sizes = [1, 100, 5000, 16 * 1024, 16 * 1024 + 1, 40_000, 64 * 1024, 
             let serverTask = rt.spawn(with: listener) { l async -> TLSConfiguration.KernelOffload in
                 guard let conn = try? await l.accept(),
                       let tls = try? await TLSStream.accept(conn, context: server) else { return .off }
-                let halves = tls.halves()
+                let halves = tls.split()
                 let channel = MPSCChannel<[UInt8]>(capacity: 4)
                 rt.spawn(with: Pump(reader: halves.reader, sender: channel.sender)) { pump async in
                     var buf = IOBuffer(capacity: 64 * 1024)
@@ -325,7 +325,7 @@ private let sizes = [1, 100, 5000, 16 * 1024, 16 * 1024 + 1, 40_000, 64 * 1024, 
             }
             let tcp = try await TCPStream.connect(host: "127.0.0.1", port: port)
             let tls = try await TLSStream.connect(tcp, serverName: "vega.test", context: client)
-            let halves = tls.halves()
+            let halves = tls.split()
             rt.spawn(with: halves.writer) { writer async in
                 var sent = 0
                 while sent < total {
@@ -388,7 +388,7 @@ private let sizes = [1, 100, 5000, 16 * 1024, 16 * 1024 + 1, 40_000, 64 * 1024, 
                 rt.spawn(with: listener) { l async in
                     guard let conn = try? await l.accept(),
                           let tls = try? await TLSStream.accept(conn, context: server) else { return }
-                    let halves = tls.halves()
+                    let halves = tls.split()
                     _ = try? await halves.writer.sendFile(fd, offset: 0, count: size)
                     try? await halves.writer.close()
                 }

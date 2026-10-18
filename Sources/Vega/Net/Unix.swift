@@ -161,11 +161,11 @@ public struct UnixStream: ~Copyable, Sendable {
 
     /// Split into halves that different tasks can use at once (see
     /// `TCPStream.split()`).
-    public consuming func split() -> SplitStream {
+    public consuming func split() -> StreamHalves<ReadHalf, WriteHalf> {
         let reg = self.reg
         discard self
         cv_io_split(reg.io)
-        return SplitStream(reader: ReadHalf(reg: reg), writer: WriteHalf(reg: reg))
+        return StreamHalves(reader: ReadHalf(reg: reg), writer: WriteHalf(reg: reg))
     }
 }
 #endif

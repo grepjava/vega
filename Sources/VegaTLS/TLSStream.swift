@@ -209,7 +209,7 @@ extension TLSStream where Transport: ~Copyable {
     /// `splitTransport` makes of the transport:
     ///
     /// ```swift
-    /// let halves = tls.split { $0.halves() }
+    /// let halves = tls.split { $0.split() }
     /// ```
     ///
     /// The writer sends anything reading makes the engine want to send (a
@@ -227,8 +227,8 @@ extension TLSStream where Transport: ~Copyable {
 
 extension TLSStream where Transport == TCPStream {
     /// `split(_:)` over the TCP stream's halves.
-    public consuming func halves() -> StreamHalves<TLSReader<ReadHalf>, TLSWriter<WriteHalf>> {
-        split { $0.halves() }
+    public consuming func split() -> StreamHalves<TLSReader<ReadHalf>, TLSWriter<WriteHalf>> {
+        split { $0.split() }
     }
 }
 

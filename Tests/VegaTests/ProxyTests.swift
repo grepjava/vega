@@ -165,7 +165,7 @@ private func roundTrip(_ stream: borrowing TCPStream, _ text: String) async thro
             let relay = rt.spawn(with: listener) { l async -> (Int, Int) in
                 guard let conn = try? await l.accept(),
                       let upstream = try? await TCPStream.connect(host: "127.0.0.1", port: echo),
-                      let counts = try? await copyBidirectional(conn.halves(), upstream.halves())
+                      let counts = try? await copyBidirectional(conn.split(), upstream.split())
                 else { return (-1, -1) }
                 return (counts.aToB, counts.bToA)
             }

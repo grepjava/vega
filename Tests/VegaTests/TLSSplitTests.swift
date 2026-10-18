@@ -31,7 +31,7 @@ private func pattern(_ i: Int) -> UInt8 { UInt8(truncatingIfNeeded: i &* 31 &+ i
             // The server echoes: a task reads into a channel, this one writes.
             rt.spawn(with: pair.second) { t async in
                 guard let tls = try? await TLSStream.accept(t, context: server) else { return }
-                let halves = tls.split { $0.halves() }
+                let halves = tls.split { $0.split() }
                 let channel = MPSCChannel<[UInt8]>(capacity: 4)
                 rt.spawn(with: Pump(reader: halves.reader, sender: channel.sender)) { pump async in
                     var buf = IOBuffer(capacity: 32 * 1024)
@@ -51,7 +51,7 @@ private func pattern(_ i: Int) -> UInt8 { UInt8(truncatingIfNeeded: i &* 31 &+ i
                 try? await halves.writer.close()
             }
             let tls = try await TLSStream.connect(pair.first, serverName: "vega.test", context: client)
-            let halves = tls.split { $0.halves() }
+            let halves = tls.split { $0.split() }
             rt.spawn(with: halves.writer) { writer async in
                 var chunk = IOBuffer(capacity: 64 * 1024)
                 var sent = 0
@@ -93,7 +93,7 @@ private func pattern(_ i: Int) -> UInt8 { UInt8(truncatingIfNeeded: i &* 31 &+ i
                     rt.spawn(with: conn) { conn async in
                         guard let tls = try? await TLSStream.accept(conn, context: server),
                               tls.applicationProtocol == "h2" else { return }
-                        try? await HTTP2Server.serve(tls.halves()) { request in
+                        try? await HTTP2Server.serve(tls.split()) { request in
                             HTTPResponse(body: "\(request.head.fields["host"] ?? "-") \(request.head.target) \(request.body.count)")
                         }
                     }
@@ -102,7 +102,7 @@ private func pattern(_ i: Int) -> UInt8 { UInt8(truncatingIfNeeded: i &* 31 &+ i
             let tcp = try await TCPStream.connect(host: "127.0.0.1", port: port)
             let tls = try await TLSStream.connect(tcp, serverName: "vega.test", context: client)
             let alpn = tls.applicationProtocol
-            let bodies = try await HTTP2Client.withConnection(tls.halves(), authority: "vega.test") { h2 in
+            let bodies = try await HTTP2Client.withConnection(tls.split(), authority: "vega.test") { h2 in
                 try await withThrowingTaskGroup(of: (Int, String).self) { group in
                     for i in 0..<32 {
                         group.addTask {

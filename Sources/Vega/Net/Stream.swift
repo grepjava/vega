@@ -888,8 +888,10 @@ extension IORegistration {
     }
 }
 
-/// A stream split in two (Swift has no tuples of `~Copyable` values). Move
-/// the halves out to separate tasks:
+/// A stream split into a read half and a write half, for two tasks to use
+/// at once: what `split()` returns on TCP, Unix, vsock, TLS and VegaTest's
+/// duplex streams (Swift has no tuples of `~Copyable` values). Move the
+/// halves out to separate tasks:
 ///
 /// ```swift
 /// let halves = stream.split()
@@ -897,10 +899,17 @@ extension IORegistration {
 /// let writer = halves.writer
 /// ```
 @frozen
-public struct SplitStream: ~Copyable, Sendable {
-    public var reader: ReadHalf
-    public var writer: WriteHalf
+public struct StreamHalves<Reader: ~Copyable, Writer: ~Copyable>: ~Copyable {
+    public var reader: Reader
+    public var writer: Writer
+
+    public init(reader: consuming Reader, writer: consuming Writer) {
+        self.reader = reader
+        self.writer = writer
+    }
 }
+
+extension StreamHalves: Sendable where Reader: Sendable & ~Copyable, Writer: Sendable & ~Copyable {}
 
 /// The reading half of a split stream. Dropping both halves closes the socket.
 public struct ReadHalf: ~Copyable, Sendable {
