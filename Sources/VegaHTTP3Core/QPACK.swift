@@ -25,8 +25,8 @@ import Glibc
 import Darwin
 #elseif os(Windows)
 import ucrt
-@_spi(Garuda) import VegaHTTP2Core
 #endif
+@_spi(Garuda) import VegaHTTP2Core
 
 
 @_spi(Garuda) public enum QPACKError: Error {

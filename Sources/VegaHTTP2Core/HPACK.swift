@@ -25,8 +25,8 @@ import Glibc
 import Darwin
 #elseif os(Windows)
 import ucrt
-@_spi(Garuda) import VegaWire
 #endif
+@_spi(Garuda) import VegaWire
 
 
 package enum HPACKError: Error, Equatable {
