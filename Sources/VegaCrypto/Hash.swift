@@ -72,11 +72,19 @@ public struct CryptoError: Error, Hashable, Sendable, CustomStringConvertible {
 }
 
 /// The SHA-2 hashes.
-public enum HashAlgorithm: Sendable, Hashable, CaseIterable {
-    case sha256, sha384, sha512
+public struct HashAlgorithm: Sendable, Hashable, CaseIterable {
+    @usableFromInline let kind: Kind
+
+    @usableFromInline init(_ kind: Kind) { self.kind = kind }
+
+    public static let sha256 = HashAlgorithm(.sha256)
+    public static let sha384 = HashAlgorithm(.sha384)
+    public static let sha512 = HashAlgorithm(.sha512)
+
+    public static var allCases: [HashAlgorithm] { Kind.allCases.map(HashAlgorithm.init) }
 
     @usableFromInline var code: Int32 {
-        switch self {
+        switch kind {
         case .sha256: CV_SHA256
         case .sha384: CV_SHA384
         case .sha512: CV_SHA512
@@ -85,11 +93,17 @@ public enum HashAlgorithm: Sendable, Hashable, CaseIterable {
 
     /// The digest's length in bytes.
     public var byteCount: Int {
-        switch self {
+        switch kind {
         case .sha256: 32
         case .sha384: 48
         case .sha512: 64
         }
+    }
+
+    @usableFromInline enum Kind: Hashable, Sendable, CaseIterable {
+        case sha256
+        case sha384
+        case sha512
     }
 }
 

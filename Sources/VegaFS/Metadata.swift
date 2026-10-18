@@ -9,41 +9,58 @@ import ucrt
 #endif
 
 /// What a path names.
-public enum FileKind: Sendable, Hashable {
-    case file
-    case directory
-    case symbolicLink
-    case fifo
-    case socket
-    case characterDevice
-    case blockDevice
-    case unknown
+public struct FileKind: Sendable, Hashable, CaseIterable {
+    let kind: Kind
+
+    init(_ kind: Kind) { self.kind = kind }
+
+    public static let file = FileKind(.file)
+    public static let directory = FileKind(.directory)
+    public static let symbolicLink = FileKind(.symbolicLink)
+    public static let fifo = FileKind(.fifo)
+    public static let socket = FileKind(.socket)
+    public static let characterDevice = FileKind(.characterDevice)
+    public static let blockDevice = FileKind(.blockDevice)
+    public static let unknown = FileKind(.unknown)
+
+    public static var allCases: [FileKind] { Kind.allCases.map(FileKind.init) }
 
     init(mode: UInt32) {
         switch mode & 0o170000 {
-        case 0o100000: self = .file
-        case 0o040000: self = .directory
-        case 0o120000: self = .symbolicLink
-        case 0o010000: self = .fifo
-        case 0o140000: self = .socket
-        case 0o020000: self = .characterDevice
-        case 0o060000: self = .blockDevice
-        default: self = .unknown
+        case 0o100000: self.init(.file)
+        case 0o040000: self.init(.directory)
+        case 0o120000: self.init(.symbolicLink)
+        case 0o010000: self.init(.fifo)
+        case 0o140000: self.init(.socket)
+        case 0o020000: self.init(.characterDevice)
+        case 0o060000: self.init(.blockDevice)
+        default: self.init(.unknown)
         }
     }
 
     /// From a directory entry's d_type; nil for DT_UNKNOWN.
     init?(direntType: UInt8) {
         switch direntType {
-        case 8: self = .file
-        case 4: self = .directory
-        case 10: self = .symbolicLink
-        case 1: self = .fifo
-        case 12: self = .socket
-        case 2: self = .characterDevice
-        case 6: self = .blockDevice
+        case 8: self.init(.file)
+        case 4: self.init(.directory)
+        case 10: self.init(.symbolicLink)
+        case 1: self.init(.fifo)
+        case 12: self.init(.socket)
+        case 2: self.init(.characterDevice)
+        case 6: self.init(.blockDevice)
         default: return nil
         }
+    }
+
+    enum Kind: Hashable, Sendable, CaseIterable {
+        case file
+        case directory
+        case symbolicLink
+        case fifo
+        case socket
+        case characterDevice
+        case blockDevice
+        case unknown
     }
 }
 

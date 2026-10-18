@@ -5,28 +5,41 @@ import VegaHTTP
 /// zlib (the system's; on Windows, a vendored copy), so they are always
 /// there; brotli and zstd from the system's shared libraries, when it has
 /// them (not on Windows yet).
-public enum ContentCoding: String, Sendable, CaseIterable {
-    case gzip
+public struct ContentCoding: Sendable, Hashable, CaseIterable {
+    let kind: Kind
+
+    init(_ kind: Kind) { self.kind = kind }
+
+    public static let gzip = ContentCoding(.gzip)
     /// The zlib format. Decoding also takes raw deflate, which some servers
     /// send under this name.
-    case deflate
-    case br
-    case zstd
+    public static let deflate = ContentCoding(.deflate)
+    public static let br = ContentCoding(.br)
+    public static let zstd = ContentCoding(.zstd)
+
+    public static var allCases: [ContentCoding] { Kind.allCases.map(ContentCoding.init) }
+
+    public var rawValue: String { kind.rawValue }
+
+    public init?(rawValue: String) {
+        guard let kind = Kind(rawValue: rawValue) else { return nil }
+        self.init(kind)
+    }
 
     /// The coding a Content-Encoding or Accept-Encoding token names
     /// (`x-gzip` is gzip), ignoring case.
     public init?(token: some StringProtocol) {
         switch token.lowercased() {
-        case "gzip", "x-gzip": self = .gzip
-        case "deflate": self = .deflate
-        case "br": self = .br
-        case "zstd": self = .zstd
+        case "gzip", "x-gzip": self.init(.gzip)
+        case "deflate": self.init(.deflate)
+        case "br": self.init(.br)
+        case "zstd": self.init(.zstd)
         default: return nil
         }
     }
 
     var codec: Int32 {
-        switch self {
+        switch kind {
         case .gzip: CV_CODEC_GZIP
         case .deflate: CV_CODEC_DEFLATE
         case .br: CV_CODEC_BR
@@ -38,6 +51,13 @@ public enum ContentCoding: String, Sendable, CaseIterable {
     public var canCompress: Bool { cv_enc_available(codec) == 1 }
     /// Whether this process can decompress it.
     public var canDecompress: Bool { cv_dec_available(codec) == 1 }
+
+    enum Kind: String, Hashable, Sendable, CaseIterable {
+        case gzip
+        case deflate
+        case br
+        case zstd
+    }
 }
 
 /// Why compressing or decompressing failed.

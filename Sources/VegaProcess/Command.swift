@@ -38,17 +38,60 @@ import WinSDK
 /// console process group (any other value is ignored), and there are no
 /// signals: `Child.kill` terminates the process with exit code 1.
 public struct Command: Sendable {
-    /// Where one of the child's standard streams goes.
-    public enum Stdio: Sendable, Hashable {
+    /// Where a child's standard input, output or error goes.
+    ///
+    /// A struct rather than an enum, so that kinds can be added without
+    /// breaking anyone's exhaustive `switch`: switch over `kind`.
+    public struct Stdio: Sendable, Hashable, CustomStringConvertible {
+        /// Which of them this is.
+        public let kind: Kind
+        /// For `.descriptor`, the descriptor.
+        public let descriptor: Int32?
+
+        /// The kinds of `Stdio`.
+        public struct Kind: Hashable, Sendable, CustomStringConvertible {
+            let rawValue: UInt8
+
+            /// The parent's own.
+            public static let inherit = Kind(rawValue: 0)
+            /// /dev/null (NUL on Windows).
+            public static let null = Kind(rawValue: 1)
+            /// A pipe to the parent: `Child.stdin`, `stdout` or `stderr`.
+            public static let pipe = Kind(rawValue: 2)
+            /// `descriptor`, one of the parent's (it stays open in the parent); on
+            /// Windows, a handle.
+            public static let descriptor = Kind(rawValue: 3)
+
+            public var description: String {
+                let names = ["inherit", "null", "pipe", "descriptor"]
+                return Int(rawValue) < names.count ? names[Int(rawValue)] : "code \(rawValue)"
+            }
+        }
+
+        init(_ kind: Kind, descriptor: Int32? = nil) {
+            self.kind = kind
+            self.descriptor = descriptor
+        }
+
         /// The parent's own.
-        case inherit
+        public static let inherit = Stdio(.inherit)
         /// /dev/null (NUL on Windows).
-        case null
+        public static let null = Stdio(.null)
         /// A pipe to the parent: `Child.stdin`, `stdout` or `stderr`.
-        case pipe
-        /// A descriptor of the parent's (it stays open in the parent); on
+        public static let pipe = Stdio(.pipe)
+        /// `descriptor`, one of the parent's (it stays open in the parent); on
         /// Windows, a handle.
-        case descriptor(Int32)
+        public static func descriptor(_ descriptor: Int32) -> Stdio { Stdio(.descriptor, descriptor: descriptor) }
+
+        public var description: String {
+            switch kind {
+            case .inherit: "inherit"
+            case .null: "null"
+            case .pipe: "pipe"
+            case .descriptor: "descriptor \(descriptor!)"
+            default: "\(kind)"
+            }
+        }
     }
 
     public var executable: String
@@ -156,10 +199,10 @@ public struct Command: Sendable {
         var toClose: [Int32] = []  // fds that are ours to close after the spawn
         defer { for fd in toClose { _ = close(fd) } }
         for (i, stdio) in [stdin, stdout, stderr].enumerated() {
-            switch stdio {
+            switch stdio.kind {
             case .inherit: childFDs.append(CV_STDIO_INHERIT)
             case .null: childFDs.append(CV_STDIO_NULL)
-            case .descriptor(let fd): childFDs.append(fd)
+            case .descriptor: childFDs.append(stdio.descriptor!)
             case .pipe:
                 var fds: (Int32, Int32) = (-1, -1)
                 let e = withUnsafeMutablePointer(to: &fds) {
@@ -174,6 +217,7 @@ public struct Command: Sendable {
                 childFDs.append(theirs)
                 toClose.append(theirs)
                 parentFDs[i] = mine
+            default: preconditionFailure("no such Stdio: \(stdio)")
             }
         }
 

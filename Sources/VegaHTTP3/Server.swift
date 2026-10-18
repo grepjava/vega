@@ -60,7 +60,7 @@ public enum HTTP3Server {
     public static func serve(_ connection: QUICConnection, configuration: HTTP3Configuration = .init(),
                              _ handler: @escaping @Sendable (HTTPRequest) async throws -> HTTPResponse) async {
         guard connection.applicationProtocol == applicationProtocol else {
-            connection.close(code: HTTP3Error.versionFallback)
+            connection.close(code: HTTP3ErrorCode.versionFallback.rawValue)
             return
         }
         let peer = PeerStreams()
@@ -99,55 +99,55 @@ public enum HTTP3Server {
         guard let type = await reader.varint() else { return }
         switch type {
         case HTTP3StreamType.control:
-            guard peer.first(type) else { return connection.close(code: HTTP3Error.streamCreationError) }
+            guard peer.first(type) else { return connection.close(code: HTTP3ErrorCode.streamCreationError.rawValue) }
             var frames = FramedRead(reading: stream, decoder: HTTP3FrameDecoder(maxPayload: 64 * 1024))
             frames.prepend(reader.rest)
             var first = true
             while true {
                 let frame: HTTP3RawFrame?
                 do throws(FramedError) { frame = try await frames.next() } catch {
-                    return connection.close(code: HTTP3Error.frameError)
+                    return connection.close(code: HTTP3ErrorCode.frameError.rawValue)
                 }
                 guard let frame else {
                     // RFC 9114 section 6.2.1: closing it is a connection error.
-                    return connection.close(code: HTTP3Error.closedCriticalStream)
+                    return connection.close(code: HTTP3ErrorCode.closedCriticalStream.rawValue)
                 }
                 if first {
                     first = false
                     guard frame.type == HTTP3FrameType.settings else {
-                        return connection.close(code: HTTP3Error.missingSettings)
+                        return connection.close(code: HTTP3ErrorCode.missingSettings.rawValue)
                     }
                     guard h3ParseSettings(frame.payload) != nil else {
-                        return connection.close(code: HTTP3Error.settingsError)
+                        return connection.close(code: HTTP3ErrorCode.settingsError.rawValue)
                     }
                     continue
                 }
                 switch frame.type {
                 case HTTP3FrameType.settings, HTTP3FrameType.data, HTTP3FrameType.headers, HTTP3FrameType.pushPromise:
-                    return connection.close(code: HTTP3Error.frameUnexpected)
+                    return connection.close(code: HTTP3ErrorCode.frameUnexpected.rawValue)
                 default:
                     // GOAWAY, MAX_PUSH_ID, CANCEL_PUSH, unknown: nothing to do
                     // for a server that neither pushes nor drains early.
                     if HTTP3FrameType.isReservedFromHTTP2(frame.type) {
-                        return connection.close(code: HTTP3Error.frameUnexpected)
+                        return connection.close(code: HTTP3ErrorCode.frameUnexpected.rawValue)
                     }
                 }
             }
         case HTTP3StreamType.qpackEncoder, HTTP3StreamType.qpackDecoder:
-            guard peer.first(type) else { return connection.close(code: HTTP3Error.streamCreationError) }
+            guard peer.first(type) else { return connection.close(code: HTTP3ErrorCode.streamCreationError.rawValue) }
             // With no dynamic table, nothing on these matters; they must stay
             // open, and are read so their flow control never stalls.
             var buffer = IOBuffer(capacity: 4096)
             while true {
                 buffer.clear()
                 guard let n = try? await stream.read(into: &buffer) else { return }
-                if n == 0 { return connection.close(code: HTTP3Error.closedCriticalStream) }
+                if n == 0 { return connection.close(code: HTTP3ErrorCode.closedCriticalStream.rawValue) }
             }
         case HTTP3StreamType.push:
             // Only servers push.
-            connection.close(code: HTTP3Error.streamCreationError)
+            connection.close(code: HTTP3ErrorCode.streamCreationError.rawValue)
         default:
-            stream.stopSending(code: HTTP3Error.streamCreationError)
+            stream.stopSending(code: HTTP3ErrorCode.streamCreationError.rawValue)
         }
     }
 
@@ -170,14 +170,14 @@ public enum HTTP3Server {
                     tooLarge = true
                     break
                 }
-                if stream.error == nil { stream.reset(code: HTTP3Error.frameError) }
+                if stream.error == nil { stream.reset(code: HTTP3ErrorCode.frameError.rawValue) }
                 return
             }
             guard let frame else { break }
             switch frame.type {
             case HTTP3FrameType.headers:
                 guard let fields = h3DecodeFields(frame.payload, maxSize: configuration.maxFieldSectionSize) else {
-                    return connection.close(code: HTTP3Error.qpackDecompressionFailed)
+                    return connection.close(code: HTTP3ErrorCode.qpackDecompressionFailed.rawValue)
                 }
                 if head == nil {
                     guard let h = fields.requestHead(version: .http3) else {
@@ -191,7 +191,7 @@ public enum HTTP3Server {
                     for (name, value) in trailers { head!.fields.append(name: name, value: value) }
                 }
             case HTTP3FrameType.data:
-                guard head != nil else { return connection.close(code: HTTP3Error.frameUnexpected) }
+                guard head != nil else { return connection.close(code: HTTP3ErrorCode.frameUnexpected.rawValue) }
                 if body.count + frame.payload.count > configuration.maxBodySize {
                     tooLarge = true
                 } else if !tooLarge {
@@ -199,10 +199,10 @@ public enum HTTP3Server {
                 }
             case HTTP3FrameType.settings, HTTP3FrameType.goaway, HTTP3FrameType.maxPushID,
                  HTTP3FrameType.cancelPush, HTTP3FrameType.pushPromise:
-                return connection.close(code: HTTP3Error.frameUnexpected)
+                return connection.close(code: HTTP3ErrorCode.frameUnexpected.rawValue)
             default:
                 if HTTP3FrameType.isReservedFromHTTP2(frame.type) {
-                    return connection.close(code: HTTP3Error.frameUnexpected)
+                    return connection.close(code: HTTP3ErrorCode.frameUnexpected.rawValue)
                 }
             }
             if tooLarge { break }
@@ -211,7 +211,7 @@ public enum HTTP3Server {
         if tooLarge {
             // Answered before the request is whole: the client is told to
             // stop sending, which isn't an error (RFC 9114 section 4.1.1).
-            stream.stopSending(code: HTTP3Error.noError)
+            stream.stopSending(code: HTTP3ErrorCode.noError.rawValue)
             await respond(stream, HTTPResponse(status: 413), head: false)
             return
         }
@@ -227,8 +227,8 @@ public enum HTTP3Server {
 
     /// RFC 9114 section 4.1.2: a malformed request is a stream error.
     static func messageError(_ stream: QUICStream) {
-        stream.reset(code: HTTP3Error.messageError)
-        stream.stopSending(code: HTTP3Error.messageError)
+        stream.reset(code: HTTP3ErrorCode.messageError.rawValue)
+        stream.stopSending(code: HTTP3ErrorCode.messageError.rawValue)
     }
 
     static func respond(_ stream: QUICStream, _ response: HTTPResponse, head: Bool) async {

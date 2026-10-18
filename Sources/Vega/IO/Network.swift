@@ -16,7 +16,7 @@ enum NetworkIO {
     /// Whether `backend` (with `VEGA_DRIVER` for `.automatic`) asks for
     /// Network.framework.
     static func wanted(_ backend: IOBackend) -> Bool {
-        switch backend {
+        switch backend.kind {
         case .network: return true
         case .readiness, .ioUring: return false
         case .automatic, .iocp: // (.iocp is Windows only)

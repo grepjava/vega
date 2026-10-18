@@ -3,11 +3,21 @@
 import CVegaTLS
 
 /// The kinds of signing key.
-public enum KeyType: Sendable, Hashable, CaseIterable {
-    case rsa, p256, p384, p521, ed25519
+public struct KeyType: Sendable, Hashable, CaseIterable {
+    let kind: Kind
+
+    init(_ kind: Kind) { self.kind = kind }
+
+    public static let rsa = KeyType(.rsa)
+    public static let p256 = KeyType(.p256)
+    public static let p384 = KeyType(.p384)
+    public static let p521 = KeyType(.p521)
+    public static let ed25519 = KeyType(.ed25519)
+
+    public static var allCases: [KeyType] { Kind.allCases.map(KeyType.init) }
 
     var code: Int32 {
-        switch self {
+        switch kind {
         case .rsa: CV_KEY_RSA
         case .p256: CV_KEY_EC_P256
         case .p384: CV_KEY_EC_P384
@@ -23,7 +33,7 @@ public enum KeyType: Sendable, Hashable, CaseIterable {
 
     /// The JWK "crv" of a curve: "P-256", "P-384", "P-521", "Ed25519".
     public var curveName: String? {
-        switch self {
+        switch kind {
         case .rsa: nil
         case .p256: "P-256"
         case .p384: "P-384"
@@ -35,25 +45,52 @@ public enum KeyType: Sendable, Hashable, CaseIterable {
     /// The curve a JWK's "crv" names.
     public init?(curveName: String) {
         switch curveName {
-        case "P-256": self = .p256
-        case "P-384": self = .p384
-        case "P-521": self = .p521
-        case "Ed25519": self = .ed25519
+        case "P-256": self.init(.p256)
+        case "P-384": self.init(.p384)
+        case "P-521": self.init(.p521)
+        case "Ed25519": self.init(.ed25519)
         default: return nil
         }
+    }
+
+    enum Kind: Hashable, Sendable, CaseIterable {
+        case rsa
+        case p256
+        case p384
+        case p521
+        case ed25519
     }
 }
 
 /// The signature algorithms of JWS (RFC 7518 3, RFC 8037), by their "alg"
 /// names. HMAC is `HMAC`'s.
-public enum SignatureAlgorithm: String, Sendable, Hashable, CaseIterable {
-    case rs256 = "RS256", rs384 = "RS384", rs512 = "RS512"
-    case ps256 = "PS256", ps384 = "PS384", ps512 = "PS512"
-    case es256 = "ES256", es384 = "ES384", es512 = "ES512"
-    case eddsa = "EdDSA"
+public struct SignatureAlgorithm: Sendable, Hashable, CaseIterable {
+    let kind: Kind
+
+    init(_ kind: Kind) { self.kind = kind }
+
+    public static let rs256 = SignatureAlgorithm(.rs256)
+    public static let rs384 = SignatureAlgorithm(.rs384)
+    public static let rs512 = SignatureAlgorithm(.rs512)
+    public static let ps256 = SignatureAlgorithm(.ps256)
+    public static let ps384 = SignatureAlgorithm(.ps384)
+    public static let ps512 = SignatureAlgorithm(.ps512)
+    public static let es256 = SignatureAlgorithm(.es256)
+    public static let es384 = SignatureAlgorithm(.es384)
+    public static let es512 = SignatureAlgorithm(.es512)
+    public static let eddsa = SignatureAlgorithm(.eddsa)
+
+    public static var allCases: [SignatureAlgorithm] { Kind.allCases.map(SignatureAlgorithm.init) }
+
+    public var rawValue: String { kind.rawValue }
+
+    public init?(rawValue: String) {
+        guard let kind = Kind(rawValue: rawValue) else { return nil }
+        self.init(kind)
+    }
 
     var code: Int32 {
-        switch self {
+        switch kind {
         case .rs256: CV_JWS_RS256
         case .rs384: CV_JWS_RS384
         case .rs512: CV_JWS_RS512
@@ -69,13 +106,26 @@ public enum SignatureAlgorithm: String, Sendable, Hashable, CaseIterable {
 
     /// The kind of key that signs with it.
     public var keyType: KeyType {
-        switch self {
+        switch kind {
         case .rs256, .rs384, .rs512, .ps256, .ps384, .ps512: .rsa
         case .es256: .p256
         case .es384: .p384
         case .es512: .p521
         case .eddsa: .ed25519
         }
+    }
+
+    enum Kind: String, Hashable, Sendable, CaseIterable {
+        case rs256 = "RS256"
+        case rs384 = "RS384"
+        case rs512 = "RS512"
+        case ps256 = "PS256"
+        case ps384 = "PS384"
+        case ps512 = "PS512"
+        case es256 = "ES256"
+        case es384 = "ES384"
+        case es512 = "ES512"
+        case eddsa = "EdDSA"
     }
 }
 
@@ -249,7 +299,7 @@ public final class PublicKey: Sendable {
     /// The JWK members.
     public var components: Components {
         let raw = handle.raw
-        switch handle.type {
+        switch handle.type.kind {
         case .rsa:
             var n = [UInt8](repeating: 0, count: 2048), e = [UInt8](repeating: 0, count: 16)
             var nLen = n.count, eLen = e.count

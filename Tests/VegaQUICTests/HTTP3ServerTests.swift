@@ -127,7 +127,7 @@ struct HTTP3ServerTests {
             await server.value
             return (client.resets[0], after)
         }
-        #expect(reset == HTTP3Error.messageError)
+        #expect(reset == HTTP3ErrorCode.messageError.rawValue)
         #expect(after == 204)
     }
 }

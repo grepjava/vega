@@ -104,7 +104,7 @@ public final class HTTP3Client: Sendable {
         } catch {
             throw HTTP3ClientError.connection(error)
         }
-        defer { connection.close(code: HTTP3Error.noError) }
+        defer { connection.close(code: HTTP3ErrorCode.noError.rawValue) }
         let authority = port == 443 ? host : "\(host):\(port)"
         let client = HTTP3Client(connection, configuration: configuration, authority: authority)
         // Our control stream with SETTINGS, kept open as long as the
@@ -181,7 +181,7 @@ public final class HTTP3Client: Sendable {
             do throws(FramedError) { frame = try await frames.next() } catch {
                 if let e = error.ioError { throw .stream(e) }
                 if error.codecError?.code == .frameTooLong {
-                    stream.stopSending(code: HTTP3Error.requestCancelled)
+                    stream.stopSending(code: HTTP3ErrorCode.requestCancelled.rawValue)
                     throw .bodyTooLarge
                 }
                 throw .malformedResponse
@@ -204,7 +204,7 @@ public final class HTTP3Client: Sendable {
             case HTTP3FrameType.data:
                 guard response != nil else { throw .malformedResponse }
                 if body.count + frame.payload.count > configuration.maxBodySize {
-                    stream.stopSending(code: HTTP3Error.requestCancelled)
+                    stream.stopSending(code: HTTP3ErrorCode.requestCancelled.rawValue)
                     throw .bodyTooLarge
                 }
                 body += frame.payload

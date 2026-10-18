@@ -5,28 +5,32 @@ import Glibc
 #endif
 
 /// Which I/O driver a runtime uses.
-public enum IOBackend: Sendable, Equatable {
+public struct IOBackend: Sendable, Equatable, CaseIterable {
+    let kind: Kind
+
+    init(_ kind: Kind) { self.kind = kind }
+
     /// `.ioUring` where the kernel can run it, else `.readiness`; on iOS,
     /// tvOS, watchOS and visionOS, `.network`; on Windows, `.iocp`.
     /// `VEGA_DRIVER=epoll`, `uring`, `kqueue`, `network`, `iocp` or (on
     /// Windows) `afd` overrides.
-    case automatic
+    public static let automatic = IOBackend(.automatic)
     /// One edge-triggered epoll (kqueue on Darwin) per runtime. On Windows,
     /// one I/O completion port per runtime with AFD readiness polls on its
     /// sockets (as Tokio's mio does it), and only `sendFile` an overlapped
     /// request.
-    case readiness
+    public static let readiness = IOBackend(.readiness)
     /// Completion (Linux 6.7+): one io_uring per worker. Falls back to
     /// `.readiness` where the kernel can't run it (older, or io_uring
     /// blocked by seccomp or `kernel.io_uring_disabled`); `Runtime.ioBackend`
     /// says which runs.
-    case ioUring
+    public static let ioUring = IOBackend(.ioUring)
     /// Apple's Network.framework (`NWConnection`, `NWListener`) for TCP; the
     /// readiness driver (kqueue) stays for everything else (UDP, Unix
     /// sockets, pipes, processes): see docs/PLAN.md for why UDP waits. The default on iOS-family platforms,
     /// where BSD sockets don't bring up the cellular radio or VPN on demand;
     /// opt-in on macOS. Elsewhere it means `.automatic`.
-    case network
+    public static let network = IOBackend(.network)
     /// Completion on Windows: one I/O completion port per runtime, where
     /// each socket operation that would wait is an overlapped request
     /// (`AcceptEx`, `ConnectEx`, `WSARecv`, `WSASend`, `WSARecvFrom`,
@@ -40,7 +44,17 @@ public enum IOBackend: Sendable, Equatable {
     ///
     /// A write cancelled or timed out while its request is in flight
     /// aborts the connection: Winsock can't say how much of it went.
-    case iocp
+    public static let iocp = IOBackend(.iocp)
+
+    public static var allCases: [IOBackend] { Kind.allCases.map(IOBackend.init) }
+
+    enum Kind: Hashable, Sendable, CaseIterable {
+        case automatic
+        case readiness
+        case ioUring
+        case network
+        case iocp
+    }
 }
 
 /// One operation for a worker's ring. Pointers stay valid until the
@@ -76,7 +90,7 @@ enum URing {
 
     /// Whether `backend` (with `VEGA_DRIVER` for `.automatic`) asks for rings.
     static func wanted(_ backend: IOBackend) -> Bool {
-        switch backend {
+        switch backend.kind {
         case .readiness, .network: return false
         case .ioUring: return true
         case .automatic, .iocp: // (.iocp is Windows only)

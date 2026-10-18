@@ -220,7 +220,7 @@ extension IODriver {
     /// overlapped requests: everything but `.readiness`, unless
     /// `VEGA_DRIVER=afd` (or `readiness`).
     static func wantsIOCP(_ backend: IOBackend) -> Bool {
-        switch backend {
+        switch backend.kind {
         case .readiness: return false
         case .iocp: return true
         case .automatic, .ioUring, .network:

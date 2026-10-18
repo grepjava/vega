@@ -23,10 +23,10 @@ extension Command {
         var toClose: [Int32] = [] // the child's pipe ends: ours to close after the spawn
         defer { for h in toClose { closeHandle(h) } }
         for (i, stdio) in [stdin, stdout, stderr].enumerated() {
-            switch stdio {
+            switch stdio.kind {
             case .inherit: childHandles.append(CV_STDIO_INHERIT)
             case .null: childHandles.append(CV_STDIO_NULL)
-            case .descriptor(let h): childHandles.append(h)
+            case .descriptor: childHandles.append(stdio.descriptor!)
             case .pipe:
                 var fds: (Int32, Int32) = (-1, -1)
                 // stdin: the child reads (end 0); stdout, stderr: it writes (end 1).
@@ -41,6 +41,7 @@ extension Command {
                 childHandles.append(theirs)
                 toClose.append(theirs)
                 parentHandles[i] = mine
+            default: preconditionFailure("no such Stdio: \(stdio)")
             }
         }
 

@@ -66,34 +66,41 @@
     }
 }
 
-public enum HTTP3Error {
-    public static let noError: UInt64 = 0x0100
-    public static let generalProtocolError: UInt64 = 0x0101
-    public static let internalError: UInt64 = 0x0102
-    public static let streamCreationError: UInt64 = 0x0103
-    public static let closedCriticalStream: UInt64 = 0x0104
-    public static let frameUnexpected: UInt64 = 0x0105
-    public static let frameError: UInt64 = 0x0106
-    public static let excessiveLoad: UInt64 = 0x0107
-    public static let idError: UInt64 = 0x0108
-    public static let settingsError: UInt64 = 0x0109
-    public static let missingSettings: UInt64 = 0x010a
-    public static let requestRejected: UInt64 = 0x010b
-    public static let requestCancelled: UInt64 = 0x010c
-    public static let requestIncomplete: UInt64 = 0x010d
-    public static let messageError: UInt64 = 0x010e
-    public static let connectError: UInt64 = 0x010f
-    public static let versionFallback: UInt64 = 0x0110
+/// An HTTP/3 error code (RFC 9114 section 8.1, RFC 9204 section 6), for
+/// closing a connection or resetting a stream.
+public struct HTTP3ErrorCode: RawRepresentable, Hashable, Sendable, CustomStringConvertible {
+    public let rawValue: UInt64
+    public init(rawValue: UInt64) { self.rawValue = rawValue }
 
-    public static let qpackDecompressionFailed: UInt64 = 0x0200
-    public static let qpackEncoderStreamError: UInt64 = 0x0201
-    public static let qpackDecoderStreamError: UInt64 = 0x0202
+    public static let noError = HTTP3ErrorCode(rawValue: 0x0100)
+    public static let generalProtocolError = HTTP3ErrorCode(rawValue: 0x0101)
+    public static let internalError = HTTP3ErrorCode(rawValue: 0x0102)
+    public static let streamCreationError = HTTP3ErrorCode(rawValue: 0x0103)
+    public static let closedCriticalStream = HTTP3ErrorCode(rawValue: 0x0104)
+    public static let frameUnexpected = HTTP3ErrorCode(rawValue: 0x0105)
+    public static let frameError = HTTP3ErrorCode(rawValue: 0x0106)
+    public static let excessiveLoad = HTTP3ErrorCode(rawValue: 0x0107)
+    public static let idError = HTTP3ErrorCode(rawValue: 0x0108)
+    public static let settingsError = HTTP3ErrorCode(rawValue: 0x0109)
+    public static let missingSettings = HTTP3ErrorCode(rawValue: 0x010a)
+    public static let requestRejected = HTTP3ErrorCode(rawValue: 0x010b)
+    public static let requestCancelled = HTTP3ErrorCode(rawValue: 0x010c)
+    public static let requestIncomplete = HTTP3ErrorCode(rawValue: 0x010d)
+    public static let messageError = HTTP3ErrorCode(rawValue: 0x010e)
+    public static let connectError = HTTP3ErrorCode(rawValue: 0x010f)
+    public static let versionFallback = HTTP3ErrorCode(rawValue: 0x0110)
+
+    public static let qpackDecompressionFailed = HTTP3ErrorCode(rawValue: 0x0200)
+    public static let qpackEncoderStreamError = HTTP3ErrorCode(rawValue: 0x0201)
+    public static let qpackDecoderStreamError = HTTP3ErrorCode(rawValue: 0x0202)
 
     /// draft-ietf-webtrans-http3: the session a stream belonged to has ended.
-    @_spi(Garuda) public static let webTransportSessionGone: UInt64 = 0x170d_7b68
+    @_spi(Garuda) public static let webTransportSessionGone = HTTP3ErrorCode(rawValue: 0x170d_7b68)
     /// A stream arrived for a session that has not been established, and we
     /// were unwilling to hold it until one appeared.
-    @_spi(Garuda) public static let webTransportBufferedStreamRejected: UInt64 = 0x3994_bd84
+    @_spi(Garuda) public static let webTransportBufferedStreamRejected = HTTP3ErrorCode(rawValue: 0x3994_bd84)
+
+    public var description: String { "0x" + String(rawValue, radix: 16) }
 }
 
 /// The capsule protocol (RFC 9297), as WebTransport uses it.

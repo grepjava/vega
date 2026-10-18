@@ -3,11 +3,19 @@
 import CVegaTLS
 
 /// The AEADs TLS 1.3 and QUIC use. Nonces are 12 bytes, tags 16.
-public enum AEADAlgorithm: Sendable, Hashable, CaseIterable {
-    case aes128GCM, aes256GCM, chacha20Poly1305
+public struct AEADAlgorithm: Sendable, Hashable, CaseIterable {
+    @usableFromInline let kind: Kind
+
+    @usableFromInline init(_ kind: Kind) { self.kind = kind }
+
+    public static let aes128GCM = AEADAlgorithm(.aes128GCM)
+    public static let aes256GCM = AEADAlgorithm(.aes256GCM)
+    public static let chacha20Poly1305 = AEADAlgorithm(.chacha20Poly1305)
+
+    public static var allCases: [AEADAlgorithm] { Kind.allCases.map(AEADAlgorithm.init) }
 
     @usableFromInline var code: Int32 {
-        switch self {
+        switch kind {
         case .aes128GCM: CV_AEAD_AES128GCM
         case .aes256GCM: CV_AEAD_AES256GCM
         case .chacha20Poly1305: CV_AEAD_CHACHA20POLY1305
@@ -17,6 +25,12 @@ public enum AEADAlgorithm: Sendable, Hashable, CaseIterable {
     public var keyByteCount: Int { self == .aes128GCM ? 16 : 32 }
     public static let nonceByteCount = 12
     public static let tagByteCount = 16
+
+    @usableFromInline enum Kind: Hashable, Sendable, CaseIterable {
+        case aes128GCM
+        case aes256GCM
+        case chacha20Poly1305
+    }
 }
 
 /// An AEAD key, bound once and used for many messages: a connection's
@@ -135,11 +149,19 @@ public struct HeaderProtection: ~Copyable {
 }
 
 /// The groups of a TLS 1.3 key share.
-public enum KeyExchangeGroup: Sendable, Hashable, CaseIterable {
-    case x25519, p256, p384
+public struct KeyExchangeGroup: Sendable, Hashable, CaseIterable {
+    let kind: Kind
+
+    init(_ kind: Kind) { self.kind = kind }
+
+    public static let x25519 = KeyExchangeGroup(.x25519)
+    public static let p256 = KeyExchangeGroup(.p256)
+    public static let p384 = KeyExchangeGroup(.p384)
+
+    public static var allCases: [KeyExchangeGroup] { Kind.allCases.map(KeyExchangeGroup.init) }
 
     var code: Int32 {
-        switch self {
+        switch kind {
         case .x25519: CV_KEX_X25519
         case .p256: CV_KEX_P256
         case .p384: CV_KEX_P384
@@ -148,11 +170,17 @@ public enum KeyExchangeGroup: Sendable, Hashable, CaseIterable {
 
     /// The group's TLS NamedGroup code.
     public var tlsCode: UInt16 {
-        switch self {
+        switch kind {
         case .x25519: 0x001D
         case .p256: 0x0017
         case .p384: 0x0018
         }
+    }
+
+    enum Kind: Hashable, Sendable, CaseIterable {
+        case x25519
+        case p256
+        case p384
     }
 }
 

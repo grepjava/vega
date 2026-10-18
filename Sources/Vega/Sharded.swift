@@ -232,25 +232,88 @@ struct PreparedListener: Sendable {
 @available(tvOS, unavailable)
 @available(watchOS, unavailable)
 @available(visionOS, unavailable)
-public enum ShardEvent: Sendable, Equatable {
-    case started(shard: Int, pid: Int32)
-    /// A shard process ended: with an exit code, or killed by a signal.
-    case exited(shard: Int, pid: Int32, code: Int32?, signal: Int32?)
-    /// A crashed shard starts again after `after` (backing off while it
-    /// keeps crashing at start).
-    case restarting(shard: Int, after: Duration)
-    /// SIGTERM, SIGINT or SIGQUIT: the shards are told to stop.
-    case stopping(signal: Int32)
+public struct ShardEvent: Sendable, Hashable, CustomStringConvertible {
+    /// What kind of event this is.
+    public let kind: Kind
+    public let shard: Int?
+    public let pid: Int32?
+    public let exitCode: Int32?
+    public let signal: Int32?
+    public let restartDelay: Duration?
+    public let reason: String?
+
+    /// The kinds of `ShardEvent`.
+    public struct Kind: Hashable, Sendable, CustomStringConvertible {
+        let rawValue: UInt8
+
+        /// A shard process started.
+        public static let started = Kind(rawValue: 0)
+        /// A shard process ended: with `exitCode`, or killed by `signal`.
+        public static let exited = Kind(rawValue: 1)
+        /// A crashed shard starts again after `restartDelay` (backing off while
+        /// it keeps crashing at start).
+        public static let restarting = Kind(rawValue: 2)
+        /// SIGTERM, SIGINT or SIGQUIT (`signal`): the shards are told to stop.
+        public static let stopping = Kind(rawValue: 3)
+        /// SIGHUP, or `ShardWatchAction.reload`: shards restart one at a time.
+        public static let reloading = Kind(rawValue: 4)
+        /// `ShardWatchAction.restartSupervisor`: the executable ran as far as
+        /// `Runtime.sharded`, and the supervisor is about to become it. In the
+        /// new image each shard the old one left is reported `started` again,
+        /// then all of them are replaced, as on `reloading`.
+        public static let restartingSupervisor = Kind(rawValue: 5)
+        /// The supervisor did not restart, and carries on as it was: the
+        /// executable did not run, or could not be exec'd; `reason` says which.
+        public static let supervisorRestartFailed = Kind(rawValue: 6)
+
+        public var description: String {
+            let names = ["started", "exited", "restarting", "stopping", "reloading", "restartingSupervisor", "supervisorRestartFailed"]
+            return Int(rawValue) < names.count ? names[Int(rawValue)] : "code \(rawValue)"
+        }
+    }
+
+    init(_ kind: Kind, shard: Int? = nil, pid: Int32? = nil, exitCode: Int32? = nil, signal: Int32? = nil, restartDelay: Duration? = nil, reason: String? = nil) {
+        self.kind = kind
+        self.shard = shard
+        self.pid = pid
+        self.exitCode = exitCode
+        self.signal = signal
+        self.restartDelay = restartDelay
+        self.reason = reason
+    }
+
+    /// A shard process started.
+    public static func started(shard: Int, pid: Int32) -> ShardEvent { ShardEvent(.started, shard: shard, pid: pid) }
+    /// A shard process ended: with `exitCode`, or killed by `signal`.
+    public static func exited(shard: Int, pid: Int32, code exitCode: Int32?, signal: Int32?) -> ShardEvent { ShardEvent(.exited, shard: shard, pid: pid, exitCode: exitCode, signal: signal) }
+    /// A crashed shard starts again after `restartDelay` (backing off while
+    /// it keeps crashing at start).
+    public static func restarting(shard: Int, after restartDelay: Duration) -> ShardEvent { ShardEvent(.restarting, shard: shard, restartDelay: restartDelay) }
+    /// SIGTERM, SIGINT or SIGQUIT (`signal`): the shards are told to stop.
+    public static func stopping(signal: Int32?) -> ShardEvent { ShardEvent(.stopping, signal: signal) }
     /// SIGHUP, or `ShardWatchAction.reload`: shards restart one at a time.
-    case reloading
+    public static let reloading = ShardEvent(.reloading)
     /// `ShardWatchAction.restartSupervisor`: the executable ran as far as
     /// `Runtime.sharded`, and the supervisor is about to become it. In the
     /// new image each shard the old one left is reported `started` again,
     /// then all of them are replaced, as on `reloading`.
-    case restartingSupervisor
+    public static let restartingSupervisor = ShardEvent(.restartingSupervisor)
     /// The supervisor did not restart, and carries on as it was: the
-    /// executable did not run, or could not be exec'd.
-    case supervisorRestartFailed(reason: String)
+    /// executable did not run, or could not be exec'd; `reason` says which.
+    public static func supervisorRestartFailed(reason: String) -> ShardEvent { ShardEvent(.supervisorRestartFailed, reason: reason) }
+
+    public var description: String {
+        switch kind {
+        case .started: "shard \(shard!) started (pid \(pid!))"
+        case .exited: "shard \(shard!) (pid \(pid!)) exited" + (exitCode.map { " with \($0)" } ?? "") + (signal.map { " on signal \($0)" } ?? "")
+        case .restarting: "shard \(shard!) restarting after \(restartDelay!)"
+        case .stopping: "stopping on signal \(signal ?? 0)"
+        case .reloading: "reloading"
+        case .restartingSupervisor: "restarting the supervisor"
+        case .supervisorRestartFailed: "supervisor restart failed: \(reason ?? "")"
+        default: "\(kind)"
+        }
+    }
 }
 
 /// What `ShardOptions.watch` asks of the supervisor.
@@ -258,12 +321,16 @@ public enum ShardEvent: Sendable, Equatable {
 @available(tvOS, unavailable)
 @available(watchOS, unavailable)
 @available(visionOS, unavailable)
-public enum ShardWatchAction: Sendable, Hashable {
+public struct ShardWatchAction: Sendable, Hashable, CaseIterable {
+    let kind: Kind
+
+    init(_ kind: Kind) { self.kind = kind }
+
     /// Nothing to do.
-    case none
+    public static let nothing = ShardWatchAction(.nothing)
     /// Restart the shards one at a time, as SIGHUP does: for something they
     /// read as they start, such as a certificate, that has changed.
-    case reload
+    public static let reload = ShardWatchAction(.reload)
     /// Restart the supervisor on its executable, rebuilt since it started:
     /// it execs the file it was started from, keeping its pid, its listeners,
     /// its shared regions and its shards, and the new image replaces the
@@ -272,7 +339,15 @@ public enum ShardWatchAction: Sendable, Hashable {
     /// it does not get there, and exit 0, within five seconds, nothing
     /// changes (`ShardEvent.supervisorRestartFailed`). Listeners are not
     /// dropped, so no connection is refused.
-    case restartSupervisor
+    public static let restartSupervisor = ShardWatchAction(.restartSupervisor)
+
+    public static var allCases: [ShardWatchAction] { Kind.allCases.map(ShardWatchAction.init) }
+
+    enum Kind: Hashable, Sendable, CaseIterable {
+        case nothing
+        case reload
+        case restartSupervisor
+    }
 }
 
 /// How `Runtime.sharded` lays out and supervises its shards.
@@ -601,8 +676,8 @@ private struct Supervisor {
             default: break
             }
             if !stopping, let watch = options.watch, cv_now_ns() >= nextWatch {
-                switch watch() {
-                case .none: break
+                switch watch().kind {
+                case .nothing: break
                 case .reload: beginReload()
                 case .restartSupervisor: restartSupervisor()
                 }
