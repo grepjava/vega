@@ -35,7 +35,7 @@ public enum WebSocketRole: Sendable {
 }
 
 /// Frames from and to a byte stream.
-public struct WebSocketFrameCodec: Decoder, Encoder, Sendable {
+public struct WebSocketFrameCodec: FrameDecoder, FrameEncoder, Sendable {
     public typealias Item = WebSocketFrame
 
     public var role: WebSocketRole

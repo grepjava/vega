@@ -27,6 +27,10 @@ public struct PrefixedStream<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~Co
         try await stream.write(bytes)
     }
 
+    public func shutdownWrite() async throws(IOError) {
+        try await stream.shutdownWrite()
+    }
+
     /// Give back the stream, with any of the prefix not yet read lost.
     public consuming func intoStream() -> Stream {
         stream

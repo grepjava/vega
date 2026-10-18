@@ -5,7 +5,7 @@ import Vega
 ///
 /// Each frame is a length field (1, 2, 4 or 8 bytes, big-endian by default)
 /// counting the payload bytes after it, then the payload.
-public struct LengthDelimitedCodec: Decoder, Encoder, Sendable {
+public struct LengthDelimitedCodec: FrameDecoder, FrameEncoder, Sendable {
     public typealias Item = [UInt8]
 
     public var lengthFieldSize: Int
@@ -52,7 +52,7 @@ public struct LengthDelimitedCodec: Decoder, Encoder, Sendable {
 /// Text lines: Tokio's `LinesCodec`, NIO's `LineBasedFrameDecoder`.
 /// Decodes up to each `\n` (dropping a `\r` before it); encodes a line and a
 /// `\n`. A last line without a newline is returned at end of stream.
-public struct LinesCodec: Decoder, Encoder, Sendable {
+public struct LinesCodec: FrameDecoder, FrameEncoder, Sendable {
     public typealias Item = String
 
     /// Longer lines are rejected (`.frameTooLong`).
@@ -89,7 +89,7 @@ public struct LinesCodec: Decoder, Encoder, Sendable {
 }
 
 /// Whatever bytes arrive, as they arrive: Tokio's `BytesCodec`.
-public struct BytesCodec: Decoder, Encoder, Sendable {
+public struct BytesCodec: FrameDecoder, FrameEncoder, Sendable {
     public typealias Item = [UInt8]
 
     public init() {}
@@ -107,7 +107,7 @@ public struct BytesCodec: Decoder, Encoder, Sendable {
 /// Language Server Protocol frames JSON-RPC (NIOExtras'
 /// `ContentLengthHeaderFrameDecoder`): `Content-Length: 17\r\n\r\n` and then
 /// the 17 bytes. Other header lines are allowed and ignored.
-public struct ContentLengthCodec: Decoder, Encoder, Sendable {
+public struct ContentLengthCodec: FrameDecoder, FrameEncoder, Sendable {
     public typealias Item = [UInt8]
 
     /// A longer message, or a longer header, is an error.

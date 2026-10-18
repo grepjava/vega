@@ -6,7 +6,7 @@ import VegaTest
 
 /// Decode `text` fed `step` bytes at a time, then end the stream; body parts
 /// are merged so results compare whatever the step.
-private func parts<D: Decoder>(_ decoder: D, _ text: String, step: Int = .max) throws -> [D.Item] {
+private func parts<D: FrameDecoder>(_ decoder: D, _ text: String, step: Int = .max) throws -> [D.Item] {
     var d = decoder
     let all = Array(text.utf8)
     var buffer: [UInt8] = []

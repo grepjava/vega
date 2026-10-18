@@ -417,6 +417,9 @@ public final class QUICStream: AsyncReader, AsyncWriter, Sendable {
         if let error = state.withLock({ $0.writeEnd }) { throw error.asIOError }
     }
 
+    /// `finish()`, as `AsyncWriter` names it.
+    public func shutdownWrite() { finish() }
+
     /// End the stream (FIN) once what is queued has gone.
     public func finish() {
         let post = state.withLock { s -> Bool in

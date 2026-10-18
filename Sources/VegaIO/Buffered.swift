@@ -126,6 +126,12 @@ public struct BufferedWriter<Writer: AsyncWriter & ~Copyable>: ~Copyable, AsyncW
         try await writer.write(storage.bytes)
     }
 
+    /// Write out what is buffered, then end the writer's side.
+    public func shutdownWrite() async throws(IOError) {
+        try await flush()
+        try await writer.shutdownWrite()
+    }
+
     public consuming func intoWriter() -> Writer {
         writer
     }

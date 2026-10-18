@@ -77,6 +77,12 @@ public struct PipeWriter: ~Copyable, Sendable {
     /// The file descriptor, still owned by this value.
     public var descriptor: Int32 { reg.fd }
 
+    /// A pipe ends when its writer is dropped (`child.stdin = nil`), and
+    /// can't end before: this throws `IOError.unsupported`.
+    public func shutdownWrite() throws(IOError) {
+        throw IOError(code: IOError.unsupported.code, message: "a pipe ends when its writer is dropped")
+    }
+
     /// Write all of `bytes`. They must stay valid until this returns.
     public func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError) {
         guard let base = bytes.baseAddress else { return }

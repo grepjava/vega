@@ -41,6 +41,10 @@ public struct DebugStream<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~Copya
         }
     }
 
+    public func shutdownWrite() async throws(IOError) {
+        try await stream.shutdownWrite()
+    }
+
     public consuming func intoStream() -> Stream {
         stream
     }

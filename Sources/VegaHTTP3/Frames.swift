@@ -15,7 +15,7 @@ struct HTTP3RawFrame {
 }
 
 /// HTTP/3 frames from a QUIC stream, for `FramedRead`.
-struct HTTP3FrameDecoder: Decoder {
+struct HTTP3FrameDecoder: FrameDecoder {
     /// A longer frame, but DATA, is refused before it's buffered.
     var maxPayload: Int
     /// A longer DATA frame is `.frameTooLong`: what the body limit allows,

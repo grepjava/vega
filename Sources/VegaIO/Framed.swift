@@ -1,6 +1,6 @@
 import Vega
 
-/// Items read from a byte stream with a `Decoder`: Tokio's `FramedRead`.
+/// Items read from a byte stream with a `FrameDecoder`: Tokio's `FramedRead`.
 ///
 /// ```swift
 /// var lines = FramedRead(reading: stream, decoder: LinesCodec())
@@ -10,7 +10,7 @@ import Vega
 /// Bytes are read into one buffer and decoded in place: a frame costs no
 /// copy beyond what its decoder makes, and the buffer is compacted only
 /// once most of it has been decoded. It grows for frames bigger than it.
-public struct FramedRead<Reader: AsyncReader & ~Copyable, Decoding: Decoder>: ~Copyable {
+public struct FramedRead<Reader: AsyncReader & ~Copyable, Decoding: FrameDecoder>: ~Copyable {
     public var reader: Reader
     public var decoder: Decoding
     private var buffer: IOBuffer
@@ -42,7 +42,7 @@ public struct FramedRead<Reader: AsyncReader & ~Copyable, Decoding: Decoder>: ~C
             }
             if let decoded {
                 precondition(decoded.consumed >= 0 && decoded.consumed <= buffer.count - s,
-                             "a Decoder consumed a bad byte count")
+                             "a FrameDecoder consumed a bad byte count")
                 start += decoded.consumed
                 return decoded.item
             }
@@ -112,7 +112,7 @@ extension FramedRead where Reader: ~Copyable {
 /// A `FramedRead`'s items as an `AsyncSequence` (`FramedRead.items()`). It
 /// reads one stream, so it can be iterated once: two iterators at the same
 /// time trap.
-public struct FramedItems<Reader: AsyncReader & ~Copyable, Decoding: Decoder>: AsyncSequence {
+public struct FramedItems<Reader: AsyncReader & ~Copyable, Decoding: FrameDecoder>: AsyncSequence {
     public typealias Element = Decoding.Item
     public typealias Failure = FramedError
 
@@ -142,11 +142,11 @@ public struct FramedItems<Reader: AsyncReader & ~Copyable, Decoding: Decoder>: A
     }
 }
 
-/// Items written to a byte stream with an `Encoder`: Tokio's `FramedWrite`.
+/// Items written to a byte stream with a `FrameEncoder`: Tokio's `FramedWrite`.
 ///
 /// `feed` encodes into a buffer; `flush` writes it out. `send` does both.
 /// Feeding several items before one flush writes them with one syscall.
-public struct FramedWrite<Writer: AsyncWriter & ~Copyable, Encoding: Encoder>: ~Copyable {
+public struct FramedWrite<Writer: AsyncWriter & ~Copyable, Encoding: FrameEncoder>: ~Copyable {
     public var writer: Writer
     public var encoder: Encoding
     private var buffer: IOBuffer

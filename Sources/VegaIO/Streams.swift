@@ -27,6 +27,13 @@ extension AsyncReader where Self: ~Copyable {
 public protocol AsyncWriter: ~Copyable {
     /// Write all of `bytes`. They must stay valid until this returns.
     func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError)
+
+    /// Tell the peer nothing more is coming, keeping the reading side open:
+    /// a TCP FIN, a QUIC stream's FIN, TLS's close_notify and then the
+    /// transport's. Writes after it fail. A wrapper sends what it holds
+    /// first. Where the stream can't end one way (a pipe, Network.framework's
+    /// TLS) it throws `IOError.unsupported`.
+    func shutdownWrite() async throws(IOError)
 }
 
 extension AsyncWriter where Self: ~Copyable {

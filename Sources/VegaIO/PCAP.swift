@@ -159,6 +159,10 @@ public struct PCAPStream<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~Copyab
         if bytes.count > 0 { recorder.record(bytes, outbound: true) }
     }
 
+    public func shutdownWrite() async throws(IOError) {
+        try await stream.shutdownWrite()
+    }
+
     public consuming func intoStream() -> Stream {
         stream
     }

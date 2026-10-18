@@ -145,6 +145,13 @@ public struct TLSStream<Transport: AsyncReader & AsyncWriter & ~Copyable>: ~Copy
         try await state.write(buffer.withUnsafeBytes { $0 }, to: transport)
     }
 
+    /// Send close_notify, then end the transport's sending side: the peer's
+    /// reads return 0, and this side can still read.
+    public func shutdownWrite() async throws(IOError) {
+        try await state.close(transport)
+        try await transport.shutdownWrite()
+    }
+
     /// Send close_notify, then give back the transport (to shut down or
     /// close). The peer's reads then return 0.
     public consuming func close() async throws(IOError) -> Transport {
@@ -274,6 +281,12 @@ public struct TLSWriter<Transport: AsyncWriter & ~Copyable>: ~Copyable, AsyncWri
     /// Send close_notify: the peer's reads then return 0.
     public func close() async throws(IOError) {
         try await state.close(transport)
+    }
+
+    /// Send close_notify, then end the transport's sending side.
+    public func shutdownWrite() async throws(IOError) {
+        try await state.close(transport)
+        try await transport.shutdownWrite()
     }
 
     /// `TLSStream.updateKeys(requestPeerUpdate:)`, from the writing half.

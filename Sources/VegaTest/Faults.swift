@@ -65,6 +65,10 @@ public struct FaultyStream<Inner: AsyncReader & AsyncWriter & ~Copyable>: ~Copya
         return state.counted(read: n)
     }
 
+    public func shutdownWrite() async throws(IOError) {
+        try await inner.shutdownWrite()
+    }
+
     public func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError) {
         try await state.maybeDelay(plan)
         var at = 0

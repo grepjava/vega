@@ -15,8 +15,8 @@ The Vega snippets below compile and run against Vega at the commit that added th
 | `MultiThreadedEventLoopGroup` | `Runtime(workers:)` | `Vega` |
 | `EventLoop.execute`, `submit` | `runtime.spawn { ... }` | `Vega` |
 | `MPSCChannel` | `TCPStream` (or `UnixStream`), with `FramedRead` / `FramedWrite` on top | `Vega`, `VegaIO` |
-| `ChannelHandler`, `ChannelPipeline` | A `Decoder` / `Encoder`, or a plain async function | `VegaIO` |
-| `ByteToMessageDecoder`, `MessageToByteEncoder` | `Decoder`, `Encoder` | `VegaIO` |
+| `ChannelHandler`, `ChannelPipeline` | A `FrameDecoder` / `FrameEncoder`, or a plain async function | `VegaIO` |
+| `ByteToMessageDecoder`, `MessageToByteEncoder` | `FrameDecoder`, `FrameEncoder` | `VegaIO` |
 | `LineBasedFrameDecoder`, `LengthFieldBasedFrameDecoder` | `LinesCodec`, `LengthDelimitedCodec` | `VegaIO` |
 | `EventLoopFuture`, `EventLoopPromise` | `async` / `await`, `Task` | Swift |
 | `EventLoop.scheduleTask(in:)` | `Runtime.sleep(for:)`, `Runtime.timeout(_:_:)`, `Runtime.withIODeadline(_:_:)` | `Vega` |
@@ -147,7 +147,7 @@ if let reply = try await replies.next() {
 
 ## Handlers become codecs or plain code
 
-A `ByteToMessageDecoder` and a `MessageToByteEncoder` map to one value that conforms to `Decoder` and `Encoder`. `decode` sees the bytes not yet decoded and returns an item and how many bytes it used, or nil to wait for more. There is no buffer to move a reader index on.
+A `ByteToMessageDecoder` and a `MessageToByteEncoder` map to one value that conforms to `FrameDecoder` and `FrameEncoder`. `decode` sees the bytes not yet decoded and returns an item and how many bytes it used, or nil to wait for more. There is no buffer to move a reader index on.
 
 NIO:
 
@@ -170,7 +170,7 @@ Vega:
 
 ```swift
 /// A 2-byte big-endian length, then that many bytes of UTF-8.
-struct ShortStringCodec: Decoder, Encoder {
+struct ShortStringCodec: FrameDecoder, FrameEncoder {
     mutating func decode(_ bytes: UnsafeRawBufferPointer) throws(CodecError) -> (item: String, consumed: Int)? {
         guard bytes.count >= 2 else { return nil }
         let length = Int(bytes[0]) << 8 | Int(bytes[1])

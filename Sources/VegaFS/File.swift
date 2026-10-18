@@ -369,4 +369,7 @@ public struct File: ~Copyable, Sendable {
     }
 }
 
-extension File: AsyncReader, AsyncWriter {}
+extension File: AsyncReader, AsyncWriter {
+    /// A file has no peer to tell: nothing to do.
+    public func shutdownWrite() {}
+}

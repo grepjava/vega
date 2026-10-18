@@ -23,7 +23,7 @@ public struct HTTP1Limits: Sendable {
 /// Each request comes out as `.head`, any number of `.body` parts, then
 /// `.end`, including one without a body. Several requests in a row
 /// (pipelining) decode one after the other.
-public struct HTTP1RequestDecoder: Decoder, Sendable {
+public struct HTTP1RequestDecoder: FrameDecoder, Sendable {
     public typealias Item = HTTPRequestPart
 
     public var limits: HTTP1Limits
@@ -106,7 +106,7 @@ public struct HTTP1RequestDecoder: Decoder, Sendable {
 ///
 /// After a `101 Switching Protocols` (or a 2xx to CONNECT) it decodes
 /// nothing more: the bytes after it belong to the new protocol.
-public struct HTTP1ResponseDecoder: Decoder, Sendable {
+public struct HTTP1ResponseDecoder: FrameDecoder, Sendable {
     public typealias Item = HTTPResponsePart
 
     public var limits: HTTP1Limits
@@ -263,7 +263,7 @@ private enum BodyWriter: Sendable {
 /// A response with neither Content-Length nor Transfer-Encoding is sent
 /// chunked (HTTP/1.1) or to the close (HTTP/1.0). Call `requestReceived(_:)`
 /// for each request, in order, so a response to HEAD is sent without a body.
-public struct HTTP1ResponseEncoder: Encoder, Sendable {
+public struct HTTP1ResponseEncoder: FrameEncoder, Sendable {
     public typealias Item = HTTPResponsePart
 
     private var methods: [HTTPMethod] = []
@@ -315,7 +315,7 @@ public struct HTTP1ResponseEncoder: Encoder, Sendable {
 /// A request with neither Content-Length nor Transfer-Encoding is sent
 /// chunked, except a GET, HEAD, DELETE, OPTIONS, TRACE or CONNECT, which
 /// are taken to have no body.
-public struct HTTP1RequestEncoder: Encoder, Sendable {
+public struct HTTP1RequestEncoder: FrameEncoder, Sendable {
     public typealias Item = HTTPRequestPart
 
     private var body = BodyWriter.none

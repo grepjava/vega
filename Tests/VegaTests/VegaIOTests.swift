@@ -3,7 +3,7 @@ import Testing
 import Vega
 import VegaIO
 
-private func decodeAll<D: Decoder>(_ decoder: inout D, _ bytes: [UInt8]) throws -> (items: [D.Item], rest: Int) {
+private func decodeAll<D: FrameDecoder>(_ decoder: inout D, _ bytes: [UInt8]) throws -> (items: [D.Item], rest: Int) {
     var items: [D.Item] = []
     var at = 0
     while true {
@@ -16,7 +16,7 @@ private func decodeAll<D: Decoder>(_ decoder: inout D, _ bytes: [UInt8]) throws 
     }
 }
 
-private func encoded<E: Encoder>(_ encoder: inout E, _ items: [E.Item]) throws(CodecError) -> [UInt8] {
+private func encoded<E: FrameEncoder>(_ encoder: inout E, _ items: [E.Item]) throws(CodecError) -> [UInt8] {
     var buf = IOBuffer(capacity: 4)
     for item in items { try encoder.encode(item, into: &buf) }
     return buf.withUnsafeBytes { Array($0) }

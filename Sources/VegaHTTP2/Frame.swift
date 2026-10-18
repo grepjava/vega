@@ -68,7 +68,7 @@ struct FrameError: Error {
 ///
 /// Decoding checks what can be checked of one frame alone: its size, its
 /// padding, and the lengths and stream rules its type requires.
-package struct HTTP2FrameCodec: Decoder, Encoder, Sendable {
+package struct HTTP2FrameCodec: FrameDecoder, FrameEncoder, Sendable {
     package typealias Item = HTTP2Frame
 
     /// Longer frames are a FRAME_SIZE_ERROR: the SETTINGS_MAX_FRAME_SIZE

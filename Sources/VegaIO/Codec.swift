@@ -2,7 +2,7 @@ import Vega
 
 /// Turns bytes from a stream into items: Tokio's `Decoder`, NIO's
 /// `ByteToMessageDecoder`.
-public protocol Decoder {
+public protocol FrameDecoder {
     associatedtype Item
 
     /// Decode one item from the start of `bytes` (which may be empty): the
@@ -17,7 +17,7 @@ public protocol Decoder {
     mutating func decodeAtEnd(_ bytes: UnsafeRawBufferPointer) throws(CodecError) -> (item: Item, consumed: Int)?
 }
 
-extension Decoder {
+extension FrameDecoder {
     public mutating func decodeAtEnd(_ bytes: UnsafeRawBufferPointer) throws(CodecError) -> (item: Item, consumed: Int)? {
         if let whole = try decode(bytes) { return whole }
         if bytes.isEmpty { return nil }
@@ -27,7 +27,7 @@ extension Decoder {
 
 /// Turns items into bytes for a stream: Tokio's `Encoder`, NIO's
 /// `MessageToByteEncoder`.
-public protocol Encoder {
+public protocol FrameEncoder {
     associatedtype Item
 
     /// Append `item`'s bytes to `buffer` (grow it with `reserveCapacity`).

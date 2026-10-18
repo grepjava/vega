@@ -269,6 +269,34 @@ private func exchange(server: TLSContext, client: TLSContext, name: String? = "v
     }
 
     /// A peer that just stops (no close_notify) can't pass for a clean end.
+    /// `shutdownWrite` sends close_notify and ends the transport's sending
+    /// side: the server reads to the end of the request, and its answer
+    /// still reaches the client.
+    @Test func halfCloseKeepsTheOtherDirection() throws {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let server = try serverContext(), client = try clientContext()
+        let (request, reply) = try rt.block { () async throws -> (String, String) in
+            let pair = duplex(capacity: 64 * 1024)
+            let serverTask = rt.spawn(with: pair.second) { t async -> String in
+                guard let tls = try? await TLSStream.accept(t, context: server) else { return "" }
+                var buf = IOBuffer(capacity: 1024)
+                while (try? await tls.read(into: &buf)) ?? 0 > 0 {}
+                try? await tls.write(bytes("reply"))
+                _ = try? await tls.close()
+                return buf.string
+            }
+            let tls = try await TLSStream.connect(pair.first, serverName: "vega.test", context: client)
+            try await tls.write(bytes("request"))
+            try await tls.shutdownWrite()
+            var buf = IOBuffer(capacity: 1024)
+            while try await tls.read(into: &buf) > 0 {}
+            return (await serverTask.value, buf.string)
+        }
+        #expect(request == "request")
+        #expect(reply == "reply")
+    }
+
     @Test func truncationIsAnError() throws {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
