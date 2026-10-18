@@ -3,7 +3,7 @@
 //===----------------------------------------------------------------------===//
 // QUICEndpoint as a client: `connect` from one endpoint to a server endpoint
 // over real UDP on 127.0.0.1, both sides an application's tasks on
-// QUICConnectionHandle and QUICStreamHandle.
+// QUICConnection and QUICStream.
 //===----------------------------------------------------------------------===//
 
 import Testing
@@ -49,16 +49,16 @@ struct QUICEndpointClientTests {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
         let (pem, key) = try identity()
-        let serverConfig = QUICServerConfig(certKey: key, alpn: [Array("echo".utf8)])
+        let serverConfig = QUICServerConfiguration(certificateKey: key, applicationProtocols: ["echo"])
         let verifier = try CertificateVerifier(trustRoots: .certificates(pem))
-        let (echoed, ids, pushed, alpn) = try rt.block { () async throws -> ([UInt8], [UInt64], [UInt8], [UInt8]) in
-            let server = try QUICEndpoint.listen(host: "127.0.0.1", port: 0, configuration: serverConfig, runtime: rt)
+        let (echoed, ids, pushed, alpn) = try rt.block { () async throws -> ([UInt8], [UInt64], [UInt8], String) in
+            let server = try QUICEndpoint.bind(host: "127.0.0.1", port: 0, configuration: serverConfig, runtime: rt)
             let serving = echoServer(server, rt)
-            let client = try QUICEndpoint.client(runtime: rt, host: "127.0.0.1")
-            let config = QUICClientConfig(serverName: "localhost", alpn: [Array("echo".utf8)],
+            let client = try QUICEndpoint.bind(host: "127.0.0.1", runtime: rt)
+            let config = QUICClientConfiguration(serverName: "localhost", applicationProtocols: ["echo"],
                                           certificateVerification: .verifier(verifier))
             let connection = try await client.connect(host: "127.0.0.1", port: server.localPort, configuration: config)
-            let alpn = connection.alpn
+            let alpn = connection.applicationProtocol
 
             let stream = try await connection.openStream()
             try await stream.write(Array("hello, quic".utf8))
@@ -89,20 +89,20 @@ struct QUICEndpointClientTests {
         #expect(echoed == Array("hello, quic".utf8.reversed()))
         #expect(ids == [0, 4, 2, 3])
         #expect(pushed == Array("pushed".utf8))
-        #expect(alpn == Array("echo".utf8))
+        #expect(alpn == "echo")
     }
 
     @Test func anUntrustedServerIsRefused() throws {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
         let (_, key) = try identity()
-        let serverConfig = QUICServerConfig(certKey: key, alpn: [Array("echo".utf8)])
+        let serverConfig = QUICServerConfiguration(certificateKey: key, applicationProtocols: ["echo"])
         let error = try rt.block { () async throws -> QUICConnectionError? in
-            let server = try QUICEndpoint.listen(host: "127.0.0.1", port: 0, configuration: serverConfig, runtime: rt)
+            let server = try QUICEndpoint.bind(host: "127.0.0.1", port: 0, configuration: serverConfig, runtime: rt)
             let serving = echoServer(server, rt)
-            let client = try QUICEndpoint.client(runtime: rt, host: "127.0.0.1")
+            let client = try QUICEndpoint.bind(host: "127.0.0.1", runtime: rt)
             // The system's roots: a self-signed certificate is not among them.
-            let config = QUICClientConfig(serverName: "localhost", alpn: [Array("echo".utf8)])
+            let config = QUICClientConfiguration(serverName: "localhost", applicationProtocols: ["echo"])
             var failure: QUICConnectionError?
             do throws(QUICConnectionError) {
                 _ = try await client.connect(host: "127.0.0.1", port: server.localPort, configuration: config)
@@ -121,12 +121,12 @@ struct QUICEndpointClientTests {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
         let (_, key) = try identity()
-        let serverConfig = QUICServerConfig(certKey: key, alpn: [Array("echo".utf8)])
+        let serverConfig = QUICServerConfiguration(certificateKey: key, applicationProtocols: ["echo"])
         let echoed = try rt.block { () async throws -> [UInt8] in
-            let server = try QUICEndpoint.listen(host: "127.0.0.1", port: 0, configuration: serverConfig, runtime: rt)
+            let server = try QUICEndpoint.bind(host: "127.0.0.1", port: 0, configuration: serverConfig, runtime: rt)
             let serving = echoServer(server, rt)
-            let client = try QUICEndpoint.client(runtime: rt, host: "127.0.0.1")
-            let config = QUICClientConfig(serverName: "localhost", alpn: [Array("echo".utf8)],
+            let client = try QUICEndpoint.bind(host: "127.0.0.1", runtime: rt)
+            let config = QUICClientConfiguration(serverName: "localhost", applicationProtocols: ["echo"],
                                           certificateVerification: .insecureNoVerification)
             let connection = try await client.connect(host: "127.0.0.1", port: server.localPort, configuration: config)
             let stream = try await connection.openStream()

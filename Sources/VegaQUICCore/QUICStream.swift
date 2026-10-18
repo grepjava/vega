@@ -348,7 +348,7 @@ public struct QUICSendStream {
 }
 
 /// A stream as the connection sees it.
-public final class QUICStream {
+public final class QUICStreamState {
     public let id: UInt64
     public var receive = QUICReceiveStream()
     public var send = QUICSendStream()

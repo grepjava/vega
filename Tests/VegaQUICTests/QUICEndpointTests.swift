@@ -3,7 +3,7 @@
 //===----------------------------------------------------------------------===//
 // QUICEndpoint over a real UDP socket: the tests' client (QUICTestPeer)
 // sends from a socket of its own, and the server side is an application's
-// tasks on QUICConnectionHandle and QUICStreamHandle.
+// tasks on QUICConnection and QUICStream.
 //===----------------------------------------------------------------------===//
 
 import Testing
@@ -49,10 +49,10 @@ final class Wire {
     }
 }
 
-func serverConfig() throws -> QUICServerConfig {
+func serverConfig() throws -> QUICServerConfiguration {
     let identity = try TLSIdentity.selfSigned(names: ["localhost"])
     let certificate = try CertificateKey(chainPEM: identity.certificateChain, keyPEM: identity.privateKey)
-    return QUICServerConfig(certKey: certificate, alpn: [Array("echo".utf8)])
+    return QUICServerConfiguration(certificateKey: certificate, applicationProtocols: ["echo"])
 }
 
 /// A handshake, from the client's side, up to its Finished.
@@ -71,11 +71,11 @@ struct QUICEndpointTests {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
         let config = try serverConfig()
-        let (echoed, finished, alpn, name) = try rt.block { () async throws -> ([UInt8]?, Bool, [UInt8], String) in
-            let endpoint = try QUICEndpoint.listen(host: "127.0.0.1", port: 0, configuration: config, runtime: rt)
-            let server = rt.spawn { () async -> ([UInt8], String) in
-                guard let connection = await endpoint.accept() else { return ([], "") }
-                let alpn = connection.alpn, name = connection.serverName
+        let (echoed, finished, alpn, name) = try rt.block { () async throws -> ([UInt8]?, Bool, String, String) in
+            let endpoint = try QUICEndpoint.bind(host: "127.0.0.1", port: 0, configuration: config, runtime: rt)
+            let server = rt.spawn { () async -> (String, String) in
+                guard let connection = await endpoint.accept() else { return ("", "") }
+                let alpn = connection.applicationProtocol, name = connection.serverName
                 while let stream = await connection.acceptStream() {
                     rt.spawn {
                         guard let bytes = try? await stream.readAll() else { return }
@@ -101,7 +101,7 @@ struct QUICEndpointTests {
         }
         #expect(echoed == Array("hello, quic".utf8.reversed()))
         #expect(finished)
-        #expect(alpn == Array("echo".utf8))
+        #expect(alpn == "echo")
         #expect(name == "localhost")
     }
 
@@ -112,7 +112,7 @@ struct QUICEndpointTests {
         defer { rt.shutdown() }
         let config = try serverConfig()
         let (pushed, readError) = try rt.block { () async throws -> ([UInt8]?, QUICConnectionError?) in
-            let endpoint = try QUICEndpoint.listen(host: "127.0.0.1", port: 0, configuration: config, runtime: rt)
+            let endpoint = try QUICEndpoint.bind(host: "127.0.0.1", port: 0, configuration: config, runtime: rt)
             let server = rt.spawn { () async -> QUICConnectionError? in
                 guard let connection = await endpoint.accept() else { return nil }
                 if let push = try? await connection.openStream(unidirectional: true) {
@@ -146,7 +146,7 @@ struct QUICEndpointTests {
         defer { rt.shutdown() }
         let config = try serverConfig()
         let accepted = try rt.block { () async throws -> Bool in
-            let endpoint = try QUICEndpoint.listen(host: "127.0.0.1", port: 0, configuration: config, runtime: rt)
+            let endpoint = try QUICEndpoint.bind(host: "127.0.0.1", port: 0, configuration: config, runtime: rt)
             let waiter = rt.spawn { await endpoint.accept() != nil }
             try? await Runtime.sleep(for: .milliseconds(20))
             await endpoint.close(grace: .zero)

@@ -71,7 +71,7 @@ do {
             guard let port = Int(args[2]) else { usage() }
             let identity = try TLSIdentity.selfSigned(names: ["localhost"])
             let key = try CertificateKey(chainPEM: identity.certificateChain, keyPEM: identity.privateKey)
-            let endpoint = try QUICEndpoint.listen(host: "0.0.0.0", port: port,
+            let endpoint = try QUICEndpoint.bind(host: "0.0.0.0", port: port,
                                                    configuration: HTTP3Server.quicConfiguration(certificate: key),
                                                    runtime: rt)
             print("vega-conformance: h3 on port \(endpoint.localPort)")
@@ -79,7 +79,7 @@ do {
         case "h3get":
             guard args.count >= 5, let port = Int(args[3]) else { usage() }
             let size = args.count > 5 ? Int(args[5]) ?? 0 : 0
-            let endpoint = try QUICEndpoint.client(runtime: rt)
+            let endpoint = try QUICEndpoint.bind(runtime: rt)
             let response = try await HTTP3Client.withConnection(endpoint, host: args[2], port: port,
                                                                certificateVerification: .insecureNoVerification) { client in
                 try await client.send(HTTPRequest(method: size > 0 ? .post : .get, target: args[4],

@@ -62,7 +62,7 @@ struct HTTP3ServerTests {
         let identity = try TLSIdentity.selfSigned(names: ["localhost"])
         let certificate = try CertificateKey(chainPEM: identity.certificateChain, keyPEM: identity.privateKey)
         let result = try rt.block { () async throws -> ([UInt8]?, (HTTPResponseHead, [UInt8]), (HTTPResponseHead, [UInt8])) in
-            let endpoint = try QUICEndpoint.listen(host: "127.0.0.1", port: 0,
+            let endpoint = try QUICEndpoint.bind(host: "127.0.0.1", port: 0,
                                                    configuration: HTTP3Server.quicConfiguration(certificate: certificate),
                                                    runtime: rt)
             let server = rt.spawn {
@@ -107,7 +107,7 @@ struct HTTP3ServerTests {
         let identity = try TLSIdentity.selfSigned(names: ["localhost"])
         let certificate = try CertificateKey(chainPEM: identity.certificateChain, keyPEM: identity.privateKey)
         let (reset, after) = try rt.block { () async throws -> (UInt64?, Int?) in
-            let endpoint = try QUICEndpoint.listen(host: "127.0.0.1", port: 0,
+            let endpoint = try QUICEndpoint.bind(host: "127.0.0.1", port: 0,
                                                    configuration: HTTP3Server.quicConfiguration(certificate: certificate),
                                                    runtime: rt)
             let server = rt.spawn { await HTTP3Server.serve(endpoint) { _ in HTTPResponse(status: 204) } }

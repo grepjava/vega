@@ -49,7 +49,7 @@ struct QUICFrameWriter {
     }
 }
 
-extension QUICConnection {
+extension QUICConnectionState {
     /// The largest packet number we might use next, which decides how many
     /// bytes the packet number field needs.
     func packetNumberLength(_ level: QUICLevel) -> Int {
@@ -506,7 +506,7 @@ extension QUICConnection {
         writable = rest
     }
 
-    private func writeOneStream(_ stream: QUICStream, _ writer: inout QUICFrameWriter,
+    private func writeOneStream(_ stream: QUICStreamState, _ writer: inout QUICFrameWriter,
                                 _ frames: inout QUICSentFrames,
                                 _ ackEliciting: inout Bool) -> Bool {
         // Retransmissions before new data, for the same reason as the crypto
@@ -679,7 +679,7 @@ extension QUICConnection {
         writer.varint(useApplication ? QUICFrameType.connectionCloseApplication
                                      : QUICFrameType.connectionCloseTransport)
         writer.varint(closeIsApplication && !useApplication
-                      ? QUICError.applicationError.rawValue : closeError)
+                      ? QUICErrorCode.applicationError.rawValue : closeError)
         if !useApplication { writer.varint(0) }        // the frame type at fault
         let reasonLength = min(closeReason.count, max(0, writer.room - 8))
         writer.varint(UInt64(reasonLength))
@@ -790,7 +790,7 @@ extension QUICConnection {
         }
         if isIdle(nowMs: nowMs) {
             status = .drained
-            events.append(QUICEvent(.closed, code: QUICError.noError.rawValue))
+            events.append(QUICEvent(.closed, code: QUICErrorCode.noError.rawValue))
             return
         }
         pathTimers(nowMs: nowMs)

@@ -27,7 +27,7 @@ public struct HTTP3Configuration: Sendable {
 /// runs its handler in a task of its own.
 ///
 /// ```swift
-/// let endpoint = try QUICEndpoint.listen(port: 443,
+/// let endpoint = try QUICEndpoint.bind(port: 443,
 ///     configuration: HTTP3Server.quicConfiguration(certificate: key), runtime: rt)
 /// await HTTP3Server.serve(endpoint) { request in HTTPResponse(body: "hello") }
 /// ```
@@ -36,11 +36,11 @@ public struct HTTP3Configuration: Sendable {
 /// which every peer must accept. No server push.
 public enum HTTP3Server {
     /// The ALPN identifier, "h3".
-    public static let alpn: [UInt8] = Array("h3".utf8)
+    public static let applicationProtocol = "h3"
 
     /// A QUIC configuration for HTTP/3 with `certificate`.
-    public static func quicConfiguration(certificate: CertificateKey) -> QUICServerConfig {
-        var config = QUICServerConfig(certKey: certificate, alpn: [alpn])
+    public static func quicConfiguration(certificate: CertificateKey) -> QUICServerConfiguration {
+        var config = QUICServerConfiguration(certificateKey: certificate, applicationProtocols: [applicationProtocol])
         // Room for the peer's control and QPACK streams, and a few more.
         config.initialMaxStreamsUni = 8
         return config
@@ -57,9 +57,9 @@ public enum HTTP3Server {
     }
 
     /// Serve one connection until it closes.
-    public static func serve(_ connection: QUICConnectionHandle, configuration: HTTP3Configuration = .init(),
+    public static func serve(_ connection: QUICConnection, configuration: HTTP3Configuration = .init(),
                              _ handler: @escaping @Sendable (HTTPRequest) async throws -> HTTPResponse) async {
-        guard connection.alpn == alpn else {
+        guard connection.applicationProtocol == applicationProtocol else {
             connection.close(code: HTTP3Error.versionFallback)
             return
         }
@@ -93,7 +93,7 @@ public enum HTTP3Server {
 
     /// The peer's control stream, QPACK streams, or one of a type we don't
     /// know (ignored, as RFC 9114 section 6.2.3 says).
-    static func readUnidirectional(_ stream: QUICStreamHandle, _ connection: QUICConnectionHandle,
+    static func readUnidirectional(_ stream: QUICStream, _ connection: QUICConnection,
                                    _ peer: PeerStreams) async {
         var reader = UnidirectionalReader(stream)
         guard let type = await reader.varint() else { return }
@@ -153,7 +153,7 @@ public enum HTTP3Server {
 
     /// One request stream: HEADERS, DATA, perhaps trailing HEADERS; then
     /// the handler, and its answer.
-    static func serveRequest(_ stream: QUICStreamHandle, _ connection: QUICConnectionHandle,
+    static func serveRequest(_ stream: QUICStream, _ connection: QUICConnection,
                              _ configuration: HTTP3Configuration,
                              _ handler: @escaping @Sendable (HTTPRequest) async throws -> HTTPResponse) async {
         var frames = FramedRead(reading: stream,
@@ -226,12 +226,12 @@ public enum HTTP3Server {
     }
 
     /// RFC 9114 section 4.1.2: a malformed request is a stream error.
-    static func messageError(_ stream: QUICStreamHandle) {
+    static func messageError(_ stream: QUICStream) {
         stream.reset(code: HTTP3Error.messageError)
         stream.stopSending(code: HTTP3Error.messageError)
     }
 
-    static func respond(_ stream: QUICStreamHandle, _ response: HTTPResponse, head: Bool) async {
+    static func respond(_ stream: QUICStream, _ response: HTTPResponse, head: Bool) async {
         var fields = response.head.fields
         if !head && fields["content-length"] == nil && response.status != 204 && response.status != 304 {
             fields.append(name: "content-length", value: String(response.body.count))
@@ -246,11 +246,11 @@ public enum HTTP3Server {
 /// Reads a unidirectional stream's type, then hands what it read past it
 /// to a `FramedRead`.
 struct UnidirectionalReader: ~Copyable {
-    let stream: QUICStreamHandle
+    let stream: QUICStream
     var buffer = IOBuffer(capacity: 64)
     var consumed = 0
 
-    init(_ stream: QUICStreamHandle) { self.stream = stream }
+    init(_ stream: QUICStream) { self.stream = stream }
 
     mutating func varint() async -> UInt64? {
         while true {

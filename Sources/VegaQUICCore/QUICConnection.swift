@@ -23,20 +23,20 @@
 import VegaWire
 import VegaCrypto
 
-public struct QUICServerConfig {
+public struct QUICServerConfiguration {
     /// The certificates and keys, owned by the caller for the life of the
     /// server, and never empty. The first is the default: what a client that
     /// sends no SNI, or asks for a name none of them claims, is served. The
     /// rest are chosen by the name in the client's SNI extension.
-    public var certKeys: [CertificateKey]
+    public var certificateKeys: [CertificateKey]
     /// The default certificate, which is the first of them.
-    public var certKey: CertificateKey {
-        get { certKeys[0] }
-        set { certKeys[0] = newValue }
+    public var certificateKey: CertificateKey {
+        get { certificateKeys[0] }
+        set { certificateKeys[0] = newValue }
     }
-    /// ALPN protocols, in the server's order of preference.
-    public var alpn: [[UInt8]]
-    public var maxIdleTimeoutMs: UInt64 = 30_000
+    /// Application protocols (ALPN), in the server's order of preference.
+    public var applicationProtocols: [String]
+    public var maxIdleTimeout: Duration = .seconds(30)
     public var initialMaxData: UInt64 = 1 << 20
     public var initialMaxStreamData: UInt64 = 256 * 1024
     public var initialMaxStreamsBidi: UInt64 = 128
@@ -45,17 +45,20 @@ public struct QUICServerConfig {
     public var maxDatagramFrameSize: UInt64 = 1200
     public var maxIncomingStreams = 256
 
-    public init(certKey: CertificateKey, alpn: [[UInt8]]) {
-        self.certKeys = [certKey]
-        self.alpn = alpn
+    public init(certificateKey: CertificateKey, applicationProtocols: [String]) {
+        self.certificateKeys = [certificateKey]
+        self.applicationProtocols = applicationProtocols
     }
 
     /// With several certificates, the first being the default.
-    public init(certKeys: [CertificateKey], alpn: [[UInt8]]) {
-        precondition(!certKeys.isEmpty, "a QUIC server needs a certificate")
-        self.certKeys = certKeys
-        self.alpn = alpn
+    public init(certificateKeys: [CertificateKey], applicationProtocols: [String]) {
+        precondition(!certificateKeys.isEmpty, "a QUIC server needs a certificate")
+        self.certificateKeys = certificateKeys
+        self.applicationProtocols = applicationProtocols
     }
+
+    package var alpn: [[UInt8]] { applicationProtocols.map { Array($0.utf8) } }
+    package var maxIdleTimeoutMs: UInt64 { milliseconds(maxIdleTimeout) }
 }
 
 public struct QUICEvent {
@@ -85,7 +88,7 @@ public struct QUICEvent {
     }
 }
 
-public final class QUICConnection {
+public final class QUICConnectionState {
     // MARK: Identity
 
     public let version: UInt32
@@ -162,7 +165,7 @@ public final class QUICConnection {
 
     // MARK: Streams and flow control
 
-    public internal(set) var streams: [UInt64: QUICStream] = [:]
+    public internal(set) var streams: [UInt64: QUICStreamState] = [:]
     var localParameters = QUICTransportParameters()
     var peerParameters = QUICTransportParameters()
 
@@ -259,7 +262,7 @@ public final class QUICConnection {
     /// which the caller has checked: the connection ID that first Initial
     /// was sent to, and the Retry's Source Connection ID, both of which the
     /// transport parameters must confirm (RFC 9000 section 7.3).
-    public init?(config: QUICServerConfig, version: UInt32,
+    public init?(config: QUICServerConfiguration, version: UInt32,
                  clientDCID: QUICConnectionID, clientSCID: QUICConnectionID,
                  localCID: QUICConnectionID, nowMs: UInt64,
                  retry: (originalDCID: QUICConnectionID, retrySCID: QUICConnectionID)? = nil) {
@@ -307,7 +310,7 @@ public final class QUICConnection {
         // limit: a peer that sends megabytes of handshake is not one we want.
         for i in 0..<3 { cryptoReceive[i].limit = 256 * 1024 }
 
-        tls = TLSServerHandshake(certKeys: config.certKeys, alpn: config.alpn,
+        tls = TLSServerHandshake(certKeys: config.certificateKeys, alpn: config.alpn,
                                  parameters: parameters, version: version)
     }
 
@@ -316,7 +319,7 @@ public final class QUICConnection {
     /// bytes. The caller routes datagrams to it by `localCID`, which is
     /// `quicLocalCIDLength` bytes, as a server's are. Nil when the keys
     /// cannot be made.
-    public init?(client config: QUICClientConfig, version: UInt32 = QUICVersion.v1, nowMs: UInt64) {
+    public init?(client config: QUICClientConfiguration, version: UInt32 = QUICVersion.v1, nowMs: UInt64) {
         self.isServer = false
         self.streamWindow = config.initialMaxStreamData
         self.connectionWindow = config.initialMaxData
@@ -615,12 +618,12 @@ public final class QUICConnection {
 
         while !r.isEmpty {
             guard let type = r.varint() else {
-                close(QUICError.frameEncodingError.rawValue)
+                close(QUICErrorCode.frameEncodingError.rawValue)
                 return nil
             }
             if !QUICFrameType.isProbing(type) { packetProbesOnly = false }
             if level != .application && !QUICFrameType.allowedDuringHandshake(type) {
-                close(QUICError.protocolViolation.rawValue)
+                close(QUICErrorCode.protocolViolation.rawValue)
                 return nil
             }
             if QUICFrameType.isAckEliciting(type) { ackEliciting = true }
@@ -651,13 +654,13 @@ public final class QUICConnection {
                 // A server has no use for a token it issued being handed back
                 // outside an Initial packet, and a client must not send one.
                 if isServer {
-                    close(QUICError.protocolViolation.rawValue)
+                    close(QUICErrorCode.protocolViolation.rawValue)
                     return nil
                 }
                 // A client is given one for its next connection, which it
                 // has no use for: there is no resumption here.
                 guard let length = r.varintAsInt(), length > 0, r.skip(length) else {
-                    close(QUICError.frameEncodingError.rawValue); return nil
+                    close(QUICErrorCode.frameEncodingError.rawValue); return nil
                 }
 
             case QUICFrameType.streamFirst...QUICFrameType.streamLast:
@@ -665,7 +668,7 @@ public final class QUICConnection {
 
             case QUICFrameType.maxData:
                 guard let limit = r.varint() else {
-                    close(QUICError.frameEncodingError.rawValue); return nil
+                    close(QUICErrorCode.frameEncodingError.rawValue); return nil
                 }
                 if limit > sendLimit {
                     sendLimit = limit
@@ -674,7 +677,7 @@ public final class QUICConnection {
 
             case QUICFrameType.maxStreamData:
                 guard let id = r.varint(), let limit = r.varint() else {
-                    close(QUICError.frameEncodingError.rawValue); return nil
+                    close(QUICErrorCode.frameEncodingError.rawValue); return nil
                 }
                 if !checkStreamID(id, isSend: true) { return nil }
                 if let stream = streams[id], limit > stream.send.limit {
@@ -685,37 +688,37 @@ public final class QUICConnection {
 
             case QUICFrameType.maxStreamsBidi:
                 guard let limit = r.varint(), limit <= 1 << 60 else {
-                    close(QUICError.frameEncodingError.rawValue); return nil
+                    close(QUICErrorCode.frameEncodingError.rawValue); return nil
                 }
                 peerMaxStreamsBidi = max(peerMaxStreamsBidi, limit)
 
             case QUICFrameType.maxStreamsUni:
                 guard let limit = r.varint(), limit <= 1 << 60 else {
-                    close(QUICError.frameEncodingError.rawValue); return nil
+                    close(QUICErrorCode.frameEncodingError.rawValue); return nil
                 }
                 peerMaxStreamsUni = max(peerMaxStreamsUni, limit)
 
             case QUICFrameType.dataBlocked:
                 guard r.varint() != nil else {
-                    close(QUICError.frameEncodingError.rawValue); return nil
+                    close(QUICErrorCode.frameEncodingError.rawValue); return nil
                 }
                 maxDataPending = true
 
             case QUICFrameType.streamDataBlocked:
                 guard let id = r.varint(), r.varint() != nil else {
-                    close(QUICError.frameEncodingError.rawValue); return nil
+                    close(QUICErrorCode.frameEncodingError.rawValue); return nil
                 }
                 if !checkStreamID(id, isSend: false) { return nil }
 
             case QUICFrameType.streamsBlockedBidi:
                 guard let limit = r.varint(), limit <= 1 << 60 else {
-                    close(QUICError.frameEncodingError.rawValue); return nil
+                    close(QUICErrorCode.frameEncodingError.rawValue); return nil
                 }
                 maxStreamsBidiPending = true
 
             case QUICFrameType.streamsBlockedUni:
                 guard let limit = r.varint(), limit <= 1 << 60 else {
-                    close(QUICError.frameEncodingError.rawValue); return nil
+                    close(QUICErrorCode.frameEncodingError.rawValue); return nil
                 }
                 maxStreamsUniPending = true
 
@@ -724,33 +727,33 @@ public final class QUICConnection {
 
             case QUICFrameType.retireConnectionID:
                 guard r.varint() != nil else {
-                    close(QUICError.frameEncodingError.rawValue); return nil
+                    close(QUICErrorCode.frameEncodingError.rawValue); return nil
                 }
 
             case QUICFrameType.pathChallenge:
                 guard let data = r.take(8) else {
-                    close(QUICError.frameEncodingError.rawValue); return nil
+                    close(QUICErrorCode.frameEncodingError.rawValue); return nil
                 }
                 pathChallenged(data)
 
             case QUICFrameType.pathResponse:
                 guard let data = r.take(8) else {
-                    close(QUICError.frameEncodingError.rawValue); return nil
+                    close(QUICErrorCode.frameEncodingError.rawValue); return nil
                 }
                 pathResponded(data)
 
             case QUICFrameType.connectionCloseTransport,
                  QUICFrameType.connectionCloseApplication:
                 guard let code = r.varint() else {
-                    close(QUICError.frameEncodingError.rawValue); return nil
+                    close(QUICErrorCode.frameEncodingError.rawValue); return nil
                 }
                 if type == QUICFrameType.connectionCloseTransport {
                     guard r.varint() != nil else {          // the frame type at fault
-                        close(QUICError.frameEncodingError.rawValue); return nil
+                        close(QUICErrorCode.frameEncodingError.rawValue); return nil
                     }
                 }
                 guard let reasonLength = r.varintAsInt(), r.skip(reasonLength) else {
-                    close(QUICError.frameEncodingError.rawValue); return nil
+                    close(QUICErrorCode.frameEncodingError.rawValue); return nil
                 }
                 closeWasReceived = true
                 closeError = code
@@ -763,7 +766,7 @@ public final class QUICConnection {
             case QUICFrameType.handshakeDone:
                 // Only a server sends this.
                 if isServer {
-                    close(QUICError.protocolViolation.rawValue)
+                    close(QUICErrorCode.protocolViolation.rawValue)
                     return nil
                 }
                 // At a client it is what confirms the handshake (RFC 9001
@@ -776,7 +779,7 @@ public final class QUICConnection {
                 }
 
             default:
-                close(QUICError.frameEncodingError.rawValue)
+                close(QUICErrorCode.frameEncodingError.rawValue)
                 return nil
             }
         }
@@ -792,12 +795,12 @@ public final class QUICConnection {
             if first { largest = high; first = false }
             ranges.append((low, high))
         }) else {
-            close(QUICError.frameEncodingError.rawValue)
+            close(QUICErrorCode.frameEncodingError.rawValue)
             return false
         }
         // A peer cannot acknowledge a packet number we have not issued.
         if largest >= spaces[level.rawValue].nextPacketNumber {
-            close(QUICError.protocolViolation.rawValue)
+            close(QUICErrorCode.protocolViolation.rawValue)
             return false
         }
 
@@ -833,16 +836,16 @@ public final class QUICConnection {
         guard let offset = r.varint(), let length = r.varintAsInt(),
               let data = r.take(length)
         else {
-            close(QUICError.frameEncodingError.rawValue)
+            close(QUICErrorCode.frameEncodingError.rawValue)
             return false
         }
         let before = cryptoReceive[level.rawValue].received
         switch cryptoReceive[level.rawValue].accept(offset: offset, data, length, fin: false) {
         case .flowControlError:
-            close(QUICError.cryptoBufferExceeded.rawValue)
+            close(QUICErrorCode.cryptoBufferExceeded.rawValue)
             return false
         case .finalSizeError:
-            close(QUICError.protocolViolation.rawValue)
+            close(QUICErrorCode.protocolViolation.rawValue)
             return false
         case .ok:
             break
@@ -861,13 +864,13 @@ public final class QUICConnection {
 
     private func handleStream(_ r: inout QUICReader, type: UInt64) -> Bool {
         guard let id = r.varint() else {
-            close(QUICError.frameEncodingError.rawValue)
+            close(QUICErrorCode.frameEncodingError.rawValue)
             return false
         }
         var offset: UInt64 = 0
         if type & QUICFrameType.streamOffset != 0 {
             guard let value = r.varint() else {
-                close(QUICError.frameEncodingError.rawValue)
+                close(QUICErrorCode.frameEncodingError.rawValue)
                 return false
             }
             offset = value
@@ -875,13 +878,13 @@ public final class QUICConnection {
         var length = r.remaining
         if type & QUICFrameType.streamLength != 0 {
             guard let value = r.varintAsInt() else {
-                close(QUICError.frameEncodingError.rawValue)
+                close(QUICErrorCode.frameEncodingError.rawValue)
                 return false
             }
             length = value
         }
         guard let data = r.take(length) else {
-            close(QUICError.frameEncodingError.rawValue)
+            close(QUICErrorCode.frameEncodingError.rawValue)
             return false
         }
         let fin = type & QUICFrameType.streamFin != 0
@@ -889,7 +892,7 @@ public final class QUICConnection {
         if !checkStreamID(id, isSend: false) { return false }
         // Sending to a stream we opened for sending only is nonsense.
         if isLocal(id) && QUICStreamKind.isUnidirectional(id) {
-            close(QUICError.streamStateError.rawValue)
+            close(QUICErrorCode.streamStateError.rawValue)
             return false
         }
         // A stream already retired: its bytes arrived before, and this is a
@@ -905,7 +908,7 @@ public final class QUICConnection {
         if end > stream.receive.highWater {
             let growth = end - stream.receive.highWater
             if receivedBytes &+ growth > receiveLimit {
-                close(QUICError.flowControlError.rawValue)
+                close(QUICErrorCode.flowControlError.rawValue)
                 return false
             }
             receivedBytes &+= growth
@@ -913,10 +916,10 @@ public final class QUICConnection {
 
         switch stream.receive.accept(offset: offset, data, length, fin: fin) {
         case .flowControlError:
-            close(QUICError.flowControlError.rawValue)
+            close(QUICErrorCode.flowControlError.rawValue)
             return false
         case .finalSizeError:
-            close(QUICError.finalSizeError.rawValue)
+            close(QUICErrorCode.finalSizeError.rawValue)
             return false
         case .ok:
             break
@@ -932,29 +935,29 @@ public final class QUICConnection {
 
     private func handleResetStream(_ r: inout QUICReader) -> Bool {
         guard let id = r.varint(), let code = r.varint(), let finalSize = r.varint() else {
-            close(QUICError.frameEncodingError.rawValue)
+            close(QUICErrorCode.frameEncodingError.rawValue)
             return false
         }
         if !checkStreamID(id, isSend: false) { return false }
         if isLocal(id) && QUICStreamKind.isUnidirectional(id) {
-            close(QUICError.streamStateError.rawValue)
+            close(QUICErrorCode.streamStateError.rawValue)
             return false
         }
         // Retired: the stream had ended already, and the peer's reset of it --
         // its answer to our STOP_SENDING, most often -- changes nothing.
         guard let stream = openOrFind(id) else { return true }
         if let known = stream.receive.finalSize, known != finalSize {
-            close(QUICError.finalSizeError.rawValue)
+            close(QUICErrorCode.finalSizeError.rawValue)
             return false
         }
         if finalSize < stream.receive.highWater {
-            close(QUICError.finalSizeError.rawValue)
+            close(QUICErrorCode.finalSizeError.rawValue)
             return false
         }
         if finalSize > stream.receive.highWater {
             let growth = finalSize - stream.receive.highWater
             if receivedBytes &+ growth > receiveLimit {
-                close(QUICError.flowControlError.rawValue)
+                close(QUICErrorCode.flowControlError.rawValue)
                 return false
             }
             receivedBytes &+= growth
@@ -968,14 +971,14 @@ public final class QUICConnection {
 
     private func handleStopSending(_ r: inout QUICReader) -> Bool {
         guard let id = r.varint(), let code = r.varint() else {
-            close(QUICError.frameEncodingError.rawValue)
+            close(QUICErrorCode.frameEncodingError.rawValue)
             return false
         }
         if !checkStreamID(id, isSend: true) { return false }
         // A peer cannot ask us to stop sending on a stream it opened for
         // sending only.
         if !isLocal(id) && QUICStreamKind.isUnidirectional(id) {
-            close(QUICError.streamStateError.rawValue)
+            close(QUICErrorCode.streamStateError.rawValue)
             return false
         }
         // Retired: everything we had to send on it was sent and acknowledged.
@@ -994,11 +997,11 @@ public final class QUICConnection {
               let length = r.byte(), length >= 1, length <= UInt8(quicMaxCIDLength),
               let bytes = r.take(Int(length)), r.skip(16)
         else {
-            close(QUICError.frameEncodingError.rawValue)
+            close(QUICErrorCode.frameEncodingError.rawValue)
             return false
         }
         if retirePrior > sequence {
-            close(QUICError.frameEncodingError.rawValue)
+            close(QUICErrorCode.frameEncodingError.rawValue)
             return false
         }
         // The server keeps sending to the connection ID it already has; a new
@@ -1009,23 +1012,23 @@ public final class QUICConnection {
 
     private func handleDatagram(_ r: inout QUICReader, hasLength: Bool) -> Bool {
         if localParameters.maxDatagramFrameSize == 0 {
-            close(QUICError.protocolViolation.rawValue)
+            close(QUICErrorCode.protocolViolation.rawValue)
             return false
         }
         var length = r.remaining
         if hasLength {
             guard let value = r.varintAsInt() else {
-                close(QUICError.frameEncodingError.rawValue)
+                close(QUICErrorCode.frameEncodingError.rawValue)
                 return false
             }
             length = value
         }
         guard let data = r.take(length) else {
-            close(QUICError.frameEncodingError.rawValue)
+            close(QUICErrorCode.frameEncodingError.rawValue)
             return false
         }
         if UInt64(length) > localParameters.maxDatagramFrameSize {
-            close(QUICError.protocolViolation.rawValue)
+            close(QUICErrorCode.protocolViolation.rawValue)
             return false
         }
         incomingDatagrams.append([UInt8](UnsafeBufferPointer(start: data, count: length)))
@@ -1044,7 +1047,7 @@ public final class QUICConnection {
     /// that it is within the limits we granted.
     private func checkStreamID(_ id: UInt64, isSend: Bool) -> Bool {
         if id > quicVarintMax {
-            close(QUICError.frameEncodingError.rawValue)
+            close(QUICErrorCode.frameEncodingError.rawValue)
             return false
         }
         // A frame about a stream of ours we have not opened is a reference
@@ -1052,7 +1055,7 @@ public final class QUICConnection {
         if isLocal(id) {
             let next = QUICStreamKind.isUnidirectional(id) ? nextLocalStreamUni : nextLocalStreamBidi
             if QUICStreamKind.index(id) >= next {
-                close(QUICError.streamStateError.rawValue)
+                close(QUICErrorCode.streamStateError.rawValue)
                 return false
             }
             return true
@@ -1060,7 +1063,7 @@ public final class QUICConnection {
         let index = QUICStreamKind.index(id)
         let limit = QUICStreamKind.isUnidirectional(id) ? localMaxStreamsUni : localMaxStreamsBidi
         if index >= limit {
-            close(QUICError.streamLimitError.rawValue)
+            close(QUICErrorCode.streamLimitError.rawValue)
             return false
         }
         _ = isSend
@@ -1070,7 +1073,7 @@ public final class QUICConnection {
     /// Finds a stream, creating it and every lower-numbered one of its kind.
     /// QUIC opens streams implicitly: a frame for stream 12 opens 0, 4 and 8
     /// as well, so a peer cannot skip ahead to avoid a limit.
-    private func openOrFind(_ id: UInt64) -> QUICStream? {
+    private func openOrFind(_ id: UInt64) -> QUICStreamState? {
         if let existing = streams[id] { return existing }
         if isLocal(id) { return nil }
 
@@ -1079,12 +1082,12 @@ public final class QUICConnection {
         var highest = unidirectional ? highestIncomingUni : highestIncomingBidi
         if index <= highest { return streams[id] }
 
-        var created: QUICStream?
+        var created: QUICStreamState?
         var i = highest + 1
         while i <= index {
             let newID = QUICStreamKind.id(index: UInt64(i), serverInitiated: !isServer,
                                           unidirectional: unidirectional)
-            let stream = QUICStream(id: newID)
+            let stream = QUICStreamState(id: newID)
             stream.receive.limit = unidirectional
                 ? localParameters.initialMaxStreamDataUni
                 : localParameters.initialMaxStreamDataBidiRemote
@@ -1112,7 +1115,7 @@ public final class QUICConnection {
         if next >= limit { return nil }
         let id = QUICStreamKind.id(index: next, serverInitiated: isServer,
                                    unidirectional: unidirectional)
-        let stream = QUICStream(id: id)
+        let stream = QUICStreamState(id: id)
         stream.send.limit = unidirectional
             ? peerParameters.initialMaxStreamDataUni
             : peerParameters.initialMaxStreamDataBidiRemote
@@ -1139,7 +1142,7 @@ public final class QUICConnection {
         unidirectional ? nextLocalStreamUni : nextLocalStreamBidi
     }
 
-    public func stream(_ id: UInt64) -> QUICStream? { streams[id] }
+    public func stream(_ id: UInt64) -> QUICStreamState? { streams[id] }
 
     /// Says that the layer above has finished with a stream. Until this is
     /// called the transport keeps it whatever state it is in, because only the
@@ -1242,7 +1245,7 @@ public final class QUICConnection {
         }
         for secrets in tls.takePendingSecrets() {
             if !installKeys(secrets) {
-                close(QUICError.internalError.rawValue)
+                close(QUICErrorCode.internalError.rawValue)
                 return false
             }
         }
@@ -1265,7 +1268,7 @@ public final class QUICConnection {
             serverName = tls.serverName
             peerParameters = tls.peerParameters
             if !isServer && !checkServerConnectionIDs() {
-                close(QUICError.transportParameterError.rawValue)
+                close(QUICErrorCode.transportParameterError.rawValue)
                 return false
             }
             adoptPeerParameters()
@@ -1490,7 +1493,7 @@ public final class QUICConnection {
 
 // MARK: - A client's answers to its first flight
 
-extension QUICConnection {
+extension QUICConnectionState {
     /// A Retry (RFC 9000 section 17.2.5.2): the server wants proof of the
     /// client's address before it does any work, and sends a token to come
     /// back with and a connection ID to come back to. The ClientHello goes
@@ -1551,7 +1554,7 @@ extension QUICConnection {
         while let v = r.uint32() { offered.append(v) }
         if offered.contains(version) { return }
         peerVersions = offered
-        closeError = QUICError.versionNegotiationError.rawValue
+        closeError = QUICErrorCode.versionNegotiationError.rawValue
         closeIsApplication = false
         status = .drained
         lastActivityMs = nowMs

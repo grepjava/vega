@@ -5,7 +5,7 @@
 // their own, driven by one task per socket.
 //
 // The endpoint's task owns everything QUIC for its socket: the table from
-// connection ID to connection, and every `QUICConnection`. Nothing else
+// connection ID to connection, and every `QUICConnectionState`. Nothing else
 // touches them, so none of it is locked. Its loop: receive a batch of
 // datagrams, waiting no longer than the earliest QUIC timer; feed each to its
 // connection (or accept a new one, or answer with version negotiation);
@@ -14,14 +14,14 @@
 // to say, one connection's datagrams coalesced into segmented sends (UDP GSO)
 // where the kernel allows.
 //
-// The application's tasks hold `QUICConnectionHandle`s and
-// `QUICStreamHandle`s (Handles.swift). A read waits for bytes the endpoint
+// The application's tasks hold `QUICConnection`s and
+// `QUICStream`s (Handles.swift). A read waits for bytes the endpoint
 // hands over; a write queues bytes and posts the stream, which wakes the
 // endpoint early from its wait on the socket.
 //
 // The same loop as Garuda's HTTP/3 endpoint, without the HTTP.
 //
-// A client endpoint (`client`, then `connect`) is the same loop on a socket
+// A client endpoint (`bind` without a configuration, then `connect`) is the same loop on a socket
 // of its own: its connections are the ones it began, found by the connection
 // ID they chose for themselves, and it accepts none.
 //===----------------------------------------------------------------------===//
@@ -33,12 +33,12 @@ import VegaIO
 import VegaQUICCore
 import VegaWire
 
-/// A UDP socket speaking QUIC: a server (`listen`, then `accept`) or a
-/// client (`client`, then `connect`).
+/// A UDP socket speaking QUIC: a server (`bind` with a configuration, then
+/// `accept`) or a client (`bind` without one, then `connect`).
 ///
 /// ```swift
-/// let endpoint = try QUICEndpoint.listen(port: 4433, configuration: QUICServerConfig(certKey: key, alpn: [Array("echo".utf8)]),
-///                                        runtime: rt)
+/// let configuration = QUICServerConfiguration(certificateKey: key, applicationProtocols: ["echo"])
+/// let endpoint = try QUICEndpoint.bind(port: 4433, configuration: configuration, runtime: rt)
 /// while let connection = await endpoint.accept() {
 ///     rt.spawn {
 ///         while let stream = await connection.acceptStream() {
@@ -53,10 +53,10 @@ import VegaWire
 /// ```
 ///
 /// ```swift
-/// let endpoint = try QUICEndpoint.client(runtime: rt)
+/// let endpoint = try QUICEndpoint.bind(runtime: rt)
 /// let connection = try await endpoint.connect(host: "example.com", port: 443,
-///                                             configuration: QUICClientConfig(serverName: "example.com",
-///                                                                             alpn: [Array("h3".utf8)]))
+///                                             configuration: QUICClientConfiguration(serverName: "example.com",
+///                                                                                    applicationProtocols: ["h3"]))
 /// let stream = try await connection.openStream()
 /// ```
 public final class QUICEndpoint: @unchecked Sendable {
@@ -73,17 +73,17 @@ public final class QUICEndpoint: @unchecked Sendable {
     static let socketBufferSize = 2 * 1024 * 1024
 
     enum Post {
-        case stream(QUICStreamHandle)
-        case open(QUICConnectionHandle)
-        case close(QUICConnectionHandle, UInt64, [UInt8])
+        case stream(QUICStream)
+        case open(QUICConnection)
+        case close(QUICConnection, UInt64, [UInt8])
         /// A client connection, made by `connect`, to start.
-        case connect(QUICConnectionHandle)
+        case connect(QUICConnection)
     }
 
     struct Shared {
         var posts: [Post] = []
-        var accepted: [QUICConnectionHandle] = []
-        var acceptWaiter: UnsafeContinuation<QUICConnectionHandle?, Never>?
+        var accepted: [QUICConnection] = []
+        var acceptWaiter: UnsafeContinuation<QUICConnection?, Never>?
         var stopRequested = false
         var graceMs: UInt64 = 0
         var stopped = false
@@ -91,7 +91,7 @@ public final class QUICEndpoint: @unchecked Sendable {
     }
 
     let runtime: Runtime
-    let serverConfig: QUICServerConfig?
+    let serverConfig: QUICServerConfiguration?
     let shared = Locked(Shared())
     let wake = IODeadlineTrigger()
     /// The port the socket is bound to.
@@ -116,7 +116,7 @@ public final class QUICEndpoint: @unchecked Sendable {
     var stopping = false
     var stopDeadlineMs = UInt64.max
 
-    private init(runtime: Runtime, serverConfig: QUICServerConfig?, localPort: Int, localIsIPv6: Bool) {
+    private init(runtime: Runtime, serverConfig: QUICServerConfiguration?, localPort: Int, localIsIPv6: Bool) {
         self.runtime = runtime
         self.serverConfig = serverConfig
         self.localPort = localPort
@@ -131,7 +131,7 @@ public final class QUICEndpoint: @unchecked Sendable {
     /// Bind a UDP socket and serve QUIC on it, with `configuration`'s
     /// certificates and application protocols. Port 0 picks one
     /// (`localPort`).
-    public static func listen(host: String = "", port: Int, configuration: QUICServerConfig,
+    public static func bind(host: String = "", port: Int, configuration: QUICServerConfiguration,
                               runtime: Runtime) throws(IOError) -> QUICEndpoint {
         let socket = try UDPSocket.bind(host: host, port: port)
         configure(socket)
@@ -146,7 +146,7 @@ public final class QUICEndpoint: @unchecked Sendable {
     /// local address, an IPv4 one for all interfaces when empty -- pass
     /// "::" to reach IPv6 servers -- and port 0 picks one. One endpoint
     /// carries any number of connections, to any servers.
-    public static func client(runtime: Runtime, host: String = "", port: Int = 0) throws(IOError) -> QUICEndpoint {
+    public static func bind(host: String = "", port: Int = 0, runtime: Runtime) throws(IOError) -> QUICEndpoint {
         let socket = try UDPSocket.bind(host: host.isEmpty ? "0.0.0.0" : host, port: port)
         configure(socket)
         let local = try socket.localAddress
@@ -158,7 +158,7 @@ public final class QUICEndpoint: @unchecked Sendable {
 
     /// Connect to a QUIC server and return once the handshake is done: the
     /// server's certificate checked as `configuration` says, an application
-    /// protocol agreed (`alpn`). `host` is a name, looked up off the
+    /// protocol agreed (`applicationProtocol`). `host` is a name, looked up off the
     /// workers, or an address; the first of its addresses in the socket's
     /// family is used. Open streams with `openStream`; the server's arrive
     /// at `acceptStream`.
@@ -168,7 +168,7 @@ public final class QUICEndpoint: @unchecked Sendable {
     /// code QUIC closed it with: 0x100 plus the TLS alert, 0x12a when the
     /// certificate was refused.
     public func connect(host: String, port: Int,
-                        configuration: QUICClientConfig) async throws(QUICConnectionError) -> QUICConnectionHandle {
+                        configuration: QUICClientConfiguration) async throws(QUICConnectionError) -> QUICConnection {
         let addresses: [SocketAddress]
         do throws(IOError) {
             addresses = try await SocketAddress.lookup(host: host, port: port)
@@ -178,8 +178,8 @@ public final class QUICEndpoint: @unchecked Sendable {
         guard let peer = addresses.first(where: { $0.isIPv6 == localIsIPv6 }) else {
             throw .io(IOError(code: -3, message: "\(host) has no \(localIsIPv6 ? "IPv6" : "IPv4") address for this endpoint"))
         }
-        guard let quic = QUICConnection(client: configuration, nowMs: Self.nowMs()) else {
-            throw .connectionClosed(code: QUICError.internalError.rawValue, application: false)
+        guard let quic = QUICConnectionState(client: configuration, nowMs: Self.nowMs()) else {
+            throw .connectionClosed(code: QUICErrorCode.internalError.rawValue, application: false)
         }
         let connection = EndpointConnection(endpoint: self, quic: quic, isServer: false, peer: peer, local: nil,
                                             localCID: quic.localCID, originalDCID: quic.originalDCID)
@@ -200,9 +200,9 @@ public final class QUICEndpoint: @unchecked Sendable {
 
     /// The next connection whose handshake is done; nil once the endpoint
     /// is closed.
-    public func accept() async -> QUICConnectionHandle? {
-        await withUnsafeContinuation { (c: UnsafeContinuation<QUICConnectionHandle?, Never>) in
-            let now = shared.withLock { s -> (Bool, QUICConnectionHandle?) in
+    public func accept() async -> QUICConnection? {
+        await withUnsafeContinuation { (c: UnsafeContinuation<QUICConnection?, Never>) in
+            let now = shared.withLock { s -> (Bool, QUICConnection?) in
                 if !s.accepted.isEmpty { return (true, s.accepted.removeFirst()) }
                 if s.stopped || s.stopRequested { return (true, nil) }
                 precondition(s.acceptWaiter == nil, "QUICEndpoint.accept() called while another call waits")
@@ -472,7 +472,7 @@ public final class QUICEndpoint: @unchecked Sendable {
         guard n >= QUICPacket.minimumInitialSize, header.dcid.length >= 8 else { return }
         guard !stopping else { return }
         let localCID = QUICConnectionID.random()
-        guard let quic = QUICConnection(config: config, version: header.version, clientDCID: header.dcid,
+        guard let quic = QUICConnectionState(config: config, version: header.version, clientDCID: header.dcid,
                                         clientSCID: header.scid, localCID: localCID, nowMs: now) else { return }
         let connection = EndpointConnection(endpoint: self, quic: quic, isServer: true, peer: peer, local: local,
                                             localCID: localCID, originalDCID: header.dcid)
@@ -512,11 +512,11 @@ public final class QUICEndpoint: @unchecked Sendable {
     }
 
     /// A connection finished its handshake.
-    func established(_ connection: EndpointConnection, _ handle: QUICConnectionHandle) {
+    func established(_ connection: EndpointConnection, _ handle: QUICConnection) {
         connection.handedOver()
         // A client's goes back to the `connect` that waits on it.
         guard connection.isServer else { return }
-        let waiter = shared.withLock { s -> UnsafeContinuation<QUICConnectionHandle?, Never>? in
+        let waiter = shared.withLock { s -> UnsafeContinuation<QUICConnection?, Never>? in
             if let w = s.acceptWaiter {
                 s.acceptWaiter = nil
                 return w
@@ -613,7 +613,7 @@ final class EndpointConnection {
     nonisolated(unsafe) private static let empty: UnsafeMutablePointer<UInt8> = .allocate(capacity: 1)
 
     unowned let endpoint: QUICEndpoint
-    let quic: QUICConnection
+    let quic: QUICConnectionState
     let isServer: Bool
     var peer: SocketAddress
     var local: SocketAddress?
@@ -624,15 +624,15 @@ final class EndpointConnection {
     var touched = false
     var announced = false
     var abandoned = false
-    var streams: [UInt64: QUICStreamHandle] = [:]
+    var streams: [UInt64: QUICStream] = [:]
     /// The application's handle. Held here until it is handed over (from
     /// `accept()` or `connect`), weakly after: a connection nobody holds,
     /// nor any of its streams, is closed.
-    private var heldHandle: QUICConnectionHandle?
-    private weak var weakHandle: QUICConnectionHandle?
-    var handle: QUICConnectionHandle? { heldHandle ?? weakHandle }
+    private var heldHandle: QUICConnection?
+    private weak var weakHandle: QUICConnection?
+    var handle: QUICConnection? { heldHandle ?? weakHandle }
 
-    init(endpoint: QUICEndpoint, quic: QUICConnection, isServer: Bool, peer: SocketAddress, local: SocketAddress?,
+    init(endpoint: QUICEndpoint, quic: QUICConnectionState, isServer: Bool, peer: SocketAddress, local: SocketAddress?,
          localCID: QUICConnectionID, originalDCID: QUICConnectionID) {
         self.endpoint = endpoint
         self.quic = quic
@@ -641,7 +641,7 @@ final class EndpointConnection {
         self.local = local
         self.localCID = localCID
         self.originalDCID = originalDCID
-        let handle = QUICConnectionHandle(endpoint: endpoint, core: self, remoteAddress: peer)
+        let handle = QUICConnection(endpoint: endpoint, core: self, remoteAddress: peer)
         heldHandle = handle
         weakHandle = handle
     }
@@ -722,11 +722,11 @@ final class EndpointConnection {
     }
 
     /// A stream the peer opened, made on first sight.
-    private func incoming(_ id: UInt64, _ handle: QUICConnectionHandle) -> QUICStreamHandle? {
+    private func incoming(_ id: UInt64, _ handle: QUICConnection) -> QUICStream? {
         if let stream = streams[id] { return stream }
         let peerOpened = QUICStreamKind.isClientInitiated(id) == isServer
         guard peerOpened, announced else { return nil }
-        let stream = QUICStreamHandle(id: id, connection: handle)
+        let stream = QUICStream(id: id, connection: handle)
         if QUICStreamKind.isUnidirectional(id) {
             stream.state.withLock { s in
                 s.writeEnd = .stopSending(code: 0)
@@ -740,7 +740,7 @@ final class EndpointConnection {
 
     /// `finished`: the peer's FIN. Not `receive.finished`, which a reset
     /// sets too.
-    private func readable(_ id: UInt64, _ handle: QUICConnectionHandle, finished: Bool) {
+    private func readable(_ id: UInt64, _ handle: QUICConnection, finished: Bool) {
         guard let stream = incoming(id, handle), let q = quic.stream(id) else { return }
         let ready = q.receive.ready.readableBytes
         if ready > 0 {
@@ -755,7 +755,7 @@ final class EndpointConnection {
         retireIfDone(stream)
     }
 
-    private func extendWindow(_ stream: QUICStreamHandle, _ q: QUICStream) {
+    private func extendWindow(_ stream: QUICStream, _ q: QUICStreamState) {
         let held = stream.state.withLock { UInt64($0.inbox.count - $0.inStart) }
         let received = q.receive.received
         let consumed = received &- min(received, UInt64(q.receive.ready.readableBytes) &+ held)
@@ -763,7 +763,7 @@ final class EndpointConnection {
     }
 
     /// Move a stream's queued bytes, end and reset onto the transport.
-    func pump(_ stream: QUICStreamHandle) {
+    func pump(_ stream: QUICStream) {
         guard let q = quic.stream(stream.id) else { return }
         let id = stream.id
         let (writer, stop) = stream.state.withLock { s -> (UnsafeContinuation<Void, Never>?, UInt64?) in
@@ -787,7 +787,7 @@ final class EndpointConnection {
                 }
             }
             var writer: UnsafeContinuation<Void, Never>?
-            if s.outbox.count - s.outStart <= QUICStreamHandle.lowWater {
+            if s.outbox.count - s.outStart <= QUICStream.lowWater {
                 writer = s.writer
                 s.writer = nil
             }
@@ -802,7 +802,7 @@ final class EndpointConnection {
     }
 
     /// Both directions over, and the application has had everything.
-    private func retireIfDone(_ stream: QUICStreamHandle) {
+    private func retireIfDone(_ stream: QUICStream) {
         guard let q = quic.stream(stream.id) else {
             streams[stream.id] = nil
             return
@@ -820,7 +820,7 @@ final class EndpointConnection {
     }
 
     /// Opens the application asked for, as far as the peer's limits allow.
-    func openStreams(_ handle: QUICConnectionHandle) {
+    func openStreams(_ handle: QUICConnection) {
         guard announced, !quic.isClosed else { return }
         let opens = handle.takeOpens()
         for open in opens {
@@ -828,7 +828,7 @@ final class EndpointConnection {
                 handle.requeue(open)
                 continue
             }
-            let stream = QUICStreamHandle(id: id, connection: handle)
+            let stream = QUICStream(id: id, connection: handle)
             if open.unidirectional { stream.state.withLock { $0.readEnd = .fin } }
             streams[id] = stream
             open.waiter.resume(returning: .success(stream))

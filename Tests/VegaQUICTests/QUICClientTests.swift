@@ -1,7 +1,7 @@
 // VegaCrypto's platforms and traits only: QUIC's TLS 1.3 is built on it.
 #if (os(Linux) || os(macOS) || os(Windows)) && (OpenSSL || BoringSSL)
 //===----------------------------------------------------------------------===//
-// The client role: a client QUICConnection against a server QUICConnection,
+// The client role: a client QUICConnectionState against a server QUICConnectionState,
 // in memory -- the handshake, streams each way, HANDSHAKE_DONE, close, Retry
 // and Version Negotiation -- and the certificate checks behind it.
 //===----------------------------------------------------------------------===//
@@ -18,7 +18,7 @@ private func makeIdentity(_ names: [String] = ["localhost"]) throws -> (pem: Str
             try CertificateKey(chainPEM: identity.certificateChain, keyPEM: identity.privateKey))
 }
 
-private func datagrams(_ connection: QUICConnection, nowMs: UInt64) -> [[UInt8]] {
+private func datagrams(_ connection: QUICConnectionState, nowMs: UInt64) -> [[UInt8]] {
     var out: [[UInt8]] = []
     var buffer = [UInt8](repeating: 0, count: 1500)
     while true {
@@ -28,7 +28,7 @@ private func datagrams(_ connection: QUICConnection, nowMs: UInt64) -> [[UInt8]]
     }
 }
 
-private func deliver(_ datagram: [UInt8], to connection: QUICConnection, nowMs: UInt64) {
+private func deliver(_ datagram: [UInt8], to connection: QUICConnectionState, nowMs: UInt64) {
     var datagram = datagram
     datagram.withUnsafeMutableBufferPointer { connection.receive($0.baseAddress!, $0.count, ecn: 0, nowMs: nowMs) }
 }
@@ -38,7 +38,7 @@ private func header(_ datagram: [UInt8]) -> QUICPacketHeader {
 }
 
 /// Everything a stream has delivered so far, taken.
-private func take(_ connection: QUICConnection, _ id: UInt64) -> [UInt8] {
+private func take(_ connection: QUICConnectionState, _ id: UInt64) -> [UInt8] {
     guard let stream = connection.stream(id) else { return [] }
     let n = stream.receive.ready.readableBytes
     let bytes = [UInt8](UnsafeBufferPointer(start: stream.receive.ready.readPointer, count: n))
@@ -49,16 +49,16 @@ private func take(_ connection: QUICConnection, _ id: UInt64) -> [UInt8] {
 /// A client and the server it reaches, the server made from the client's
 /// first Initial as a listener would make it.
 private final class Link {
-    let client: QUICConnection
-    var server: QUICConnection?
-    let serverConfig: QUICServerConfig
+    let client: QUICConnectionState
+    var server: QUICConnectionState?
+    let serverConfig: QUICServerConfiguration
     var now: UInt64 = 1_000
     /// What the server is made with, on the first Initial.
     var retry: (originalDCID: QUICConnectionID, retrySCID: QUICConnectionID)?
     var serverCID = QUICConnectionID.random()
 
-    init(client: QUICClientConfig, server: QUICServerConfig) throws {
-        self.client = try #require(QUICConnection(client: client, nowMs: 1_000))
+    init(client: QUICClientConfiguration, server: QUICServerConfiguration) throws {
+        self.client = try #require(QUICConnectionState(client: client, nowMs: 1_000))
         self.serverConfig = server
     }
 
@@ -70,7 +70,7 @@ private final class Link {
             for datagram in up {
                 if server == nil {
                     let h = header(datagram)
-                    server = try #require(QUICConnection(config: serverConfig, version: h.version, clientDCID: h.dcid,
+                    server = try #require(QUICConnectionState(config: serverConfig, version: h.version, clientDCID: h.dcid,
                                                          clientSCID: h.scid, localCID: serverCID, nowMs: now,
                                                          retry: retry))
                 }
@@ -91,7 +91,7 @@ private func trusting(_ pem: String) throws -> QUICCertificateVerification {
 @Suite("QUIC client")
 struct QUICClientTests {
     @Test func firstDatagramIsAPaddedInitialWithTheClientHello() throws {
-        let client = try #require(QUICConnection(client: QUICClientConfig(serverName: "localhost", alpn: [Array("h3".utf8)],
+        let client = try #require(QUICConnectionState(client: QUICClientConfiguration(serverName: "localhost", applicationProtocols: ["h3"],
                                                                           certificateVerification: .insecureNoVerification),
                                                  nowMs: 0))
         #expect(!client.isServer)
@@ -107,9 +107,9 @@ struct QUICClientTests {
 
     @Test func handshakeStreamsAndClose() throws {
         let (pem, key) = try makeIdentity()
-        let link = try Link(client: QUICClientConfig(serverName: "localhost", alpn: [Array("h3".utf8), Array("echo".utf8)],
+        let link = try Link(client: QUICClientConfiguration(serverName: "localhost", applicationProtocols: ["h3", "echo"],
                                                      certificateVerification: trusting(pem)),
-                            server: QUICServerConfig(certKey: key, alpn: [Array("echo".utf8)]))
+                            server: QUICServerConfiguration(certificateKey: key, applicationProtocols: ["echo"]))
         try link.run()
         let client = link.client
         let server = try #require(link.server)
@@ -171,27 +171,27 @@ struct QUICClientTests {
 
     @Test func aStreamTheServerHasNotOpenedIsAnError() throws {
         let (pem, key) = try makeIdentity()
-        let link = try Link(client: QUICClientConfig(serverName: "localhost", alpn: [Array("h3".utf8)],
+        let link = try Link(client: QUICClientConfiguration(serverName: "localhost", applicationProtocols: ["h3"],
                                                      certificateVerification: trusting(pem)),
-                            server: QUICServerConfig(certKey: key, alpn: [Array("h3".utf8)]))
+                            server: QUICServerConfiguration(certificateKey: key, applicationProtocols: ["h3"]))
         try link.run()
         // The client sending on stream 3, the server's unidirectional one:
         // the server did not open it, and could not have been written to.
         let client = link.client
-        let stray = QUICStream(id: 3)
+        let stray = QUICStreamState(id: 3)
         stray.send.limit = 1 << 16
         client.streams[3] = stray
         Array("x".utf8).withUnsafeBufferPointer { client.send(3, $0.baseAddress!, $0.count, fin: true) }
         try link.run()
-        #expect(link.server?.closeError == QUICError.streamStateError.rawValue)
+        #expect(link.server?.closeError == QUICErrorCode.streamStateError.rawValue)
     }
 
     @Test func certificateFromAnUntrustedRootIsRefused() throws {
         let (_, key) = try makeIdentity()
         let (otherPEM, _) = try makeIdentity()
-        let link = try Link(client: QUICClientConfig(serverName: "localhost", alpn: [Array("h3".utf8)],
+        let link = try Link(client: QUICClientConfiguration(serverName: "localhost", applicationProtocols: ["h3"],
                                                      certificateVerification: trusting(otherPEM)),
-                            server: QUICServerConfig(certKey: key, alpn: [Array("h3".utf8)]))
+                            server: QUICServerConfiguration(certificateKey: key, applicationProtocols: ["h3"]))
         try link.run()
         #expect(link.client.tlsAlert == TLSAlert.badCertificate)
         #expect(link.client.certificateError != nil)
@@ -202,9 +202,9 @@ struct QUICClientTests {
 
     @Test func certificateForAnotherNameIsRefused() throws {
         let (pem, key) = try makeIdentity()
-        let link = try Link(client: QUICClientConfig(serverName: "example.com", alpn: [Array("h3".utf8)],
+        let link = try Link(client: QUICClientConfiguration(serverName: "example.com", applicationProtocols: ["h3"],
                                                      certificateVerification: trusting(pem)),
-                            server: QUICServerConfig(certKey: key, alpn: [Array("h3".utf8)]))
+                            server: QUICServerConfiguration(certificateKey: key, applicationProtocols: ["h3"]))
         try link.run()
         #expect(link.client.tlsAlert == TLSAlert.badCertificate)
         #expect(link.client.status != .connected)
@@ -213,12 +213,12 @@ struct QUICClientTests {
     @Test func aCustomCheckSeesTheChainAndTheName() throws {
         let (_, key) = try makeIdentity()
         let seen = Seen()
-        let link = try Link(client: QUICClientConfig(serverName: "localhost", alpn: [Array("h3".utf8)],
+        let link = try Link(client: QUICClientConfiguration(serverName: "localhost", applicationProtocols: ["h3"],
                                                      certificateVerification: .custom { chain, name in
                                                          seen.record(chain.count, name)
                                                          return true
                                                      }),
-                            server: QUICServerConfig(certKey: key, alpn: [Array("h3".utf8)]))
+                            server: QUICServerConfiguration(certificateKey: key, applicationProtocols: ["h3"]))
         try link.run()
         #expect(link.client.status == .connected)
         #expect(seen.value == (1, "localhost"))
@@ -226,9 +226,9 @@ struct QUICClientTests {
 
     @Test func noCommonApplicationProtocolFails() throws {
         let (pem, key) = try makeIdentity()
-        let link = try Link(client: QUICClientConfig(serverName: "localhost", alpn: [Array("h3".utf8)],
+        let link = try Link(client: QUICClientConfiguration(serverName: "localhost", applicationProtocols: ["h3"],
                                                      certificateVerification: trusting(pem)),
-                            server: QUICServerConfig(certKey: key, alpn: [Array("echo".utf8)]))
+                            server: QUICServerConfiguration(certificateKey: key, applicationProtocols: ["echo"]))
         try link.run()
         #expect(link.server?.tlsAlert == TLSAlert.noApplicationProtocol)
         #expect(link.client.closeError == quicCryptoError(TLSAlert.noApplicationProtocol))
@@ -236,9 +236,9 @@ struct QUICClientTests {
 
     @Test func retryIsFollowed() throws {
         let (pem, key) = try makeIdentity()
-        let link = try Link(client: QUICClientConfig(serverName: "localhost", alpn: [Array("h3".utf8)],
+        let link = try Link(client: QUICClientConfiguration(serverName: "localhost", applicationProtocols: ["h3"],
                                                      certificateVerification: trusting(pem)),
-                            server: QUICServerConfig(certKey: key, alpn: [Array("h3".utf8)]))
+                            server: QUICServerConfiguration(certificateKey: key, applicationProtocols: ["h3"]))
         let client = link.client
         let first = datagrams(client, nowMs: link.now)
         let h = header(first[0])
@@ -279,7 +279,7 @@ struct QUICClientTests {
 
         // A server that knows about the Retry, made from the second Initial.
         link.retry = (h.dcid, retrySCID)
-        link.server = try #require(QUICConnection(config: link.serverConfig, version: h2.version, clientDCID: h2.dcid,
+        link.server = try #require(QUICConnectionState(config: link.serverConfig, version: h2.version, clientDCID: h2.dcid,
                                                   clientSCID: h2.scid, localCID: link.serverCID, nowMs: link.now,
                                                   retry: link.retry))
         for datagram in second { deliver(datagram, to: link.server!, nowMs: link.now) }
@@ -292,17 +292,17 @@ struct QUICClientTests {
         // A server claiming a Retry the client never had: someone rewrote
         // the handshake, and the client closes with TRANSPORT_PARAMETER_ERROR.
         let (pem, key) = try makeIdentity()
-        let link = try Link(client: QUICClientConfig(serverName: "localhost", alpn: [Array("h3".utf8)],
+        let link = try Link(client: QUICClientConfiguration(serverName: "localhost", applicationProtocols: ["h3"],
                                                      certificateVerification: trusting(pem)),
-                            server: QUICServerConfig(certKey: key, alpn: [Array("h3".utf8)]))
+                            server: QUICServerConfiguration(certificateKey: key, applicationProtocols: ["h3"]))
         link.retry = (link.client.originalDCID, QUICConnectionID.random())
         try link.run()
         #expect(link.client.status != .connected)
-        #expect(link.client.closeError == QUICError.transportParameterError.rawValue)
+        #expect(link.client.closeError == QUICErrorCode.transportParameterError.rawValue)
     }
 
     @Test func versionNegotiationEndsTheAttempt() throws {
-        let client = try #require(QUICConnection(client: QUICClientConfig(serverName: "localhost", alpn: [Array("h3".utf8)],
+        let client = try #require(QUICConnectionState(client: QUICClientConfiguration(serverName: "localhost", applicationProtocols: ["h3"],
                                                                           certificateVerification: .insecureNoVerification),
                                                  nowMs: 0))
         _ = datagrams(client, nowMs: 0)
@@ -319,7 +319,7 @@ struct QUICClientTests {
         #expect(client.status == .handshaking)
         deliver(negotiation([0x1a2a_3a4a, 0xff00_001d]), to: client, nowMs: 1)
         #expect(client.status == .drained)
-        #expect(client.closeError == QUICError.versionNegotiationError.rawValue)
+        #expect(client.closeError == QUICErrorCode.versionNegotiationError.rawValue)
         #expect(client.peerVersions == [0x1a2a_3a4a, 0xff00_001d])
         #expect(client.takeEvents().contains { $0.kind == .closed })
     }

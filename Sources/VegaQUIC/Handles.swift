@@ -44,11 +44,11 @@ public enum QUICConnectionError: Error, Hashable, Sendable, CustomStringConverti
 
 /// One QUIC connection, server or client side, as its tasks see it. The
 /// endpoint's task owns the transport; this hands work to it.
-public final class QUICConnectionHandle: Sendable {
+public final class QUICConnection: Sendable {
     struct State {
-        var incoming: [QUICStreamHandle] = []
-        var acceptWaiter: UnsafeContinuation<QUICStreamHandle?, Never>?
-        var opens: [(unidirectional: Bool, waiter: UnsafeContinuation<Result<QUICStreamHandle, QUICConnectionError>, Never>)] = []
+        var incoming: [QUICStream] = []
+        var acceptWaiter: UnsafeContinuation<QUICStream?, Never>?
+        var opens: [(unidirectional: Bool, waiter: UnsafeContinuation<Result<QUICStream, QUICConnectionError>, Never>)] = []
         var closed: QUICConnectionError?
         var alpn: [UInt8] = []
         var serverName = ""
@@ -70,7 +70,7 @@ public final class QUICConnectionHandle: Sendable {
     }
 
     /// The application protocol the handshake agreed on (ALPN).
-    public var alpn: [UInt8] { state.withLock { $0.alpn } }
+    public var applicationProtocol: String { state.withLock { String(decoding: $0.alpn, as: UTF8.self) } }
 
     /// The server name the client asked for (SNI): on a client, the one in
     /// its configuration.
@@ -80,12 +80,12 @@ public final class QUICConnectionHandle: Sendable {
     public var closeReason: QUICConnectionError? { state.withLock { $0.closed } }
 
     /// The next stream the peer opened; nil once the connection is closed.
-    public func acceptStream() async -> QUICStreamHandle? {
-        await withUnsafeContinuation { (c: UnsafeContinuation<QUICStreamHandle?, Never>) in
-            let now = state.withLock { s -> (Bool, QUICStreamHandle?) in
+    public func acceptStream() async -> QUICStream? {
+        await withUnsafeContinuation { (c: UnsafeContinuation<QUICStream?, Never>) in
+            let now = state.withLock { s -> (Bool, QUICStream?) in
                 if !s.incoming.isEmpty { return (true, s.incoming.removeFirst()) }
                 if s.closed != nil { return (true, nil) }
-                precondition(s.acceptWaiter == nil, "QUICConnectionHandle.acceptStream() called while another call waits")
+                precondition(s.acceptWaiter == nil, "QUICConnection.acceptStream() called while another call waits")
                 s.acceptWaiter = c
                 return (false, nil)
             }
@@ -94,8 +94,8 @@ public final class QUICConnectionHandle: Sendable {
     }
 
     /// Open a stream, waiting while the peer allows no more.
-    public func openStream(unidirectional: Bool = false) async throws(QUICConnectionError) -> QUICStreamHandle {
-        let result = await withUnsafeContinuation { (c: UnsafeContinuation<Result<QUICStreamHandle, QUICConnectionError>, Never>) in
+    public func openStream(unidirectional: Bool = false) async throws(QUICConnectionError) -> QUICStream {
+        let result = await withUnsafeContinuation { (c: UnsafeContinuation<Result<QUICStream, QUICConnectionError>, Never>) in
             let failed = state.withLock { s -> QUICConnectionError? in
                 if let closed = s.closed { return closed }
                 s.opens.append((unidirectional, c))
@@ -114,8 +114,8 @@ public final class QUICConnectionHandle: Sendable {
 
     // MARK: From the endpoint
 
-    func deliver(_ stream: QUICStreamHandle) {
-        let waiter = state.withLock { s -> UnsafeContinuation<QUICStreamHandle?, Never>? in
+    func deliver(_ stream: QUICStream) {
+        let waiter = state.withLock { s -> UnsafeContinuation<QUICStream?, Never>? in
             if let w = s.acceptWaiter {
                 s.acceptWaiter = nil
                 return w
@@ -152,14 +152,14 @@ public final class QUICConnectionHandle: Sendable {
     }
 
     /// Opens waiting for the peer's stream limit, for the endpoint to try.
-    func takeOpens() -> [(unidirectional: Bool, waiter: UnsafeContinuation<Result<QUICStreamHandle, QUICConnectionError>, Never>)] {
+    func takeOpens() -> [(unidirectional: Bool, waiter: UnsafeContinuation<Result<QUICStream, QUICConnectionError>, Never>)] {
         state.withLock { s in
             defer { s.opens.removeAll() }
             return s.opens
         }
     }
 
-    func requeue(_ open: (unidirectional: Bool, waiter: UnsafeContinuation<Result<QUICStreamHandle, QUICConnectionError>, Never>)) {
+    func requeue(_ open: (unidirectional: Bool, waiter: UnsafeContinuation<Result<QUICStream, QUICConnectionError>, Never>)) {
         state.withLock { $0.opens.append(open) }
     }
 
@@ -186,7 +186,7 @@ public final class QUICConnectionHandle: Sendable {
 /// write waits while too much is queued for the peer to take. Read to the
 /// end (a read of 0) and `finish()`, or `close()`, so the endpoint can let
 /// the stream go.
-public final class QUICStreamHandle: AsyncReader, AsyncWriter, Sendable {
+public final class QUICStream: AsyncReader, AsyncWriter, Sendable {
     /// Bytes queued for sending past which a write waits, and the level a
     /// waiting write goes on at.
     static let highWater = 256 * 1024
@@ -218,10 +218,10 @@ public final class QUICStreamHandle: AsyncReader, AsyncWriter, Sendable {
     /// The stream ID: its low bits say who opened it and whether it's
     /// unidirectional (RFC 9000 section 2.1).
     public let id: UInt64
-    let connection: QUICConnectionHandle
+    let connection: QUICConnection
     let state = Locked(State())
 
-    init(id: UInt64, connection: QUICConnectionHandle) {
+    init(id: UInt64, connection: QUICConnection) {
         self.id = id
         self.connection = connection
     }
@@ -340,7 +340,7 @@ public final class QUICStreamHandle: AsyncReader, AsyncWriter, Sendable {
     private func enqueue(_ bytes: UnsafeRawBufferPointer) -> (error: QUICConnectionError?, post: Bool, wait: Bool) {
         state.withLock { s -> (QUICConnectionError?, Bool, Bool) in
             if let e = s.writeEnd { return (e, false, false) }
-            precondition(!s.finQueued && s.resetQueued == nil, "QUICStreamHandle.write after finish() or reset()")
+            precondition(!s.finQueued && s.resetQueued == nil, "QUICStream.write after finish() or reset()")
             s.outbox.append(contentsOf: bytes)
             let post = !s.posted
             s.posted = true

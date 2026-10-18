@@ -19,7 +19,7 @@ struct HTTP3ClientTests {
         let identity = try TLSIdentity.selfSigned(names: ["localhost"])
         let certificate = try CertificateKey(chainPEM: identity.certificateChain, keyPEM: identity.privateKey)
         let (big, tooBig) = try rt.block { () async throws -> (HTTPResponse, HTTPResponse) in
-            let server = try QUICEndpoint.listen(host: "127.0.0.1", port: 0,
+            let server = try QUICEndpoint.bind(host: "127.0.0.1", port: 0,
                                                  configuration: HTTP3Server.quicConfiguration(certificate: certificate),
                                                  runtime: rt)
             let serving = rt.spawn {
@@ -27,7 +27,7 @@ struct HTTP3ClientTests {
                     HTTPResponse(status: 200, body: Array("\(request.body.count)".utf8))
                 }
             }
-            let endpoint = try QUICEndpoint.client(runtime: rt)
+            let endpoint = try QUICEndpoint.bind(runtime: rt)
             let responses = try await HTTP3Client.withConnection(endpoint, host: "localhost", port: server.localPort,
                                                                 certificateVerification: .insecureNoVerification) { client in
                 (try await client.send(HTTPRequest(method: .post, target: "/", body: [UInt8](repeating: 1, count: 1 << 20))),
@@ -51,7 +51,7 @@ struct HTTP3ClientTests {
         let certificate = try CertificateKey(chainPEM: identity.certificateChain, keyPEM: identity.privateKey)
         let verifier = try CertificateVerifier(trustRoots: .certificates(identity.certificateChain))
         let responses = try rt.block { () async throws -> [HTTPResponse] in
-            let server = try QUICEndpoint.listen(host: "127.0.0.1", port: 0,
+            let server = try QUICEndpoint.bind(host: "127.0.0.1", port: 0,
                                                  configuration: HTTP3Server.quicConfiguration(certificate: certificate),
                                                  runtime: rt)
             let serving = rt.spawn {
@@ -61,7 +61,7 @@ struct HTTP3ClientTests {
                                  body: Array("\(request.head.method.rawValue) \(request.head.target) \(request.body.count)".utf8))
                 }
             }
-            let endpoint = try QUICEndpoint.client(runtime: rt)
+            let endpoint = try QUICEndpoint.bind(runtime: rt)
             let responses = try await HTTP3Client.withConnection(endpoint, host: "localhost", port: server.localPort,
                                                                 certificateVerification: .verifier(verifier)) { client in
                 try await withThrowingTaskGroup(of: (Int, HTTPResponse).self) { group in

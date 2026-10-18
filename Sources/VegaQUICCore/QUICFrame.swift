@@ -100,27 +100,32 @@ public enum QUICFrameType {
 }
 
 /// RFC 9000 section 20.1.
-public enum QUICError: UInt64 {
-    case noError = 0x00
-    case internalError = 0x01
-    case connectionRefused = 0x02
-    case flowControlError = 0x03
-    case streamLimitError = 0x04
-    case streamStateError = 0x05
-    case finalSizeError = 0x06
-    case frameEncodingError = 0x07
-    case transportParameterError = 0x08
-    case connectionIDLimitError = 0x09
-    case protocolViolation = 0x0a
-    case invalidToken = 0x0b
-    case applicationError = 0x0c
-    case cryptoBufferExceeded = 0x0d
-    case keyUpdateError = 0x0e
-    case aeadLimitReached = 0x0f
-    case noViablePath = 0x10
+public struct QUICErrorCode: RawRepresentable, Hashable, Sendable, CustomStringConvertible {
+    public let rawValue: UInt64
+    public init(rawValue: UInt64) { self.rawValue = rawValue }
+
+    public static let noError = QUICErrorCode(rawValue: 0x00)
+    public static let internalError = QUICErrorCode(rawValue: 0x01)
+    public static let connectionRefused = QUICErrorCode(rawValue: 0x02)
+    public static let flowControlError = QUICErrorCode(rawValue: 0x03)
+    public static let streamLimitError = QUICErrorCode(rawValue: 0x04)
+    public static let streamStateError = QUICErrorCode(rawValue: 0x05)
+    public static let finalSizeError = QUICErrorCode(rawValue: 0x06)
+    public static let frameEncodingError = QUICErrorCode(rawValue: 0x07)
+    public static let transportParameterError = QUICErrorCode(rawValue: 0x08)
+    public static let connectionIDLimitError = QUICErrorCode(rawValue: 0x09)
+    public static let protocolViolation = QUICErrorCode(rawValue: 0x0a)
+    public static let invalidToken = QUICErrorCode(rawValue: 0x0b)
+    public static let applicationError = QUICErrorCode(rawValue: 0x0c)
+    public static let cryptoBufferExceeded = QUICErrorCode(rawValue: 0x0d)
+    public static let keyUpdateError = QUICErrorCode(rawValue: 0x0e)
+    public static let aeadLimitReached = QUICErrorCode(rawValue: 0x0f)
+    public static let noViablePath = QUICErrorCode(rawValue: 0x10)
     /// RFC 9368: what a client's connection ends with when the server
     /// speaks none of its versions.
-    case versionNegotiationError = 0x11
+    public static let versionNegotiationError = QUICErrorCode(rawValue: 0x11)
+
+    public var description: String { "0x" + String(rawValue, radix: 16) }
 }
 
 /// A TLS alert reported as a transport error: 0x0100 plus the alert code.

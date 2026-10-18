@@ -3,7 +3,7 @@
 //===----------------------------------------------------------------------===//
 // A client's configuration.
 //
-// The connection is the same object at both ends (QUICConnection), told which
+// The connection is the same object at both ends (QUICConnectionState), told which
 // end it is; what differs at a client is who it trusts and what it asks for,
 // which is all this file holds.
 //===----------------------------------------------------------------------===//
@@ -62,15 +62,15 @@ public enum QUICCertificateVerification: Sendable {
     }
 }
 
-public struct QUICClientConfig: Sendable {
+public struct QUICClientConfiguration: Sendable {
     /// The server's name: sent as SNI (unless it is an IP address) and
     /// checked against its certificate.
     public var serverName: String
-    /// ALPN protocols to offer, in order of preference. The server must
-    /// choose one of them (RFC 9001 section 8.1).
-    public var alpn: [[UInt8]]
+    /// Application protocols (ALPN) to offer, in order of preference. The
+    /// server must choose one of them (RFC 9001 section 8.1).
+    public var applicationProtocols: [String]
     public var certificateVerification: QUICCertificateVerification
-    public var maxIdleTimeoutMs: UInt64 = 30_000
+    public var maxIdleTimeout: Duration = .seconds(30)
     public var initialMaxData: UInt64 = 1 << 20
     public var initialMaxStreamData: UInt64 = 256 * 1024
     /// How many streams the server may open towards the client.
@@ -79,11 +79,21 @@ public struct QUICClientConfig: Sendable {
     /// RFC 9221 datagrams. Zero disables them.
     public var maxDatagramFrameSize: UInt64 = 1200
 
-    public init(serverName: String, alpn: [[UInt8]],
+    public init(serverName: String, applicationProtocols: [String],
                 certificateVerification: QUICCertificateVerification = .system) {
         self.serverName = serverName
-        self.alpn = alpn
+        self.applicationProtocols = applicationProtocols
         self.certificateVerification = certificateVerification
     }
+
+    package var alpn: [[UInt8]] { applicationProtocols.map { Array($0.utf8) } }
+    package var maxIdleTimeoutMs: UInt64 { milliseconds(maxIdleTimeout) }
 }
 #endif
+
+/// A duration in whole milliseconds, 0 for a negative one.
+package func milliseconds(_ d: Duration) -> UInt64 {
+    let c = d.components
+    guard c.seconds >= 0, c.attoseconds >= 0 else { return 0 }
+    return UInt64(c.seconds) * 1000 + UInt64(c.attoseconds / 1_000_000_000_000_000)
+}

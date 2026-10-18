@@ -33,21 +33,21 @@ public enum HTTP3ClientError: Error, Hashable, Sendable, CustomStringConvertible
 /// `HTTP3Client.withConnection`. Requests may be sent from many tasks at
 /// once; each gets a stream of its own.
 public final class HTTP3Client: Sendable {
-    let connection: QUICConnectionHandle
+    let connection: QUICConnection
     let configuration: HTTP3Configuration
     let authority: String
 
-    init(_ connection: QUICConnectionHandle, configuration: HTTP3Configuration, authority: String) {
+    init(_ connection: QUICConnection, configuration: HTTP3Configuration, authority: String) {
         self.connection = connection
         self.configuration = configuration
         self.authority = authority
     }
 
-    /// Connect to `host`:`port` over `endpoint` (`QUICEndpoint.client`),
+    /// Connect to `host`:`port` over `endpoint` (a client `QUICEndpoint.bind`),
     /// run `body` with a client, then close the connection.
     ///
     /// ```swift
-    /// let endpoint = try QUICEndpoint.client(runtime: rt)
+    /// let endpoint = try QUICEndpoint.bind(runtime: rt)
     /// let response = try await HTTP3Client.withConnection(endpoint, host: "example.com") { client in
     ///     try await client.send(HTTPRequest(target: "/"))
     /// }
@@ -58,10 +58,10 @@ public final class HTTP3Client: Sendable {
         configuration: HTTP3Configuration = .init(),
         _ body: (HTTP3Client) async throws -> T
     ) async throws -> T {
-        var quic = QUICClientConfig(serverName: host, alpn: [HTTP3Server.alpn],
+        var quic = QUICClientConfiguration(serverName: host, applicationProtocols: [HTTP3Server.applicationProtocol],
                                     certificateVerification: certificateVerification)
         quic.initialMaxStreamsUni = 8
-        let connection: QUICConnectionHandle
+        let connection: QUICConnection
         do throws(QUICConnectionError) {
             connection = try await endpoint.connect(host: host, port: port, configuration: quic)
         } catch {
@@ -93,7 +93,7 @@ public final class HTTP3Client: Sendable {
     /// A server stream: its control stream and QPACK streams carry nothing
     /// a client with no dynamic table needs; push streams aren't allowed
     /// (no MAX_PUSH_ID was sent).
-    static func drain(_ stream: QUICStreamHandle) async {
+    static func drain(_ stream: QUICStream) async {
         var buffer = IOBuffer(capacity: 4096)
         while true {
             buffer.clear()
@@ -104,7 +104,7 @@ public final class HTTP3Client: Sendable {
     /// Send `request` and wait for its response. The request's Host field,
     /// or the connection's host, becomes `:authority`.
     public func send(_ request: HTTPRequest) async throws(HTTP3ClientError) -> HTTPResponse {
-        let stream: QUICStreamHandle
+        let stream: QUICStream
         do throws(QUICConnectionError) {
             stream = try await connection.openStream()
         } catch {
@@ -133,7 +133,7 @@ public final class HTTP3Client: Sendable {
         return try await readResponse(stream, head: request.head.method == .head)
     }
 
-    private func readResponse(_ stream: QUICStreamHandle, head: Bool) async throws(HTTP3ClientError) -> HTTPResponse {
+    private func readResponse(_ stream: QUICStream, head: Bool) async throws(HTTP3ClientError) -> HTTPResponse {
         var frames = FramedRead(reading: stream,
                                 decoder: HTTP3FrameDecoder(maxPayload: max(configuration.maxFieldSectionSize, 64 * 1024),
                                                            maxData: configuration.maxBodySize))

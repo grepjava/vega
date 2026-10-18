@@ -52,7 +52,7 @@ struct QUICPathState {
     var owes: Bool { !responses.isEmpty || challengePending }
 }
 
-extension QUICConnection {
+extension QUICConnectionState {
     /// The most addresses kept at once, and the most of anything one keeps.
     static let maxPaths = 4
     static let maxPathFrames = 4
@@ -69,7 +69,7 @@ extension QUICConnection {
         // caller has heard yet.
         guard receivingPath != 0, receivingPath != lastValidatedPath else { return nil }
         if let i = paths.firstIndex(where: { $0.id == receivingPath }) { return i }
-        if paths.count == QUICConnection.maxPaths {
+        if paths.count == QUICConnectionState.maxPaths {
             // The oldest that is not being validated goes; failing that,
             // the oldest.
             paths.remove(at: paths.firstIndex { !$0.validating } ?? 0)
@@ -93,7 +93,7 @@ extension QUICConnection {
             pathResponsePending.append(bytes)
             return
         }
-        if paths[i].responses.count == QUICConnection.maxPathFrames { paths[i].responses.removeFirst() }
+        if paths[i].responses.count == QUICConnectionState.maxPathFrames { paths[i].responses.removeFirst() }
         paths[i].responses.append(bytes)
     }
 
@@ -168,7 +168,7 @@ extension QUICConnection {
     /// for.
     public var hasProbes: Bool {
         handshakeComplete && status == .connected
-            && paths.contains { $0.owes && $0.allowance >= QUICConnection.minimumProbeSize }
+            && paths.contains { $0.owes && $0.allowance >= QUICConnectionState.minimumProbeSize }
     }
 
     /// Fills `out` with the next datagram for an address other than the one
@@ -180,7 +180,7 @@ extension QUICConnection {
               keys[QUICLevel.application.rawValue].send.isValid else { return (0, 0) }
         for i in paths.indices where paths[i].owes {
             let budget = min(capacity, paths[i].allowance)
-            guard budget >= QUICConnection.minimumProbeSize else { continue }
+            guard budget >= QUICConnectionState.minimumProbeSize else { continue }
             let n = buildProbe(&paths[i], out, budget)
             if n > 0 { return (n, paths[i].id) }
         }
@@ -212,7 +212,7 @@ extension QUICConnection {
         if path.challengePending && writer.room >= 9 {
             var data = [UInt8](repeating: 0, count: 8)
             data.withUnsafeMutableBytes { SecureRandom.fill($0) }
-            if path.challenges.count == QUICConnection.maxPathFrames { path.challenges.removeFirst() }
+            if path.challenges.count == QUICConnectionState.maxPathFrames { path.challenges.removeFirst() }
             path.challenges.append(data)
             writer.varint(QUICFrameType.pathChallenge)
             data.withUnsafeBufferPointer { writer.bytes($0.baseAddress!, 8) }

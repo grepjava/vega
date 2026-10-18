@@ -28,7 +28,7 @@ import VegaCrypto
 /// A traffic secret pair, as either side's handshake produces it.
 public typealias TLSSecrets = TLSServerHandshake.Secrets
 
-/// What a QUICConnection needs of its TLS handshake, whichever side of it
+/// What a QUICConnectionState needs of its TLS handshake, whichever side of it
 /// the connection is.
 protocol QUICHandshake: AnyObject {
     var alert: UInt8? { get }

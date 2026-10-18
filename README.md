@@ -108,7 +108,7 @@ Measure your own.
 | `Sources/VegaProxy` | connecting through SOCKS5 and HTTP CONNECT proxies |
 | `Sources/VegaHTTP1`, `Sources/VegaHTTP2`, `Sources/VegaHTTP3` | HTTP/1.1, HTTP/2 and HTTP/3 servers and clients; HTTP/3 with whole bodies, as HTTP/2's |
 | `Sources/VegaWebSocket` | WebSocket connections and permessage-deflate compression |
-| `Sources/VegaQUIC` | QUIC on Vega's UDP sockets: `QUICEndpoint` (listen, connect), `QUICConnectionHandle`, and `QUICStreamHandle`, an `AsyncReader` and `AsyncWriter` |
+| `Sources/VegaQUIC` | QUIC on Vega's UDP sockets: `QUICEndpoint` (bind, accept, connect), `QUICConnection`, and `QUICStream`, an `AsyncReader` and `AsyncWriter` |
 | `Sources/Vega*Core` | each protocol's logic, sans I/O, for servers that bring their own I/O: `VegaHTTP2Core` (HPACK, frame headers), `VegaHTTP3Core` (frames, QPACK), `VegaWebSocketCore` (frames, permessage-deflate negotiation), `VegaQUICCore` (QUIC v1 and v2 as a state machine: packets and their protection, loss recovery and congestion control, streams, path validation, Retry, and both sides of the TLS 1.3 handshake; datagrams in, datagrams out, no clock) |
 | `Sources/VegaWire` | the bytes the Core modules share: `ByteBuffer`, `ByteSpan`, parsing helpers |
 | `Sources/VegaTest` | test support: `MockClock` (paused time), `duplex()` (in-memory byte streams) |

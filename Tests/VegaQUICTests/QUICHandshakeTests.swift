@@ -1,7 +1,7 @@
 // VegaCrypto's platforms and traits only: QUIC's TLS 1.3 is built on it.
 #if (os(Linux) || os(macOS) || os(Windows)) && (OpenSSL || BoringSSL)
 //===----------------------------------------------------------------------===//
-// A whole connection, in process: a QUICConnection serving the tests' own
+// A whole connection, in process: a QUICConnectionState serving the tests' own
 // client (Tests/QUICTestPeer), from the first Initial through the TLS 1.3
 // handshake to a stream carried each way under 1-RTT keys. The end-to-end
 // test against an independent client (aioquic) is scripts/http3-test.py.
@@ -14,13 +14,13 @@ import QUICTestPeer
 @testable import VegaWire
 @testable import VegaQUICCore
 
-private func deliver(_ datagram: [UInt8], to server: QUICConnection, nowMs: UInt64) {
+private func deliver(_ datagram: [UInt8], to server: QUICConnectionState, nowMs: UInt64) {
     var datagram = datagram
     datagram.withUnsafeMutableBufferPointer { server.receive($0.baseAddress!, $0.count, ecn: 0, nowMs: nowMs) }
 }
 
 /// Everything the server has to send, as the listener would drain it.
-private func drain(_ server: QUICConnection, nowMs: UInt64) -> [[UInt8]] {
+private func drain(_ server: QUICConnectionState, nowMs: UInt64) -> [[UInt8]] {
     var out: [[UInt8]] = []
     var buffer = [UInt8](repeating: 0, count: 1500)
     while true {
@@ -34,7 +34,7 @@ private func drain(_ server: QUICConnection, nowMs: UInt64) -> [[UInt8]] {
 func quicHandshakeAndStream() throws {
     let identity = try TLSIdentity.selfSigned(names: ["localhost"])
     let certificate = try CertificateKey(chainPEM: identity.certificateChain, keyPEM: identity.privateKey)
-    let config = QUICServerConfig(certKey: certificate, alpn: [Array("h3".utf8)])
+    let config = QUICServerConfiguration(certificateKey: certificate, applicationProtocols: ["h3"])
     let client = try QUICTestPeer()
     var now: UInt64 = 1_000
 
@@ -51,7 +51,7 @@ func quicHandshakeAndStream() throws {
     #expect(header.isValid && header.type == .initial)
     #expect(header.dcid == client.originalDCID && header.scid == client.scid)
     let localCID = QUICConnectionID.random()
-    let server = try #require(QUICConnection(config: config, version: header.version,
+    let server = try #require(QUICConnectionState(config: config, version: header.version,
                                              clientDCID: header.dcid, clientSCID: header.scid,
                                              localCID: localCID, nowMs: now))
     deliver(first, to: server, nowMs: now)
@@ -124,7 +124,7 @@ func quicHandshakeRefusesUnknownSuite() throws {
     let suite = try #require((0..<(hello.count - 1)).first { hello[$0] == 0x13 && hello[$0 + 1] == 0x01 })
     hello[suite + 1] = 0xff
     let first = try client.packet(.initial, cryptoFrame(offset: 0, hello))
-    let server = try #require(QUICConnection(config: QUICServerConfig(certKey: certificate, alpn: [Array("h3".utf8)]),
+    let server = try #require(QUICConnectionState(config: QUICServerConfiguration(certificateKey: certificate, applicationProtocols: ["h3"]),
                                              version: QUICVersion.v1, clientDCID: client.originalDCID,
                                              clientSCID: client.scid, localCID: QUICConnectionID.random(),
                                              nowMs: 0))
@@ -138,7 +138,7 @@ func quicHandshakeRefusesUnknownSuite() throws {
 func quicRetiredStreamFramesAreIgnored() throws {
     let identity = try TLSIdentity.selfSigned(names: ["localhost"])
     let certificate = try CertificateKey(chainPEM: identity.certificateChain, keyPEM: identity.privateKey)
-    let config = QUICServerConfig(certKey: certificate, alpn: [Array("h3".utf8)])
+    let config = QUICServerConfiguration(certificateKey: certificate, applicationProtocols: ["h3"])
     let client = try QUICTestPeer()
     var now: UInt64 = 1_000
     let first = try client.packet(.initial, cryptoFrame(offset: 0, client.clientHello(serverName: "localhost",
@@ -146,7 +146,7 @@ func quicRetiredStreamFramesAreIgnored() throws {
     let header = first.withUnsafeBufferPointer {
         QUICPacket.parseHeader($0.baseAddress!, $0.count, localCIDLength: quicLocalCIDLength)
     }
-    let server = try #require(QUICConnection(config: config, version: header.version,
+    let server = try #require(QUICConnectionState(config: config, version: header.version,
                                              clientDCID: header.dcid, clientSCID: header.scid,
                                              localCID: QUICConnectionID.random(), nowMs: now))
     deliver(first, to: server, nowMs: now)
