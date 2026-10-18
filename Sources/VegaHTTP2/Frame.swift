@@ -1,56 +1,14 @@
 import Vega
 import VegaIO
-
-/// An HTTP/2 error code (RFC 9113 section 7).
-public struct HTTP2ErrorCode: RawRepresentable, Hashable, Sendable, CustomStringConvertible {
-    public let rawValue: UInt32
-    public init(rawValue: UInt32) { self.rawValue = rawValue }
-
-    public static let noError = HTTP2ErrorCode(rawValue: 0x0)
-    public static let protocolError = HTTP2ErrorCode(rawValue: 0x1)
-    public static let internalError = HTTP2ErrorCode(rawValue: 0x2)
-    public static let flowControlError = HTTP2ErrorCode(rawValue: 0x3)
-    public static let settingsTimeout = HTTP2ErrorCode(rawValue: 0x4)
-    public static let streamClosed = HTTP2ErrorCode(rawValue: 0x5)
-    public static let frameSizeError = HTTP2ErrorCode(rawValue: 0x6)
-    public static let refusedStream = HTTP2ErrorCode(rawValue: 0x7)
-    public static let cancel = HTTP2ErrorCode(rawValue: 0x8)
-    public static let compressionError = HTTP2ErrorCode(rawValue: 0x9)
-    public static let connectError = HTTP2ErrorCode(rawValue: 0xa)
-    public static let enhanceYourCalm = HTTP2ErrorCode(rawValue: 0xb)
-    public static let inadequateSecurity = HTTP2ErrorCode(rawValue: 0xc)
-    public static let http11Required = HTTP2ErrorCode(rawValue: 0xd)
-
-    public var description: String {
-        let names = ["NO_ERROR", "PROTOCOL_ERROR", "INTERNAL_ERROR", "FLOW_CONTROL_ERROR", "SETTINGS_TIMEOUT",
-                     "STREAM_CLOSED", "FRAME_SIZE_ERROR", "REFUSED_STREAM", "CANCEL", "COMPRESSION_ERROR",
-                     "CONNECT_ERROR", "ENHANCE_YOUR_CALM", "INADEQUATE_SECURITY", "HTTP_1_1_REQUIRED"]
-        return rawValue < names.count ? names[Int(rawValue)] : "error 0x\(String(rawValue, radix: 16))"
-    }
-}
-
-/// A SETTINGS parameter (RFC 9113 section 6.5.2).
-public struct HTTP2Setting: RawRepresentable, Hashable, Sendable {
-    public let rawValue: UInt16
-    public init(rawValue: UInt16) { self.rawValue = rawValue }
-
-    public static let headerTableSize = HTTP2Setting(rawValue: 0x1)
-    public static let enablePush = HTTP2Setting(rawValue: 0x2)
-    public static let maxConcurrentStreams = HTTP2Setting(rawValue: 0x3)
-    public static let initialWindowSize = HTTP2Setting(rawValue: 0x4)
-    public static let maxFrameSize = HTTP2Setting(rawValue: 0x5)
-    public static let maxHeaderListSize = HTTP2Setting(rawValue: 0x6)
-    /// RFC 8441: extended CONNECT, which carries WebSockets over HTTP/2.
-    public static let enableConnectProtocol = HTTP2Setting(rawValue: 0x8)
-}
+import VegaHTTP2Core
 
 /// One HTTP/2 frame. Padding is removed when reading and never added when
 /// writing; PRIORITY information is read and ignored (RFC 9113 deprecates it).
-public struct HTTP2Frame: Sendable, Equatable {
-    public var streamID: UInt32
-    public var payload: Payload
+package struct HTTP2Frame: Sendable, Equatable {
+    package var streamID: UInt32
+    package var payload: Payload
 
-    public enum Payload: Sendable, Equatable {
+    package enum Payload: Sendable, Equatable {
         /// `flowLength` is what the frame counts against flow control: the
         /// data plus any padding.
         case data([UInt8], endStream: Bool, flowLength: Int)
@@ -69,7 +27,7 @@ public struct HTTP2Frame: Sendable, Equatable {
         /// A frame type this end doesn't know, which is ignored.
         case unknown(type: UInt8)
 
-        public static func == (a: Payload, b: Payload) -> Bool {
+        package static func == (a: Payload, b: Payload) -> Bool {
             switch (a, b) {
             case let (.data(x, e1, _), .data(y, e2, _)): x == y && e1 == e2
             case let (.headers(x, s1, h1), .headers(y, s2, h2)): x == y && s1 == s2 && h1 == h2
@@ -87,18 +45,18 @@ public struct HTTP2Frame: Sendable, Equatable {
         }
     }
 
-    public init(streamID: UInt32, payload: Payload) {
+    package init(streamID: UInt32, payload: Payload) {
         self.streamID = streamID
         self.payload = payload
     }
 
-    public static let headerSize = 9
-    public static let defaultMaxFrameSize = 16_384
-    public static let defaultWindowSize = 65_535
-    public static let maxWindowSize = 0x7FFF_FFFF
+    package static let headerSize = HTTP2FrameHeader.size
+    package static let defaultMaxFrameSize = HTTP2FrameHeader.defaultMaxFrameSize
+    package static let defaultWindowSize = HTTP2FrameHeader.defaultInitialWindowSize
+    package static let maxWindowSize = HTTP2FrameHeader.maxWindowSize
 
     /// The client connection preface (RFC 9113 section 3.4).
-    public static let preface: [UInt8] = Array("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".utf8)
+    package static var preface: [UInt8] { HTTP2.preface }
 }
 
 /// Why a frame couldn't be read: a connection error with this code.
@@ -110,23 +68,21 @@ struct FrameError: Error {
 ///
 /// Decoding checks what can be checked of one frame alone: its size, its
 /// padding, and the lengths and stream rules its type requires.
-public struct HTTP2FrameCodec: Decoder, Encoder, Sendable {
-    public typealias Item = HTTP2Frame
+package struct HTTP2FrameCodec: Decoder, Encoder, Sendable {
+    package typealias Item = HTTP2Frame
 
     /// Longer frames are a FRAME_SIZE_ERROR: the SETTINGS_MAX_FRAME_SIZE
     /// this end advertised.
-    public var maxFrameSize: Int
+    package var maxFrameSize: Int
 
-    public init(maxFrameSize: Int = HTTP2Frame.defaultMaxFrameSize) {
+    package init(maxFrameSize: Int = HTTP2Frame.defaultMaxFrameSize) {
         self.maxFrameSize = maxFrameSize
     }
 
     func decodeFrame(_ b: UnsafeRawBufferPointer) throws(FrameError) -> (item: HTTP2Frame, consumed: Int)? {
         guard b.count >= HTTP2Frame.headerSize else { return nil }
-        let length = Int(b[0]) << 16 | Int(b[1]) << 8 | Int(b[2])
-        let type = b[3], flags = b[4]
-        // The reserved bit is ignored (RFC 9113 section 4.1).
-        let stream = UInt32(b[5] & 0x7F) << 24 | UInt32(b[6]) << 16 | UInt32(b[7]) << 8 | UInt32(b[8])
+        let header = HTTP2FrameHeader.parse(b.baseAddress!.assumingMemoryBound(to: UInt8.self))
+        let length = header.length, type = header.type, flags = header.flags.rawValue, stream = header.streamID
         guard length <= maxFrameSize else { throw FrameError(code: .frameSizeError) }
         let total = HTTP2Frame.headerSize + length
         guard b.count >= total else { return nil }
@@ -208,11 +164,11 @@ public struct HTTP2FrameCodec: Decoder, Encoder, Sendable {
         }
     }
 
-    public mutating func decode(_ bytes: UnsafeRawBufferPointer) throws(CodecError) -> (item: HTTP2Frame, consumed: Int)? {
+    package mutating func decode(_ bytes: UnsafeRawBufferPointer) throws(CodecError) -> (item: HTTP2Frame, consumed: Int)? {
         do throws(FrameError) { return try decodeFrame(bytes) } catch { throw .malformed("HTTP/2 \(error.code)") }
     }
 
-    public mutating func encode(_ frame: HTTP2Frame, into buffer: inout IOBuffer) throws(CodecError) {
+    package mutating func encode(_ frame: HTTP2Frame, into buffer: inout IOBuffer) throws(CodecError) {
         frame.write(into: &buffer)
     }
 }

@@ -18,7 +18,8 @@ import VegaWire
 //===----------------------------------------------------------------------===//
 
 
-public enum WSOpcode: UInt8, Sendable {
+/// A frame's opcode (RFC 6455 section 5.2).
+public enum WebSocketOpcode: UInt8, Sendable {
     case continuation = 0x0
     case text = 0x1
     case binary = 0x2
@@ -43,27 +44,36 @@ public enum WSOpcode: UInt8, Sendable {
     }
 }
 
-/// Close codes an endpoint originates. Peer-supplied codes are passed through
-/// to the application unchanged.
-public enum WSCloseCode {
-    public static let normal: UInt16 = 1000
-    public static let goingAway: UInt16 = 1001
-    public static let protocolError: UInt16 = 1002
-    public static let unsupportedData: UInt16 = 1003
-    /// Reported to the application when the peer closed without a code.
-    public static let noStatus: UInt16 = 1005
-    public static let abnormal: UInt16 = 1006
-    public static let invalidPayload: UInt16 = 1007
-    public static let policyViolation: UInt16 = 1008
-    public static let messageTooBig: UInt16 = 1009
-    public static let internalError: UInt16 = 1011
+/// A close status code (RFC 6455 section 7.4).
+public struct WebSocketCloseCode: RawRepresentable, Hashable, Sendable, CustomStringConvertible {
+    public let rawValue: UInt16
+    public init(rawValue: UInt16) { self.rawValue = rawValue }
+
+    public static let normal = WebSocketCloseCode(rawValue: 1000)
+    public static let goingAway = WebSocketCloseCode(rawValue: 1001)
+    public static let protocolError = WebSocketCloseCode(rawValue: 1002)
+    public static let unsupportedData = WebSocketCloseCode(rawValue: 1003)
+    /// Reported, never sent: the peer's close frame had no code.
+    public static let noStatus = WebSocketCloseCode(rawValue: 1005)
+    /// Reported, never sent: the connection ended without a close frame.
+    public static let abnormal = WebSocketCloseCode(rawValue: 1006)
+    public static let invalidPayload = WebSocketCloseCode(rawValue: 1007)
+    public static let policyViolation = WebSocketCloseCode(rawValue: 1008)
+    public static let messageTooBig = WebSocketCloseCode(rawValue: 1009)
+    public static let internalError = WebSocketCloseCode(rawValue: 1011)
+
+    /// Whether the code may go on the wire: 1004 is reserved, and 1005,
+    /// 1006 and 1015 are only for reporting.
+    public var isSendable: Bool { WebSocketCodec.isSendableCloseCode(rawValue) }
+
+    public var description: String { String(rawValue) }
 }
 
-public struct WSFrameHeader {
+public struct WebSocketFrameHeader {
     public var fin = false
     /// permessage-deflate: this message is compressed.
     public var rsv1 = false
-    public var opcode: WSOpcode = .continuation
+    public var opcode: WebSocketOpcode = .continuation
     public var masked = false
     public var payloadLength = 0
     public var mask: (UInt8, UInt8, UInt8, UInt8) = (0, 0, 0, 0)
@@ -74,16 +84,16 @@ public struct WSFrameHeader {
     @inlinable public var totalLength: Int { headerLength &+ payloadLength }
 }
 
-public enum WSDecodeError: Sendable {
+public enum WebSocketDecodeError: Sendable {
     case protocolError
     case messageTooBig
     case unmaskedClientFrame
 }
 
-public enum WSDecodeResult {
+public enum WebSocketDecodeResult {
     case needMore
-    case header(WSFrameHeader)
-    case failure(WSDecodeError)
+    case header(WebSocketFrameHeader)
+    case failure(WebSocketDecodeError)
 }
 
 public enum WebSocketCodec {
@@ -92,9 +102,9 @@ public enum WebSocketCodec {
     /// the caller compares `totalLength` against what it has buffered.
     public static func parseHeader(_ base: UnsafePointer<UInt8>, _ count: Int,
                                    maxPayload: Int,
-                                   allowRSV1: Bool = false) -> WSDecodeResult {
+                                   allowRSV1: Bool = false) -> WebSocketDecodeResult {
         if count < 2 { return .needMore }
-        var head = WSFrameHeader()
+        var head = WebSocketFrameHeader()
         let b0 = base[0]
         let b1 = base[1]
 
@@ -102,7 +112,7 @@ public enum WebSocketCodec {
         if b0 & 0x30 != 0 { return .failure(.protocolError) }
         let rsv1 = b0 & 0x40 != 0
         if rsv1 && !allowRSV1 { return .failure(.protocolError) }
-        guard let opcode = WSOpcode(b0 & 0x0F) else { return .failure(.protocolError) }
+        guard let opcode = WebSocketOpcode(b0 & 0x0F) else { return .failure(.protocolError) }
         // permessage-deflate marks a message on its first frame, so RSV1 on a
         // control frame or a continuation means nothing and is refused.
         if rsv1 && (opcode.isControl || opcode == .continuation) {
@@ -179,7 +189,7 @@ public enum WebSocketCodec {
 
     /// Writes a server frame. Server frames are never masked.
     public static func writeFrame(_ buf: inout ByteBuffer,
-                                  opcode: WSOpcode,
+                                  opcode: WebSocketOpcode,
                                   fin: Bool,
                                   rsv1: Bool = false,
                                   payload: UnsafePointer<UInt8>?,

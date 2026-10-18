@@ -16,7 +16,7 @@ private func answer(_ values: String...) -> String? {
     let spans = storage.indices.map { i in
         storage[i].withUnsafeMutableBufferPointer { ByteSpan(UnsafePointer($0.baseAddress!), $0.count - 1) }
     }
-    guard let agreement = WSDeflate.negotiate(spans) else {
+    guard let agreement = WebSocketDeflate.negotiate(spans) else {
         _ = storage
         return nil
     }
@@ -77,7 +77,7 @@ func deflateFallsThrough() {
 
 @Test("the agreed windows follow what was negotiated")
 func deflateWindows() {
-    var a = WSDeflateAgreement()
+    var a = WebSocketDeflateAgreement()
     #expect(a.deflateWindowBits == 12)
     #expect(a.inflateWindowBits == 15)
     a.serverMaxWindowBits = 9

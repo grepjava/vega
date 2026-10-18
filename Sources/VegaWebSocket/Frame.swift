@@ -10,49 +10,7 @@
 import Vega
 import VegaIO
 import VegaWire
-import VegaWebSocketCore
-
-public enum WebSocketOpcode: UInt8, Sendable {
-    case continuation = 0x0
-    case text = 0x1
-    case binary = 0x2
-    case close = 0x8
-    case ping = 0x9
-    case pong = 0xA
-
-    public var isControl: Bool { rawValue & 0x8 != 0 }
-}
-
-/// A close status code (RFC 6455 section 7.4).
-public struct WebSocketCloseCode: RawRepresentable, Hashable, Sendable, CustomStringConvertible {
-    public let rawValue: UInt16
-    public init(rawValue: UInt16) { self.rawValue = rawValue }
-
-    public static let normal = WebSocketCloseCode(rawValue: 1000)
-    public static let goingAway = WebSocketCloseCode(rawValue: 1001)
-    public static let protocolError = WebSocketCloseCode(rawValue: 1002)
-    public static let unsupportedData = WebSocketCloseCode(rawValue: 1003)
-    /// Reported, never sent: the peer's close frame had no code.
-    public static let noStatus = WebSocketCloseCode(rawValue: 1005)
-    /// Reported, never sent: the connection ended without a close frame.
-    public static let abnormal = WebSocketCloseCode(rawValue: 1006)
-    public static let invalidPayload = WebSocketCloseCode(rawValue: 1007)
-    public static let policyViolation = WebSocketCloseCode(rawValue: 1008)
-    public static let messageTooBig = WebSocketCloseCode(rawValue: 1009)
-    public static let internalError = WebSocketCloseCode(rawValue: 1011)
-
-    /// Whether the code may go on the wire: 1004 is reserved, and 1005,
-    /// 1006 and 1015 are only for reporting.
-    public var isSendable: Bool {
-        switch rawValue {
-        case 1004, 1005, 1006, 1015: false
-        case 1000...1014, 3000...4999: true
-        default: false
-        }
-    }
-
-    public var description: String { String(rawValue) }
-}
+@_exported import VegaWebSocketCore
 
 /// One frame, payload unmasked.
 public struct WebSocketFrame: Sendable, Equatable {
@@ -99,7 +57,7 @@ public struct WebSocketFrameCodec: Decoder, Encoder, Sendable {
     public func decodeFrame(_ b: UnsafeRawBufferPointer) throws(WebSocketError) -> (item: WebSocketFrame, consumed: Int)? {
         guard b.count >= 2 else { return nil }
         let base = b.baseAddress!.assumingMemoryBound(to: UInt8.self)
-        let head: WSFrameHeader
+        let head: WebSocketFrameHeader
         switch WebSocketCodec.parseHeader(base, b.count, maxPayload: maxFrameSize, allowRSV1: acceptsCompressed) {
         case .needMore: return nil
         case .failure(.messageTooBig): throw .protocolViolation(.messageTooBig)

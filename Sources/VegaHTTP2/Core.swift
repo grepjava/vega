@@ -20,7 +20,7 @@ public struct HTTP2Configuration: Sendable {
     public var maxBodySize: Int
 
     public init(maxConcurrentStreams: Int = 100, initialWindowSize: Int = 1 << 20,
-                connectionWindowSize: Int = 4 << 20, maxFrameSize: Int = HTTP2Frame.defaultMaxFrameSize,
+                connectionWindowSize: Int = 4 << 20, maxFrameSize: Int = HTTP2FrameHeader.defaultMaxFrameSize,
                 maxHeaderListSize: Int = 64 * 1024, maxBodySize: Int = 8 << 20) {
         self.maxConcurrentStreams = maxConcurrentStreams
         self.initialWindowSize = initialWindowSize

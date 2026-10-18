@@ -18,7 +18,7 @@ import VegaWire
 //===----------------------------------------------------------------------===//
 
 
-public enum WSDeflate {
+public enum WebSocketDeflate {
     /// The window the server compresses with, and asks clients for.
     public static let preferredWindowBits = 12
     public static let memoryLevel: Int32 = 5
@@ -28,7 +28,7 @@ public enum WSDeflate {
 
     /// The first acceptable permessage-deflate offer in these
     /// Sec-WebSocket-Extensions values, or nil to negotiate nothing.
-    public static func negotiate(_ values: [ByteSpan]) -> WSDeflateAgreement? {
+    public static func negotiate(_ values: [ByteSpan]) -> WebSocketDeflateAgreement? {
         for value in values {
             var start = 0
             while start < value.count {
@@ -86,14 +86,14 @@ public enum WSDeflate {
         return n >= 8 && n <= 15 ? n : nil
     }
 
-    static func parseOffer(_ offer: ByteSpan) -> WSDeflateAgreement? {
+    static func parseOffer(_ offer: ByteSpan) -> WebSocketDeflateAgreement? {
         var start = 0
         var end = scan(offer, from: 0, until: 0x3B)   // ';'
         let name = trimmed(ByteSpan(offer.base, end))
         guard name.count == 18, equalsLowercased(name.base, 18, "permessage-deflate") else {
             return nil
         }
-        var agreement = WSDeflateAgreement()
+        var agreement = WebSocketDeflateAgreement()
         var seen: UInt8 = 0
         while end < offer.count {
             start = end + 1
@@ -140,7 +140,7 @@ public enum WSDeflate {
 }
 
 /// What was agreed with one client.
-public struct WSDeflateAgreement: Sendable, Equatable {
+public struct WebSocketDeflateAgreement: Sendable, Equatable {
     public var serverNoContextTakeover = false
     public var clientNoContextTakeover = false
     /// The largest window the client lets the server compress with.
@@ -153,15 +153,15 @@ public struct WSDeflateAgreement: Sendable, Equatable {
 
     /// The window the server compresses with.
     public var deflateWindowBits: Int32 {
-        Int32(min(serverMaxWindowBits ?? WSDeflate.preferredWindowBits, WSDeflate.preferredWindowBits))
+        Int32(min(serverMaxWindowBits ?? WebSocketDeflate.preferredWindowBits, WebSocketDeflate.preferredWindowBits))
     }
 
     /// The window the client is told to stay within, or nil when it did not
     /// say it could be told one.
     public var clientWindowBits: Int? {
         guard clientMaxWindowBitsOffered else { return nil }
-        return min(clientMaxWindowBitsValue ?? WSDeflate.preferredWindowBits,
-                   WSDeflate.preferredWindowBits)
+        return min(clientMaxWindowBitsValue ?? WebSocketDeflate.preferredWindowBits,
+                   WebSocketDeflate.preferredWindowBits)
     }
 
     /// The window to inflate with. At least 9: a zlib client asked for 8 bits

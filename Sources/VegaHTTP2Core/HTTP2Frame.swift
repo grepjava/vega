@@ -8,7 +8,7 @@ import VegaWire
 //===----------------------------------------------------------------------===//
 
 
-public enum H2FrameType: UInt8 {
+public enum HTTP2FrameType: UInt8 {
     case data = 0x0
     case headers = 0x1
     case priority = 0x2
@@ -21,56 +21,71 @@ public enum H2FrameType: UInt8 {
     case continuation = 0x9
 }
 
-public struct H2Flags: OptionSet, Sendable {
+public struct HTTP2Flags: OptionSet, Sendable {
     public let rawValue: UInt8
     @inlinable public init(rawValue: UInt8) { self.rawValue = rawValue }
 
     /// DATA, HEADERS.
-    public static let endStream  = H2Flags(rawValue: 0x1)
+    public static let endStream  = HTTP2Flags(rawValue: 0x1)
     /// SETTINGS, PING.
-    public static let ack        = H2Flags(rawValue: 0x1)
+    public static let ack        = HTTP2Flags(rawValue: 0x1)
     /// HEADERS, PUSH_PROMISE, CONTINUATION.
-    public static let endHeaders = H2Flags(rawValue: 0x4)
+    public static let endHeaders = HTTP2Flags(rawValue: 0x4)
     /// DATA, HEADERS, PUSH_PROMISE.
-    public static let padded     = H2Flags(rawValue: 0x8)
+    public static let padded     = HTTP2Flags(rawValue: 0x8)
     /// HEADERS.
-    public static let priority   = H2Flags(rawValue: 0x20)
+    public static let priority   = HTTP2Flags(rawValue: 0x20)
 }
 
-/// RFC 9113 section 7.
-public enum H2Error: UInt32 {
-    case noError = 0x0
-    case protocolError = 0x1
-    case internalError = 0x2
-    case flowControlError = 0x3
-    case settingsTimeout = 0x4
-    case streamClosed = 0x5
-    case frameSizeError = 0x6
-    case refusedStream = 0x7
-    case cancel = 0x8
-    case compressionError = 0x9
-    case connectError = 0xa
-    case enhanceYourCalm = 0xb
-    case inadequateSecurity = 0xc
-    case http11Required = 0xd
+/// An HTTP/2 error code (RFC 9113 section 7).
+public struct HTTP2ErrorCode: RawRepresentable, Hashable, Sendable, CustomStringConvertible {
+    public let rawValue: UInt32
+    public init(rawValue: UInt32) { self.rawValue = rawValue }
+
+    public static let noError = HTTP2ErrorCode(rawValue: 0x0)
+    public static let protocolError = HTTP2ErrorCode(rawValue: 0x1)
+    public static let internalError = HTTP2ErrorCode(rawValue: 0x2)
+    public static let flowControlError = HTTP2ErrorCode(rawValue: 0x3)
+    public static let settingsTimeout = HTTP2ErrorCode(rawValue: 0x4)
+    public static let streamClosed = HTTP2ErrorCode(rawValue: 0x5)
+    public static let frameSizeError = HTTP2ErrorCode(rawValue: 0x6)
+    public static let refusedStream = HTTP2ErrorCode(rawValue: 0x7)
+    public static let cancel = HTTP2ErrorCode(rawValue: 0x8)
+    public static let compressionError = HTTP2ErrorCode(rawValue: 0x9)
+    public static let connectError = HTTP2ErrorCode(rawValue: 0xa)
+    public static let enhanceYourCalm = HTTP2ErrorCode(rawValue: 0xb)
+    public static let inadequateSecurity = HTTP2ErrorCode(rawValue: 0xc)
+    public static let http11Required = HTTP2ErrorCode(rawValue: 0xd)
+
+    public var description: String {
+        let names = ["NO_ERROR", "PROTOCOL_ERROR", "INTERNAL_ERROR", "FLOW_CONTROL_ERROR", "SETTINGS_TIMEOUT",
+                     "STREAM_CLOSED", "FRAME_SIZE_ERROR", "REFUSED_STREAM", "CANCEL", "COMPRESSION_ERROR",
+                     "CONNECT_ERROR", "ENHANCE_YOUR_CALM", "INADEQUATE_SECURITY", "HTTP_1_1_REQUIRED"]
+        return rawValue < names.count ? names[Int(rawValue)] : "error 0x\(String(rawValue, radix: 16))"
+    }
 }
 
-public enum H2Setting: UInt16 {
-    case headerTableSize = 0x1
-    case enablePush = 0x2
-    case maxConcurrentStreams = 0x3
-    case initialWindowSize = 0x4
-    case maxFrameSize = 0x5
-    case maxHeaderListSize = 0x6
+/// A SETTINGS parameter (RFC 9113 section 6.5.2).
+public struct HTTP2Setting: RawRepresentable, Hashable, Sendable {
+    public let rawValue: UInt16
+    public init(rawValue: UInt16) { self.rawValue = rawValue }
+
+    public static let headerTableSize = HTTP2Setting(rawValue: 0x1)
+    public static let enablePush = HTTP2Setting(rawValue: 0x2)
+    public static let maxConcurrentStreams = HTTP2Setting(rawValue: 0x3)
+    public static let initialWindowSize = HTTP2Setting(rawValue: 0x4)
+    public static let maxFrameSize = HTTP2Setting(rawValue: 0x5)
+    public static let maxHeaderListSize = HTTP2Setting(rawValue: 0x6)
+    /// RFC 8441: extended CONNECT, which carries WebSockets over HTTP/2.
     /// RFC 8441, the extended CONNECT protocol that carries WebSockets -- and,
     /// with RFC 9220, WebTransport -- over HTTP/2.
-    case enableConnectProtocol = 0x8
+    public static let enableConnectProtocol = HTTP2Setting(rawValue: 0x8)
 }
 
-public struct H2FrameHeader {
+public struct HTTP2FrameHeader {
     public var length: Int
     public var type: UInt8
-    public var flags: H2Flags
+    public var flags: HTTP2Flags
     public var streamID: UInt32
 
     public static let size = 9
@@ -80,14 +95,14 @@ public struct H2FrameHeader {
     public static let defaultInitialWindowSize = 65535
     public static let maxWindowSize = 0x7FFF_FFFF
 
-    public init(length: Int, type: H2FrameType, flags: H2Flags, streamID: UInt32) {
+    public init(length: Int, type: HTTP2FrameType, flags: HTTP2Flags, streamID: UInt32) {
         self.length = length
         self.type = type.rawValue
         self.flags = flags
         self.streamID = streamID
     }
 
-    public init(length: Int, rawType: UInt8, flags: H2Flags, streamID: UInt32) {
+    public init(length: Int, rawType: UInt8, flags: HTTP2Flags, streamID: UInt32) {
         self.length = length
         self.type = rawType
         self.flags = flags
@@ -96,19 +111,19 @@ public struct H2FrameHeader {
 
     /// Reads a header from at least nine readable bytes.
     @inlinable
-    public static func parse(_ p: UnsafePointer<UInt8>) -> H2FrameHeader {
+    public static func parse(_ p: UnsafePointer<UInt8>) -> HTTP2FrameHeader {
         let length = (Int(p[0]) << 16) | (Int(p[1]) << 8) | Int(p[2])
         // The reserved high bit of the stream identifier is ignored, not
         // rejected: RFC 9113 section 5.1.1.
         let id = (UInt32(p[5] & 0x7F) << 24) | (UInt32(p[6]) << 16)
                | (UInt32(p[7]) << 8) | UInt32(p[8])
-        return H2FrameHeader(length: length, rawType: p[3],
-                             flags: H2Flags(rawValue: p[4]), streamID: id)
+        return HTTP2FrameHeader(length: length, rawType: p[3],
+                             flags: HTTP2Flags(rawValue: p[4]), streamID: id)
     }
 
     @inlinable
     public func write(into out: inout ByteBuffer) {
-        out.reserve(H2FrameHeader.size)
+        out.reserve(HTTP2FrameHeader.size)
         let p = out.writePointer
         p[0] = UInt8(truncatingIfNeeded: length >> 16)
         p[1] = UInt8(truncatingIfNeeded: length >> 8)
@@ -119,7 +134,7 @@ public struct H2FrameHeader {
         p[6] = UInt8(truncatingIfNeeded: streamID >> 16)
         p[7] = UInt8(truncatingIfNeeded: streamID >> 8)
         p[8] = UInt8(truncatingIfNeeded: streamID)
-        out.advanceWriter(H2FrameHeader.size)
+        out.advanceWriter(HTTP2FrameHeader.size)
     }
 }
 
