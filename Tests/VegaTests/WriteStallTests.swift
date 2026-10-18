@@ -63,24 +63,33 @@ struct WriteStallTests {
     /// size: Windows' loopback buffers tens of megabytes, enough to take any
     /// one write whole before the limit is up. The limit leaves room for
     /// a loaded machine: on Network.framework (iOS) a write goes in 64 KiB
-    /// slices, which an idle simulator took up to 125 ms over and one busy
-    /// with the full suite past 200 ms.
+    /// slices, which an idle simulator took up to 125 ms over. A machine
+    /// busy enough can still stop the reader itself for the limit (the full
+    /// iOS suite in parallel did, past 500 ms), and then the write giving up
+    /// is right: that passes only when the reader did go the limit without
+    /// a read.
     @Test func aSlowReaderIsNotAStall() throws {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
-        let (outcome, sent, got) = try rt.block { () async throws(IOError) -> (String, Int, Int) in
+        let limit = 500
+        let (outcome, sent, (got, gap)) = try rt.block { () async throws(IOError) -> (String, Int, (Int, Int)) in
             let pair = try await connectedPair()
             let reader = rt.spawn(with: pair.client) { client in
                 var buffer = IOBuffer(capacity: 1 << 20)
                 var got = 0
+                // The longest the reader went between reads, in ms.
+                var gap = 0, last = cv_now_ns()
                 while true {
                     buffer.clear()
                     guard let n = try? await client.read(into: &buffer), n > 0 else { break }
                     got += n
+                    let now = cv_now_ns()
+                    gap = max(gap, Int((now - last) / 1_000_000))
+                    last = now
                     // Slow, but never stopped for as long as the limit.
                     try? await Runtime.sleep(for: .milliseconds(5))
                 }
-                return got
+                return (got, gap)
             }
             let server = pair.server
             let chunk = filled(1 << 20)
@@ -88,7 +97,7 @@ struct WriteStallTests {
             var sent = 0
             let outcome: String
             do throws(IOError) {
-                try await Runtime.withWriteStallTimeout(.milliseconds(500)) { () async throws(IOError) in
+                try await Runtime.withWriteStallTimeout(.milliseconds(limit)) { () async throws(IOError) in
                     while (cv_now_ns() - started) / 1_000_000 < 2000 && sent < 1 << 30 {
                         try await server.write(chunk)
                         sent += chunk.count
@@ -101,8 +110,13 @@ struct WriteStallTests {
             try? server.shutdownWrite()
             return (outcome, sent, await reader.value)
         }
-        #expect(outcome == "sent past the limit")
-        #expect(got == sent)
+        if outcome == "sent past the limit" {
+            #expect(got == sent)
+        } else {
+            // Given up on: only fair if the reader really stopped that long.
+            #expect(gap >= limit, "write gave up (\(outcome)) though the reader's longest gap was \(gap) ms")
+            #expect(got >= sent)
+        }
     }
 }
 #endif
