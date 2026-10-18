@@ -378,7 +378,7 @@ final class NetworkStream: NetworkHandle, @unchecked Sendable {
                     stashStart = 0
                 }
                 lock.unlock()
-                buffer.count += n
+                buffer.readable += n
                 await Runtime.consumeBudget()
                 return n
             }

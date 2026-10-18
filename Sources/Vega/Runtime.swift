@@ -31,9 +31,9 @@ public final class Runtime: Sendable {
     ///   - pinThreads: pin worker *i* to CPU *i*.
     ///   - io: the I/O driver; see ``IOBackend``.
     ///   - blockingThreads: most threads ``blocking(_:)`` runs at once.
-    ///   - blockingQueue: most work ``blocking(_:)`` lets wait for one of
-    ///     those threads; past it, work is refused with `BlockingQueueFull`.
-    ///     nil: work waits for as long as it takes.
+    ///   - blockingQueue: most work ``tryBlocking(_:)`` lets wait for one of
+    ///     those threads; past it, it refuses (returns nil). ``blocking(_:)``
+    ///     always waits. nil: no bound.
     ///   - blockingKeepAlive: how long an idle blocking thread lives.
     ///   - idleSpin: how long a worker with nothing to do spins before it
     ///     sleeps in the kernel; nil for the platform's default (50 µs on

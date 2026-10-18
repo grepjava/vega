@@ -21,15 +21,16 @@ public enum AEADAlgorithm: Sendable, Hashable, CaseIterable {
 
 /// An AEAD key, bound once and used for many messages: a connection's
 /// packet protection. The context is reused, so sealing a message costs no
-/// key schedule and no allocation (with the pointer calls); one thread at
-/// a time.
+/// key schedule and no allocation (with the pointer calls). The context
+/// changes with every call, so it isn't `Sendable`: one task uses it, and
+/// another makes its own.
 ///
 /// ```swift
 /// let aead = try AEAD(.aes128GCM, key: key)
 /// let sealed = try aead.seal(nonce: nonce, aad: header, plaintext: payload)   // ciphertext || tag
 /// let opened = try aead.open(nonce: nonce, aad: header, ciphertext: sealed)
 /// ```
-public struct AEAD: ~Copyable, @unchecked Sendable {
+public struct AEAD: ~Copyable {
     public let algorithm: AEADAlgorithm
     @usableFromInline let ctx: OpaquePointer
 
@@ -101,9 +102,9 @@ public struct AEAD: ~Copyable, @unchecked Sendable {
 
 /// QUIC header protection (RFC 9001 5.4): the 5-byte mask for a packet's
 /// first byte and packet number, from a 16-byte sample of its ciphertext.
-/// AES-ECB for the GCM suites, ChaCha20 for ChaCha20-Poly1305. One thread at
-/// a time.
-public struct HeaderProtection: ~Copyable, @unchecked Sendable {
+/// AES-ECB for the GCM suites, ChaCha20 for ChaCha20-Poly1305. Not
+/// `Sendable`, as `AEAD` isn't: one task at a time.
+public struct HeaderProtection: ~Copyable {
     public let algorithm: AEADAlgorithm
     @usableFromInline let ctx: OpaquePointer
 

@@ -91,18 +91,8 @@ public final class JoinSet<Success: Sendable, Failure: Error>: @unchecked Sendab
     /// empty, or when the task waiting is cancelled (results not yet taken
     /// stay in the set).
     public func next() async -> Result<Success, Failure>? {
-        let s = state.pointer
-        let result = await withTaskCancellationHandler {
-            await withUnsafeContinuation { (c: UnsafeContinuation<Result<Success, Failure>?, Never>) in
-                let now = lock.withLock { () -> (ready: Bool, result: Result<Success, Failure>?) in
-                    if let r = s.pointee.results.popFront() { return (true, r) }
-                    if s.pointee.live == 0 || Task.isCancelled { return (true, nil) }
-                    precondition(s.pointee.waiter == nil, "JoinSet.next() called while another call waits")
-                    s.pointee.waiter = c
-                    return (false, nil)
-                }
-                if now.ready { c.resume(returning: now.result) }
-            }
+        await withTaskCancellationHandler {
+            await wait(cancellable: true)
         } onCancel: {
             let waiter = lock.withLock { () -> UnsafeContinuation<Result<Success, Failure>?, Never>? in
                 let s = state.pointer
@@ -110,6 +100,22 @@ public final class JoinSet<Success: Sendable, Failure: Error>: @unchecked Sendab
                 return s.pointee.waiter
             }
             waiter?.resume(returning: nil)
+        }
+    }
+
+    /// The next result, or nil once none are left -- or, when
+    /// `cancellable`, once the waiting task is cancelled.
+    private func wait(cancellable: Bool) async -> Result<Success, Failure>? {
+        let s = state.pointer
+        let result = await withUnsafeContinuation { (c: UnsafeContinuation<Result<Success, Failure>?, Never>) in
+            let now = lock.withLock { () -> (ready: Bool, result: Result<Success, Failure>?) in
+                if let r = s.pointee.results.popFront() { return (true, r) }
+                if s.pointee.live == 0 || (cancellable && Task.isCancelled) { return (true, nil) }
+                precondition(s.pointee.waiter == nil, "JoinSet.next() called while another call waits")
+                s.pointee.waiter = c
+                return (false, nil)
+            }
+            if now.ready { c.resume(returning: now.result) }
         }
         // finish can resume us before we suspend; see cv_tsan_acquire.
         cv_tsan_acquire(cv_task_current())
@@ -132,9 +138,11 @@ public final class JoinSet<Success: Sendable, Failure: Error>: @unchecked Sendab
 
     /// Cancel every task and wait for them all to end, dropping their
     /// results. The set is empty afterwards, and takes new tasks uncancelled.
+    /// The wait goes on even if the caller is cancelled: the tasks are
+    /// already being cancelled, and the set must be empty when this returns.
     public func shutdown() async {
         cancelAll()
-        while await next() != nil {}
+        while await wait(cancellable: false) != nil {}
         lock.withLock { state.pointer.pointee.cancelled = false }
     }
 

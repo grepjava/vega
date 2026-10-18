@@ -125,7 +125,7 @@ public struct UnixDatagram: ~Copyable, Sendable {
         let fd = reg.fd
         let at = buffer.base + buffer.count, room = buffer.spareCapacity
         let n = try await reg.perform(CV_IO_READ) { cv_recv(fd, at, room) }
-        buffer.count += n
+        buffer.readable += n
         return n
     }
 
@@ -137,7 +137,7 @@ public struct UnixDatagram: ~Copyable, Sendable {
         let at = buffer.base + buffer.count, room = buffer.spareCapacity
         var from = cv_sockaddr()
         let n = try await reg.perform(CV_IO_READ) { cv_recvfrom(fd, at, room, &from) }
-        buffer.count += n
+        buffer.readable += n
         return (n, SocketAddress(raw: from))
     }
 }

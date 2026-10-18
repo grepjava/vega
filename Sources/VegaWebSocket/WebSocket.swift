@@ -21,6 +21,9 @@ public enum WebSocketError: Error, Hashable, Sendable, CustomStringConvertible {
     case connectionLost
     /// This end has already sent its close frame.
     case closed
+    /// `close` was given a code that may not be sent (1005, 1006, 1015 and
+    /// the unassigned ones).
+    case invalidCloseCode(WebSocketCloseCode)
     case io(IOError)
 
     public var description: String {
@@ -29,6 +32,7 @@ public enum WebSocketError: Error, Hashable, Sendable, CustomStringConvertible {
         case .handshake(let why): "handshake failed: \(why)"
         case .connectionLost: "connection lost without a close frame"
         case .closed: "already closed"
+        case .invalidCloseCode(let code): "close code \(code) can't be sent"
         case .io(let e): "\(e)"
         }
     }
@@ -386,22 +390,34 @@ public struct WebSocket<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~Copyabl
     }
 
     /// Start or finish the closing handshake: send a close frame, then read
-    /// (and drop) messages until the peer's close frame or the end.
-    public mutating func close(_ code: WebSocketCloseCode = .normal, reason: String = "") async throws(WebSocketError) {
+    /// (and drop) messages until the peer's close frame, the end, or
+    /// `timeout` (a peer that never answers doesn't hold this up). `reason`
+    /// is cut to the 123 bytes a close frame has room for, between
+    /// characters.
+    public mutating func close(_ code: WebSocketCloseCode = .normal, reason: String = "",
+                               timeout: Duration = .seconds(5)) async throws(WebSocketError) {
         if !sentClose {
-            precondition(code.isSendable, "close code \(code) can't be sent")
+            guard code.isSendable else { throw .invalidCloseCode(code) }
             sentClose = true
-            let payload = [UInt8(code.rawValue >> 8), UInt8(truncatingIfNeeded: code.rawValue)] + Array(reason.utf8.prefix(123))
+            var text: [UInt8] = []
+            for scalar in reason.unicodeScalars {
+                let utf8 = Array(String(scalar).utf8)
+                guard text.count + utf8.count <= 123 else { break }
+                text += utf8
+            }
+            let payload = [UInt8(code.rawValue >> 8), UInt8(truncatingIfNeeded: code.rawValue)] + text
             try await send(WebSocketFrame(opcode: .close, payload: payload))
         }
-        while !receivedClose {
-            guard let frame = try? await nextFrame() else { break }
-            if frame.opcode == .close {
-                receivedClose = true
-                if frame.payload.count >= 2 {
-                    closeCode = WebSocketCloseCode(rawValue: UInt16(frame.payload[0]) << 8 | UInt16(frame.payload[1]))
-                } else {
-                    closeCode = .noStatus
+        _ = try? await Runtime.withIODeadline(timeout) { () async throws(IOError) in
+            while !receivedClose {
+                guard let frame = try? await nextFrame() else { return }
+                if frame.opcode == .close {
+                    receivedClose = true
+                    if frame.payload.count >= 2 {
+                        closeCode = WebSocketCloseCode(rawValue: UInt16(frame.payload[0]) << 8 | UInt16(frame.payload[1]))
+                    } else {
+                        closeCode = .noStatus
+                    }
                 }
             }
         }

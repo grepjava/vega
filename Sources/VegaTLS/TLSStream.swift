@@ -54,11 +54,16 @@ public struct TLSStream<Transport: AsyncReader & AsyncWriter & ~Copyable>: ~Copy
 
     /// Be the client: handshake with the server at the other end of
     /// `transport`. `serverName` is sent (SNI) and the certificate checked
-    /// against it; an IP address is checked as one and not sent.
+    /// against it; an IP address is checked as one and not sent. nil is for
+    /// a context that doesn't verify (`.disabled`) only: a certificate
+    /// checked against no name would be anyone's.
     public static func connect(_ transport: consuming Transport, serverName: String?,
                                context: TLSContext) async throws(IOError) -> TLSStream {
         guard context.configuration.role == .client else {
             throw IOError(code: IOError.tls.code, message: "connect needs a client context")
+        }
+        if serverName?.isEmpty ?? true, context.configuration.verification != .disabled {
+            throw IOError(code: IOError.tls.code, message: "a verifying client needs a server name to check the certificate against")
         }
         let stream = TLSStream(transport: transport, state: try TLSState(context, host: serverName))
         try await stream.handshake()
@@ -392,7 +397,7 @@ final class TLSState: @unchecked Sendable {
     func result(_ n: Int, buffer: inout IOBuffer) throws(IOError) -> Int? {
         switch n {
         case 0...:
-            buffer.count += n
+            buffer.readable += n
             return n
         case Int(CV_TLS_WANT_READ):
             return nil

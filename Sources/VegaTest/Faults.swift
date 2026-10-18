@@ -1,4 +1,3 @@
-import Synchronization
 import Vega
 import VegaIO
 
@@ -92,10 +91,11 @@ final class Faults: Sendable {
         var written = 0
     }
 
-    private let state: Mutex<State>
+    // Locked, not Mutex: ThreadSanitizer must see the lock (see Locked).
+    private let state: Locked<State>
 
     init(seed: UInt64) {
-        state = Mutex(State(random: seed))
+        state = Locked(State(random: seed))
     }
 
     /// SplitMix64.

@@ -107,7 +107,7 @@ extension IORegistration {
                                                          arrival), owner: owner) {
             if res >= 0 {
                 cv_arrival_settle(arrival)
-                buffer.count += Int(res)
+                buffer.readable += Int(res)
                 await Runtime.consumeBudget()
                 return Int(res)
             }
@@ -125,7 +125,7 @@ extension IORegistration {
             let want = buffer.spareCapacity
             let n = cv_recv_stamped(fd, buffer.base + buffer.count, want, arrival)
             if n >= 0 {
-                buffer.count += n
+                buffer.readable += n
                 if n > 0 && n < want { io.pointee.read_drained = 1 }
                 await Runtime.consumeBudget()
                 return n

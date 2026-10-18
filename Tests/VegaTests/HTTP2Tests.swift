@@ -1,3 +1,4 @@
+import Synchronization
 import Testing
 import Vega
 import VegaIO
@@ -659,4 +660,54 @@ private let validRequest = [(":method", "GET"), (":scheme", "http"), (":path", "
         }
         #expect(refused)
     }
+
+    /// Streams opened and reset at once (CVE-2023-44487) cancel their
+    /// handlers, never run more than the limit at once, and a client that
+    /// keeps at it is sent away with ENHANCE_YOUR_CALM.
+    @Test func rapidResetIsCutOff() throws {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let gauge = HandlerGauge()
+        // Bounded, so a server that never sends GOAWAY fails the test
+        // instead of hanging the run.
+        let code = try rt.block { () async throws -> HTTP2ErrorCode? in
+            try await Runtime.timeout(.seconds(20)) { () async throws -> HTTP2ErrorCode? in
+                let pair = duplex()
+                rt.spawn(with: pair.second) { stream async in
+                    let halves = stream.split()
+                    try? await HTTP2Server.serve(reader: halves.reader, writer: halves.writer,
+                                                 configuration: HTTP2Configuration(maxConcurrentStreams: 4)) { _ in
+                        let now = gauge.running.add(1, ordering: .relaxed).newValue
+                        gauge.peak.max(now, ordering: .relaxed)
+                        defer { gauge.running.subtract(1, ordering: .relaxed) }
+                        try await Task.sleep(for: .seconds(10))
+                        return HTTPResponse()
+                    }
+                }
+                var peer = RawPeer(stream: pair.first)
+                let block = headerBlock(validRequest)
+                var frames: [HTTP2Frame] = [.init(streamID: 0, payload: .settings([]))]
+                for i in 0..<200 {
+                    let id = UInt32(2 * i + 1)
+                    frames.append(.init(streamID: id, payload: .headers(block, endStream: true, endHeaders: true)))
+                    frames.append(.init(streamID: id, payload: .rstStream(.cancel)))
+                }
+                try await peer.send(frames, preface: true)
+                let f = try await peer.next {
+                    if case .goaway = $0.payload { return true }
+                    return false
+                }
+                if case .goaway(_, let code, _)? = f?.payload { return code }
+                return nil
+            }
+        }
+        #expect(code == .enhanceYourCalm)
+        #expect(gauge.peak.load(ordering: .relaxed) <= 4)
+    }
+}
+
+/// Handlers running now, and the most at once.
+private final class HandlerGauge: Sendable {
+    let running = Atomic<Int>(0)
+    let peak = Atomic<Int>(0)
 }

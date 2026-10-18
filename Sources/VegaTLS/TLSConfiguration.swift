@@ -38,11 +38,12 @@ public struct TLSConfiguration: Sendable {
 
     /// Whether to check the peer's certificate.
     public enum Verification: Sendable, Hashable {
-        /// Don't: any certificate, or (server) none, is accepted.
-        case none
+        /// Don't: any certificate, or (server) none, is accepted. A client
+        /// connection made this way can be intercepted by anyone in the path.
+        case disabled
         /// Server only: ask clients for a certificate and check it if one
         /// comes, but let clients without one in.
-        case optional
+        case ifPresented
         /// Check it (against `trustRoots`, and on a client against the
         /// server name); a server refuses clients without one (mutual TLS).
         case required
@@ -71,7 +72,7 @@ public struct TLSConfiguration: Sendable {
     /// Our certificate and key: a server's, or a client's for mutual TLS.
     public var identity: TLSIdentity?
     public var trustRoots: TrustRoots
-    /// `.required` by default for a client, `.none` for a server.
+    /// `.required` by default for a client, `.disabled` for a server.
     public var verification: Verification
     /// ALPN, in preference order: a client offers them, a server picks its
     /// first that the client offers (and refuses a client offering only
@@ -117,7 +118,7 @@ public struct TLSConfiguration: Sendable {
         self.role = role
         self.identity = identity
         self.trustRoots = trustRoots
-        self.verification = verification ?? (role == .client ? .required : .none)
+        self.verification = verification ?? (role == .client ? .required : .disabled)
         self.applicationProtocols = applicationProtocols
     }
 
@@ -251,7 +252,7 @@ public final class TLSContext: @unchecked Sendable {
             cv_tls_ctx_free(ctx)
             throw IOError(code: IOError.tls.code, message: "a server needs an identity")
         }
-        if c.verification != .none || c.role == .client {
+        if c.verification != .disabled || c.role == .client {
             switch c.trustRoots {
             case .system:
                 try check { err, len in cv_tls_ctx_use_system_trust(ctx, err, len) }
@@ -263,8 +264,8 @@ public final class TLSContext: @unchecked Sendable {
             }
         }
         switch c.verification {
-        case .none: cv_tls_ctx_set_verify(ctx, CV_TLS_VERIFY_NONE)
-        case .optional: cv_tls_ctx_set_verify(ctx, c.role == .server ? CV_TLS_VERIFY_OPTIONAL : CV_TLS_VERIFY_REQUIRED)
+        case .disabled: cv_tls_ctx_set_verify(ctx, CV_TLS_VERIFY_NONE)
+        case .ifPresented: cv_tls_ctx_set_verify(ctx, c.role == .server ? CV_TLS_VERIFY_OPTIONAL : CV_TLS_VERIFY_REQUIRED)
         case .required: cv_tls_ctx_set_verify(ctx, CV_TLS_VERIFY_REQUIRED)
         }
         let newest = Int32(c.maximumVersion?.rawValue ?? 0)

@@ -49,7 +49,7 @@ public struct PipeReader: ~Copyable, Sendable {
             cv_fd_read(fd, buffer.base + buffer.count, buffer.spareCapacity)
         }
         #endif
-        buffer.count += n
+        buffer.readable += n
         return n
     }
 }

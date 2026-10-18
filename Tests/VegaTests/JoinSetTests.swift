@@ -119,6 +119,31 @@ struct JoinSetTests {
         #expect(later == false)
     }
 
+    /// A cancelled caller's `shutdown()` still waits for every task.
+    @Test func shutdownByACancelledTask() throws {
+        let rt = Runtime(workers: 2)
+        defer { rt.shutdown() }
+        let empty = rt.block { () async -> Bool in
+            let set = JoinSet<Bool, Never>(runtime: rt)
+            for _ in 0..<3 {
+                set.spawn {
+                    // Ends a while after it is cancelled, as a task cleaning up would.
+                    try? await Runtime.sleep(for: .seconds(30))
+                    let end = ContinuousClock.now + .milliseconds(50)
+                    while ContinuousClock.now < end { await Task.yield() }
+                    return true
+                }
+            }
+            let stopper = rt.spawn {
+                withUnsafeCurrentTask { $0?.cancel() }
+                await set.shutdown()
+            }
+            await stopper.value
+            return set.isEmpty
+        }
+        #expect(empty)
+    }
+
     /// Dropping the set cancels what is still in it.
     @Test func droppingTheSetCancels() throws {
         let rt = Runtime(workers: 2)

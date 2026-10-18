@@ -10,6 +10,8 @@
 /// don't, `Synchronization.Mutex` is cheaper: nothing suspends.
 ///
 /// Built on a one-permit `Semaphore`, so uncontended locking is one CAS.
+/// Like `Synchronization.Mutex`, the value and what `body` returns are
+/// `sending`, so nothing non-Sendable gets out of it to another task.
 public final class AsyncMutex<Value: ~Copyable>: @unchecked Sendable {
     private let permit = Semaphore(permits: 1)
     private let value: UnsafeMutablePointer<Value>
@@ -27,14 +29,14 @@ public final class AsyncMutex<Value: ~Copyable>: @unchecked Sendable {
     /// Run `body` with the lock held, waiting for it first. Throws
     /// `AcquireError.cancelled` if the task is cancelled while waiting (the
     /// lock is not taken), or whatever `body` throws (the lock is released).
-    public func withLock<R: ~Copyable>(_ body: (inout Value) async throws -> R) async throws -> R {
+    public func withLock<R: ~Copyable>(_ body: (inout sending Value) async throws -> sending R) async throws -> sending R {
         try await permit.acquire()
         defer { permit.release() }
         return try await body(&value.pointee)
     }
 
     /// Run `body` with the lock held if it is free now; nil if it isn't.
-    public func tryWithLock<R, E: Error>(_ body: (inout Value) throws(E) -> R) throws(E) -> R? {
+    public func tryWithLock<R, E: Error>(_ body: (inout sending Value) throws(E) -> sending R) throws(E) -> sending R? {
         guard permit.tryAcquire() else { return nil }
         defer { permit.release() }
         return try body(&value.pointee)
@@ -52,7 +54,9 @@ public final class AsyncMutex<Value: ~Copyable>: @unchecked Sendable {
 /// ```
 ///
 /// Built on a `Semaphore`: a reader takes one permit, a writer all of them.
-public final class AsyncRWLock<Value: ~Copyable>: @unchecked Sendable {
+/// Readers share the value at once, from any tasks, so it is `Sendable`
+/// only when the value is.
+public final class AsyncRWLock<Value: ~Copyable> {
     /// Most readers at once (Tokio's `MAX_READS`).
     public static var maxReaders: Int { Int(UInt32.max >> 3) }
 
@@ -99,3 +103,5 @@ public final class AsyncRWLock<Value: ~Copyable>: @unchecked Sendable {
         return try body(&value.pointee)
     }
 }
+
+extension AsyncRWLock: @unchecked Sendable where Value: ~Copyable & Sendable {}

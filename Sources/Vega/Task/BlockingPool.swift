@@ -164,25 +164,37 @@ extension Runtime {
     ///
     /// `body` always runs to completion: cancelling the caller does not stop
     /// it, and the caller still waits for it. Off a Vega runtime it uses a
-    /// process-wide pool.
-    ///
-    /// On a runtime made with a `blockingQueue`, work that finds every
-    /// thread busy and that many jobs already waiting is refused: this
-    /// throws `BlockingQueueFull` without running `body`. Only work whose
-    /// error type can carry that is refused -- `body` throws any error, as
-    /// an untyped `throws` closure does -- and any other waits its turn.
+    /// process-wide pool. It always waits its turn, however long the
+    /// runtime's `blockingQueue`; `tryBlocking` is the call that refuses.
     public static func blocking<T: Sendable, E: Error>(
         _ body: sending @escaping () throws(E) -> T
     ) async throws(E) -> T {
+        try await runBlocking(bounded: false, body).unsafelyUnwrapped.get()
+    }
+
+    /// `blocking`, unless the runtime's `blockingQueue` is full -- every
+    /// blocking thread busy and that many jobs already waiting -- when it
+    /// returns nil at once without running `body`. A server answers that as
+    /// overloaded (503, `BlockingQueueFull`): a pool that cannot keep up only
+    /// falls further behind. On a runtime with no `blockingQueue`, and off
+    /// one, it never refuses.
+    public static func tryBlocking<T: Sendable, E: Error>(
+        _ body: sending @escaping () throws(E) -> T
+    ) async throws(E) -> T? {
+        guard let result = await runBlocking(bounded: true, body) else { return nil }
+        return try result.get()
+    }
+
+    /// nil: refused (only when `bounded`).
+    private static func runBlocking<T: Sendable, E: Error>(
+        bounded: Bool, _ body: sending @escaping () throws(E) -> T
+    ) async -> Result<T, E>? {
         let scheduler = Worker.currentScheduler
         let pool = scheduler?.blocking ?? BlockingPool.shared
         nonisolated(unsafe) let body = body
-        // The cast looks the error type up at run time, so only a bounded
-        // pool pays for it.
-        let refusal: E? = pool.maxQueued == .max ? nil : BlockingQueueFull() as? E
         scheduler?.blockingInFlight.add(1, ordering: .sequentiallyConsistent)
-        let result = await withUnsafeContinuation { (c: UnsafeContinuation<Result<T, E>, Never>) in
-            let queued = pool.submit(bounded: refusal != nil) {
+        let result = await withUnsafeContinuation { (c: UnsafeContinuation<Result<T, E>?, Never>) in
+            let queued = pool.submit(bounded: bounded && pool.maxQueued != .max) {
                 let r: Result<T, E>
                 do throws(E) {
                     r = .success(try body())
@@ -195,13 +207,13 @@ extension Runtime {
                 blockingDone(scheduler)
             }
             if !queued {
-                c.resume(returning: .failure(refusal.unsafelyUnwrapped))
+                c.resume(returning: nil)
                 blockingDone(scheduler)
             }
         }
         // A quick job can resume us before we suspend; see cv_tsan_acquire.
         cv_tsan_acquire(cv_task_current())
-        return try result.get()
+        return result
     }
 
     /// Run blocking `body` here, on this thread, as Tokio's
@@ -234,11 +246,11 @@ extension Runtime {
     }
 }
 
-/// What `Runtime.blocking` throws when its runtime's `blockingQueue` is
-/// full: every blocking thread is busy and that many jobs already wait for
-/// one. The work was not run. A server answers it as overloaded (503): a
-/// pool that cannot keep up only falls further behind, and saying so at
-/// once beats an answer later than any client will wait for.
+/// The error for work `Runtime.tryBlocking` refused (it returned nil):
+/// every blocking thread is busy and the runtime's `blockingQueue` is full.
+/// The work was not run. A server answers it as overloaded (503): a pool
+/// that cannot keep up only falls further behind, and saying so at once
+/// beats an answer later than any client will wait for.
 public struct BlockingQueueFull: Error, Hashable, Sendable, CustomStringConvertible {
     public init() {}
 

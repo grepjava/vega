@@ -27,7 +27,7 @@ struct CompressorTests {
         for coding in ContentCoding.allCases where coding.canCompress {
             let packed = try Compressor.compress(text, coding)
             #expect(packed.count < text.count / 10, "\(coding)")
-            #expect(try Decompressor.decompress(packed, coding) == text, "\(coding)")
+            #expect(try Decompressor.decompress(packed, coding, limit: 1 << 24) == text, "\(coding)")
         }
     }
 
@@ -35,7 +35,7 @@ struct CompressorTests {
     @Test func streamsAndFlushes() throws {
         for coding in ContentCoding.allCases where coding.canCompress {
             var c = try Compressor(coding)
-            var d = try Decompressor(coding)
+            var d = try Decompressor(coding, limit: 1 << 24)
             var packed: [UInt8] = []
             var seen: [UInt8] = []
             for start in stride(from: 0, to: text.count, by: 1000) {
@@ -52,7 +52,7 @@ struct CompressorTests {
             try d.finish()
             #expect(seen == text)
 
-            var bytewise = try Decompressor(coding)
+            var bytewise = try Decompressor(coding, limit: 1 << 24)
             var again: [UInt8] = []
             for b in packed { again += try bytewise.decompress([b]) }
             try bytewise.finish()
@@ -64,8 +64,8 @@ struct CompressorTests {
         let hello = Array("hello".utf8)
         let zlib: [UInt8] = [0x78, 0x9c, 0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00, 0x06, 0x2c, 0x02, 0x15]
         let raw: [UInt8] = [0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00]
-        #expect(try Decompressor.decompress(zlib, .deflate) == hello)
-        #expect(try Decompressor.decompress(raw, .deflate) == hello)
+        #expect(try Decompressor.decompress(zlib, .deflate, limit: 1 << 24) == hello)
+        #expect(try Decompressor.decompress(raw, .deflate, limit: 1 << 24) == hello)
         // Our own deflate is the zlib format.
         #expect(try Compressor.compress(hello, .deflate).first == 0x78)
     }
@@ -73,7 +73,7 @@ struct CompressorTests {
     @Test func gzipMembersFollowOneAnother() throws {
         let first = Array("first ".utf8), second = Array("second".utf8)
         let joined = try Compressor.compress(first, .gzip) + Compressor.compress(second, .gzip)
-        #expect(try Decompressor.decompress(joined, .gzip) == first + second)
+        #expect(try Decompressor.decompress(joined, .gzip, limit: 1 << 24) == first + second)
     }
 
     @Test func limitsAndBadInput() throws {
@@ -84,14 +84,14 @@ struct CompressorTests {
         #expect(try Decompressor.decompress(bomb, .gzip, limit: 1 << 20).count == 1 << 20)
 
         let packed = try Compressor.compress(text, .gzip)
-        #expect(throws: CompressionError.invalidData) { try Decompressor.decompress(Array(packed.dropLast(10)), .gzip) }
+        #expect(throws: CompressionError.invalidData) { try Decompressor.decompress(Array(packed.dropLast(10)), .gzip, limit: 1 << 24) }
         var corrupt = packed
         corrupt[20] ^= 0xff
         corrupt[21] ^= 0xff
-        #expect(throws: CompressionError.invalidData) { try Decompressor.decompress(corrupt, .gzip) }
-        #expect(throws: CompressionError.invalidData) { try Decompressor.decompress(packed + [1, 2, 3], .gzip) }
-        #expect(throws: CompressionError.invalidData) { try Decompressor.decompress([0x78], .deflate) }
-        #expect(throws: CompressionError.invalidData) { try Decompressor.decompress(Array("not gzip".utf8), .gzip) }
+        #expect(throws: CompressionError.invalidData) { try Decompressor.decompress(corrupt, .gzip, limit: 1 << 24) }
+        #expect(throws: CompressionError.invalidData) { try Decompressor.decompress(packed + [1, 2, 3], .gzip, limit: 1 << 24) }
+        #expect(throws: CompressionError.invalidData) { try Decompressor.decompress([0x78], .deflate, limit: 1 << 24) }
+        #expect(throws: CompressionError.invalidData) { try Decompressor.decompress(Array("not gzip".utf8), .gzip, limit: 1 << 24) }
     }
 }
 
@@ -143,7 +143,7 @@ struct HTTPCompressionTests {
         #expect(r.head.fields["vary"] == "accept-encoding")
         #expect(r.head.fields["etag"] == "W/\"v1\"")
         #expect(r.head.fields["content-length"] == nil)
-        #expect(try Decompressor.decompress(r.body, .gzip) == text)
+        #expect(try Decompressor.decompress(r.body, .gzip, limit: 1 << 24) == text)
 
         // Not asked for: as it was, but still Vary.
         var plain = page()

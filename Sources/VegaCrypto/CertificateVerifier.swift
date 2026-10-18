@@ -71,9 +71,21 @@ public final class CertificateVerifier: Sendable {
     /// TLS Certificate message carries it) is not to be trusted for
     /// `hostname` -- a DNS name, matched against the leaf's subject
     /// alternative names with wildcards as RFC 6125 has them, or an IP
-    /// address, matched against its IP ones. An empty `hostname` checks the
-    /// chain alone.
+    /// address, matched against its IP ones. An empty `hostname` fails: a
+    /// chain checked against no name would be anyone's (`verifyChain` is
+    /// the check without one, for a client's certificate).
     public func verify(chain: [[UInt8]], hostname: String) throws(CryptoError) {
+        guard !hostname.isEmpty else { throw .failed("certificate verify failed: no host name to check it against") }
+        try check(chain, hostname)
+    }
+
+    /// The chain alone, with no name: for a server checking a client's
+    /// certificate. A client checking a server wants `verify`.
+    public func verifyChain(_ chain: [[UInt8]]) throws(CryptoError) {
+        try check(chain, "")
+    }
+
+    private func check(_ chain: [[UInt8]], _ hostname: String) throws(CryptoError) {
         guard !chain.isEmpty, chain.count <= Int(Int32.max) else { throw .failed("certificate verify failed: no certificate") }
         var err = [CChar](repeating: 0, count: 256)
         var host = hostname

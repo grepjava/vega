@@ -21,6 +21,13 @@ public enum HTTP2Server {
     ///
     /// Once `shutdown` triggers, the server sends GOAWAY, refuses new
     /// streams, and returns when the open ones are done.
+    ///
+    /// At most `maxConcurrentStreams` handlers run at once, counting those
+    /// whose stream the client has reset (each is cancelled): a stream past
+    /// that is refused. A client that keeps resetting streams, or opening
+    /// them past the limit it was given, faster than handlers finish (the
+    /// "rapid reset" attack, CVE-2023-44487) gets GOAWAY with
+    /// ENHANCE_YOUR_CALM.
     public static func serve<Reader: AsyncReader & ~Copyable & Sendable, Writer: AsyncWriter & ~Copyable>(
         reader: consuming Reader,
         writer: consuming Writer,
@@ -49,6 +56,15 @@ public enum HTTP2Server {
             var out = IOBuffer(capacity: 64 * 1024)
             core.start(into: &out)
             var inFlight = 0
+            // Each handler's task, to cancel it when its stream is reset.
+            var handlers: [UInt32: Task<Void, Never>] = [:]
+            // Streams reset while their handler ran or refused for the limit,
+            // less responses sent.
+            var resetDebt = 0
+            func overLimit() -> Bool {
+                resetDebt += 1
+                return resetDebt > configuration.maxConcurrentStreams
+            }
             var readerDone = false
             var failure: HTTP2Error?
 
@@ -79,19 +95,39 @@ public enum HTTP2Server {
                         for e in events {
                             switch e {
                             case .request(let id, let request):
+                                guard inFlight < configuration.maxConcurrentStreams else {
+                                    core.reset(id, .refusedStream, into: &out)
+                                    if overLimit() {
+                                        goaway(core.highestPeerStream, .enhanceYourCalm, into: &out)
+                                        failure = .connection(.enhanceYourCalm)
+                                        readerDone = true
+                                        inFlight = 0
+                                    }
+                                    continue
+                                }
                                 inFlight += 1
-                                group.addTask {
+                                handlers[id] = Runtime.spawn {
                                     let response = (try? await handler(request)) ?? HTTPResponse(status: 500)
                                     _ = await mailbox.post(.response(id, response))
                                 }
                             case .bodyTooLarge(let id):
                                 core.respond(id, HTTPResponse(status: 413), into: &out)
-                            case .reset, .response, .goaway:
+                            case .reset(let id, _):
+                                guard let task = handlers[id] else { break }
+                                task.cancel()
+                                if overLimit() {
+                                    goaway(core.highestPeerStream, .enhanceYourCalm, into: &out)
+                                    failure = .connection(.enhanceYourCalm)
+                                    readerDone = true
+                                    inFlight = 0
+                                }
+                            case .response, .goaway:
                                 break
                             }
                         }
                     case .response(let id, let response):
                         inFlight -= 1
+                        if handlers.removeValue(forKey: id)?.isCancelled == false { resetDebt = max(resetDebt - 1, 0) }
                         core.respond(id, response, into: &out)
                     case .readEnded:
                         readerDone = true
@@ -115,6 +151,7 @@ public enum HTTP2Server {
             }
             if failure != nil, !out.isEmpty { try? await writer.write(out) }
             inbox.close()
+            for task in handlers.values { task.cancel() }
             group.cancelAll()
             return failure
         }

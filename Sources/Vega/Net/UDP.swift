@@ -126,7 +126,7 @@ public struct UDPSocket: ~Copyable, Sendable {
         #else
         let n = try await reg.perform(CV_IO_READ) { cv_recv(fd, at, room) }
         #endif
-        buffer.count += n
+        buffer.readable += n
         return n
     }
 
@@ -150,7 +150,7 @@ public struct UDPSocket: ~Copyable, Sendable {
         #else
         let n = try await reg.perform(CV_IO_READ) { cv_recvfrom(fd, at, room, &from) }
         #endif
-        buffer.count += n
+        buffer.readable += n
         return (n, SocketAddress(raw: from))
     }
 }

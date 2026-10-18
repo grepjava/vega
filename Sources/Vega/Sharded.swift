@@ -292,8 +292,8 @@ public struct ShardOptions: Sendable {
     public var pinThreads = true
     /// Most threads each shard's `Runtime.blocking` runs at once.
     public var blockingThreads = 512
-    /// Most work each shard's `Runtime.blocking` lets wait for one of those
-    /// threads before refusing more with `BlockingQueueFull`; nil: no bound.
+    /// Most work each shard's `Runtime.tryBlocking` lets wait for one of
+    /// those threads before refusing more; nil: no bound.
     public var blockingQueue: Int? = nil
     /// How long each shard's idle workers spin before they sleep; nil for
     /// the platform's default. See `Runtime(idleSpin:)`.

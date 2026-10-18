@@ -366,7 +366,8 @@ struct CertificateVerifierTests {
         let verifier = try CertificateVerifier(trustRoots: .certificates(pem))
         try verifier.verify(chain: der, hostname: "localhost")
         try verifier.verify(chain: der, hostname: "www.example.com")
-        try verifier.verify(chain: der, hostname: "")
+        try verifier.verifyChain(der)
+        #expect(throws: CryptoError.self) { try verifier.verify(chain: der, hostname: "") }
         #expect(verifier.isTrusted(chain: der, hostname: "LOCALHOST"))
     }
 

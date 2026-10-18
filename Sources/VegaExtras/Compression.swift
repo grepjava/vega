@@ -158,7 +158,8 @@ public struct Compressor: ~Copyable {
 /// ```
 public struct Decompressor: ~Copyable {
     public let coding: ContentCoding
-    /// The most bytes it will produce in all.
+    /// The most bytes it will produce in all. There is no default: pass
+    /// what the caller can hold (`.max` only for trusted input).
     public let limit: Int
     /// Whether the compressed stream has ended.
     public private(set) var isFinished = false
@@ -168,7 +169,7 @@ public struct Decompressor: ~Copyable {
     private let raw: UnsafeMutableRawPointer
     private let scratch = UnsafeMutableRawPointer.allocate(byteCount: chunkSize, alignment: 16)
 
-    public init(_ coding: ContentCoding, limit: Int = .max) throws(CompressionError) {
+    public init(_ coding: ContentCoding, limit: Int) throws(CompressionError) {
         guard let raw = cv_dec_new(coding.codec) else {
             scratch.deallocate()
             throw coding.canDecompress ? .failed : .unavailable(coding.rawValue)
@@ -210,7 +211,7 @@ public struct Decompressor: ~Copyable {
 
     /// `input` decompressed whole: it must hold the stream, end and all.
     public static func decompress(_ input: [UInt8], _ coding: ContentCoding,
-                                  limit: Int = .max) throws(CompressionError) -> [UInt8] {
+                                  limit: Int) throws(CompressionError) -> [UInt8] {
         var d = try Decompressor(coding, limit: limit)
         let output = try d.decompress(input)
         try d.finish()

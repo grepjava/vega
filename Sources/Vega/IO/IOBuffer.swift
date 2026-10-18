@@ -12,14 +12,18 @@
 public struct IOBuffer: ~Copyable, @unchecked Sendable {
     @usableFromInline private(set) var base: UnsafeMutableRawPointer
     public private(set) var capacity: Int
-    /// Readable bytes, at the start of the buffer.
-    public var count: Int
+    /// `count`'s storage: set only here and by Vega's own reads, never past
+    /// `capacity`.
+    @usableFromInline package var readable: Int
+    /// Readable bytes, at the start of the buffer. Fill the spare capacity
+    /// by hand through `withUnsafeSpareCapacity`.
+    @inlinable public var count: Int { readable }
 
     public init(capacity: Int) {
         precondition(capacity > 0, "IOBuffer capacity must be positive")
         base = .allocate(byteCount: capacity, alignment: 16)
         self.capacity = capacity
-        count = 0
+        readable = 0
     }
 
     deinit { base.deallocate() }
@@ -45,14 +49,14 @@ public struct IOBuffer: ~Copyable, @unchecked Sendable {
     @inlinable public var isEmpty: Bool { count == 0 }
 
     /// Forget the readable bytes.
-    @inlinable public mutating func clear() { count = 0 }
+    @inlinable public mutating func clear() { readable = 0 }
 
     /// Append `bytes`, up to the capacity. Returns how many fitted.
     @discardableResult
     public mutating func append(_ bytes: UnsafeRawBufferPointer) -> Int {
         let n = min(bytes.count, spareCapacity)
         if n > 0 { (base + count).copyMemory(from: bytes.baseAddress!, byteCount: n) }
-        count += n
+        readable += n
         return n
     }
 
@@ -66,7 +70,7 @@ public struct IOBuffer: ~Copyable, @unchecked Sendable {
     public mutating func consume(_ n: Int) {
         precondition(n >= 0 && n <= count, "consume past the readable bytes")
         if n < count { base.copyMemory(from: base + n, byteCount: count - n) }
-        count -= n
+        readable -= n
     }
 
     /// The readable bytes.
@@ -82,7 +86,7 @@ public struct IOBuffer: ~Copyable, @unchecked Sendable {
     ) throws(E) {
         let n = try body(UnsafeMutableRawBufferPointer(start: base + count, count: spareCapacity))
         precondition(n >= 0 && n <= spareCapacity, "wrote past the spare capacity")
-        count += n
+        readable += n
     }
 
     /// The readable bytes as a string (UTF-8, repaired).

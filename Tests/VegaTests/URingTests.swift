@@ -59,7 +59,7 @@ func uringRunsWhenAskedFor() {
             let sender = rt.spawn { () async throws in
                 let client = try await TCPStream.connect(host: "127.0.0.1", port: port)
                 var out = IOBuffer(capacity: size)
-                out.count = size
+                out.withUnsafeSpareCapacity { $0.initializeMemory(as: UInt8.self, repeating: 7); return $0.count }
                 try await client.write(out)
             }
             let conn = try await listener.accept()

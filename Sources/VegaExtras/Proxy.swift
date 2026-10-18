@@ -85,6 +85,10 @@ public enum SOCKS5 {
     public static func connect<Stream: AsyncReader & AsyncWriter & ~Copyable>(
         through stream: borrowing Stream, to host: String, port: Int, credentials: Credentials? = nil
     ) async throws(ProxyError) {
+        // Checked before anything is sent: SOCKS carries a name of at most
+        // 255 bytes, and a shortened one would be another host.
+        guard (0...65535).contains(port) else { throw .malformed("port \(port)") }
+        let address = try encode(host)
         // Offer no authentication, or username/password if we have them.
         try await send(credentials == nil ? [5, 1, 0] : [5, 2, 0, 2], on: stream)
         let choice = try await readExactly(2, from: stream)
@@ -102,8 +106,7 @@ public enum SOCKS5 {
         default:
             throw .authenticationFailed
         }
-        guard (0...65535).contains(port) else { throw .malformed("port \(port)") }
-        try await send([5, Command.connect.rawValue, 0] + encode(host) + [UInt8(port >> 8), UInt8(port & 0xFF)], on: stream)
+        try await send([5, Command.connect.rawValue, 0] + address + [UInt8(port >> 8), UInt8(port & 0xFF)], on: stream)
         let head = try await readExactly(4, from: stream)
         guard head[0] == 5 else { throw .malformed("version \(head[0])") }
         guard let reply = Reply(rawValue: head[1]) else { throw .malformed("reply \(head[1])") }
@@ -199,11 +202,12 @@ public enum SOCKS5 {
     // MARK: Addresses
 
     /// ATYP and DST.ADDR for `host`.
-    private static func encode(_ host: String) -> [UInt8] {
+    private static func encode(_ host: String) throws(ProxyError) -> [UInt8] {
         if let address = SocketAddress(numericHost: host, port: 0), let ip = address.ipBytes {
             return [ip.count == 16 ? 4 : 1] + ip
         }
-        let name = Array(host.utf8.prefix(255))
+        let name = Array(host.utf8)
+        guard (1...255).contains(name.count) else { throw .malformed("host name of \(name.count) bytes") }
         return [3, UInt8(name.count)] + name
     }
 

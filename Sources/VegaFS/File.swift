@@ -243,7 +243,7 @@ public struct File: ~Copyable, Sendable {
                 try Sys.read(fd, dst, want, offset)
             }
         }
-        buffer.count += n
+        buffer.readable += n
         return n
     }
 

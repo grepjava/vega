@@ -106,6 +106,16 @@ private func exchange(server: TLSContext, client: TLSContext, name: String? = "v
         #expect(e.message?.contains("certificate verify failed") == true, "\(e)")
     }
 
+    /// A verifying client with no name would take any trusted certificate.
+    @Test func noNameIsRefusedWhenVerifying() throws {
+        let (client, _) = try exchange(server: serverContext(), client: clientContext(), name: nil)
+        guard case .failure(let e) = client else { Issue.record("connected"); return }
+        #expect(e.message?.contains("needs a server name") == true, "\(e)")
+        let (unchecked, _) = try exchange(server: serverContext(),
+                                          client: clientContext { $0.verification = .disabled }, name: nil)
+        #expect(try unchecked.get() == "hello over TLS")
+    }
+
     @Test func anIPAddressIsCheckedAsOne() throws {
         let (client, _) = try exchange(server: serverContext(), client: clientContext(), name: "127.0.0.1")
         #expect(try client.get() == "hello over TLS")
@@ -115,7 +125,7 @@ private func exchange(server: TLSContext, client: TLSContext, name: String? = "v
 
     @Test func verificationCanBeTurnedOff() throws {
         let (client, _) = try exchange(server: serverContext(),
-                                       client: clientContext { $0.trustRoots = .system; $0.verification = .none },
+                                       client: clientContext { $0.trustRoots = .system; $0.verification = .disabled },
                                        name: "anything")
         #expect(try client.get() == "hello over TLS")
     }

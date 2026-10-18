@@ -261,7 +261,7 @@ extension UDPSocket {
         var segment: Int32 = 0
         var flags: UInt32 = 0
         let n = try await reg.perform(CV_IO_READ) { cv_recv_segments(fd, at, room, &from, &segment, &flags) }
-        buffer.count += n
+        buffer.readable += n
         return (n, Int(segment), SocketAddress(raw: from), flags & CV_DGRAM_TRUNCATED != 0)
     }
 
