@@ -71,7 +71,8 @@ extension Runtime {
 /// any task: the wait throws `IOError.timedOut`, as if its deadline had
 /// passed. One scope at a time holds a trigger.
 public final class IOTimeoutTrigger: @unchecked Sendable {
-    private let lock = Mutex<(scope: IODeadline?, pending: Bool)>((nil, false))
+    // Locked rather than Mutex: ThreadSanitizer sees its lock on Linux.
+    private let lock = Locked<(scope: IODeadline?, pending: Bool)>((nil, false))
 
     public init() {}
 
