@@ -19,7 +19,7 @@ The Vega snippets below compile and run against Vega at the commit that added th
 | `ByteToMessageDecoder`, `MessageToByteEncoder` | `FrameDecoder`, `FrameEncoder` | `VegaIO` |
 | `LineBasedFrameDecoder`, `LengthFieldBasedFrameDecoder` | `LinesCodec`, `LengthDelimitedCodec` | `VegaIO` |
 | `EventLoopFuture`, `EventLoopPromise` | `async` / `await`, `Task` | Swift |
-| `EventLoop.scheduleTask(in:)` | `Runtime.sleep(for:)`, `Runtime.timeout(_:_:)`, `Runtime.withIODeadline(_:_:)` | `Vega` |
+| `EventLoop.scheduleTask(in:)` | `Runtime.sleep(for:)`, `Runtime.timeout(for:_:)`, `Runtime.withIOTimeout(for:_:)` | `Vega` |
 | `ServerBootstrap` | `TCPServer.bind(port:configuration:handler:)` | `Vega` |
 | `ClientBootstrap` | `TCPClient(...).connect(host:port:)` (Happy Eyeballs v2) | `Vega` |
 | `NIOAsyncChannel` | The stream itself: `read(into:)` / `write(_:)`, or `FramedRead.next()` / `FramedWrite.send(_:)` | `Vega`, `VegaIO` |
@@ -210,7 +210,7 @@ Vega:
 ```swift
 let greeting = try await fetchGreeting()
 try await Runtime.sleep(for: .milliseconds(100))
-let late = try await Runtime.timeout(.seconds(2)) { try await fetchGreeting() }
+let late = try await Runtime.timeout(for: .seconds(2)) { try await fetchGreeting() }
 async let a = fetchGreeting(), b = fetchGreeting()
 let both = try await [a, b]
 ```
@@ -218,7 +218,7 @@ let both = try await [a, b]
 - Vega's I/O throws `IOError` with typed throws, so `do throws(IOError)` keeps the error concrete. `IOError.cancelled` reports a cancelled wait.
 - Cancellation is task cancellation. Cancelling a task wakes any socket wait, sleep or lock wait it is in. There is no promise to fail.
 - `Runtime.timeout` arms one timer on the runtime's wheel and unlinks it in O(1) when the operation finishes first.
-- `Runtime.withIODeadline` bounds only the I/O waits inside it, and runs them in the calling task instead of a child task. On the bench box it costs about 0.5 µs, against about 2.7–3.3 µs for `timeout`. A wait still pending at the deadline throws `IOError.timedOut` and the task is not cancelled. Use it for a request and its reply on a connection; use `timeout` when the step also waits on other things, such as a channel or a lock.
+- `Runtime.withIOTimeout` bounds only the I/O waits inside it, and runs them in the calling task instead of a child task. On the bench box it costs about 0.5 µs, against about 2.7–3.3 µs for `timeout`. A wait still pending at the deadline throws `IOError.timedOut` and the task is not cancelled. Use it for a request and its reply on a connection; use `timeout` when the step also waits on other things, such as a channel or a lock.
 
 ## ByteBuffer becomes IOBuffer
 
@@ -313,6 +313,6 @@ let reply = try runtime.block { () async throws -> String in
 
 - **Streams are `~Copyable`.** A `TCPStream` has exactly one owner, and dropping it closes the socket. To hand one to another task, use `runtime.spawn(with: stream) { stream in ... }`, since a closure can't capture a non-copyable value.
 - **No handler thread affinity.** NIO guaranteed that a channel's handlers ran on one event loop thread. A Vega connection's task may resume on any worker. That is safe because its state is local to the task, but code that relied on `assertInEventLoop` or on thread-local state needs another way, such as an actor or `AsyncMutex`.
-- **Async calls stay on the caller's executor.** Vega is built with Swift's `NonisolatedNonsendingByDefault`, so its async functions, such as `read`, `write` and `withIODeadline`, run where they are called from, not on the generic executor. Returning from one is no executor hop, and on a runtime whose tasks prefer an executor every hop takes a lock. Called from an actor, they run on that actor until they suspend for I/O. Build your own code the same way to keep its hops down too.
+- **Async calls stay on the caller's executor.** Vega is built with Swift's `NonisolatedNonsendingByDefault`, so its async functions, such as `read`, `write` and `withIOTimeout`, run where they are called from, not on the generic executor. Returning from one is no executor hop, and on a runtime whose tasks prefer an executor every hop takes a lock. Called from an actor, they run on that actor until they suspend for I/O. Build your own code the same way to keep its hops down too.
 - **Errors are typed.** Socket, file and pipe calls throw `IOError` (an errno plus named cases such as `.connectionRefused` and `.cancelled`). Framed reads and writes throw `FramedError`, which wraps either an `IOError` or a `CodecError`.
 - **Platforms.** Vega runs on Linux (io_uring by default, or epoll) and macOS (kqueue). On macOS, Swift's executor SPI is unavailable, so `Runtime.installGlobal()` only routes global enqueues to Vega, and `Task.sleep` keeps the platform's timers. `Runtime.sleep` always uses Vega's timers.

@@ -93,7 +93,7 @@ public final class QUICEndpoint: @unchecked Sendable {
     let runtime: Runtime
     let serverConfig: QUICServerConfiguration?
     let shared = Locked(Shared())
-    let wake = IODeadlineTrigger()
+    let wake = IOTimeoutTrigger()
     /// The port the socket is bound to.
     public let localPort: Int
     /// Whether the socket is IPv6, which decides which of a name's
@@ -254,7 +254,7 @@ public final class QUICEndpoint: @unchecked Sendable {
             var received = 0
             do {
                 let wait: Duration = busy ? .zero : waitBefore(now)
-                received = try await Runtime.withIODeadline(wait, trigger: wake) { () async throws(IOError) -> Int in
+                received = try await Runtime.withIOTimeout(for: wait, trigger: wake) { () async throws(IOError) -> Int in
                     try await socket.receive(&batch)
                 }
             } catch let error where error == .timedOut {

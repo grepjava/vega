@@ -26,7 +26,7 @@ private func byte(_ value: UInt8) -> IOBuffer {
     return buffer
 }
 
-@Suite("Runtime.withIODeadline")
+@Suite("Runtime.withIOTimeout")
 struct IODeadlineTests {
     /// A read with nothing to read gives up at the deadline. The task is not
     /// cancelled, and the stream still works.
@@ -40,7 +40,7 @@ struct IODeadlineTests {
             var buffer = IOBuffer(capacity: 8)
             let outcome: String
             do throws(IOError) {
-                let n = try await Runtime.withIODeadline(.milliseconds(20)) { () async throws(IOError) -> Int in
+                let n = try await Runtime.withIOTimeout(for: .milliseconds(20)) { () async throws(IOError) -> Int in
                     try await client.read(into: &buffer)
                 }
                 outcome = "read \(n)"
@@ -67,7 +67,7 @@ struct IODeadlineTests {
         let (n, left) = try rt.block { () async throws(IOError) -> (Int, Int) in
             let pair = try await connectedPair()
             let client = pair.client, server = pair.server
-            let n = try await Runtime.withIODeadline(.seconds(10)) { () async throws(IOError) -> Int in
+            let n = try await Runtime.withIOTimeout(for: .seconds(10)) { () async throws(IOError) -> Int in
                 try await server.write(byte(1))
                 var buffer = IOBuffer(capacity: 8)
                 return try await client.read(into: &buffer)
@@ -89,7 +89,7 @@ struct IODeadlineTests {
             // Kept open to the end, so the read has nothing to see.
             defer { _ = try? server.localAddress }
             do throws(IOError) {
-                try await Runtime.withIODeadline(.zero) { () async throws(IOError) in
+                try await Runtime.withIOTimeout(for: .zero) { () async throws(IOError) in
                     var buffer = IOBuffer(capacity: 8)
                     _ = try await client.read(into: &buffer)
                 }
@@ -107,13 +107,13 @@ struct IODeadlineTests {
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
         let n = try rt.block { () async throws(IOError) -> Int in
-            try await Runtime.withIODeadline(.milliseconds(30)) { () async throws(IOError) -> Int in
+            try await Runtime.withIOTimeout(for: .milliseconds(30)) { () async throws(IOError) -> Int in
                 // The setup and the write aren't what's tested: each gets a
                 // deadline of its own. A loaded Network.framework connect can
                 // outlast 30 ms, and by the write this task's deadline has
                 // passed (a write the socket takes at once doesn't wait on
                 // readiness drivers, but a Network.framework send does).
-                let pair = try await Runtime.withIODeadline(.seconds(5)) { () async throws(IOError) -> Pair in
+                let pair = try await Runtime.withIOTimeout(for: .seconds(5)) { () async throws(IOError) -> Pair in
                     try await connectedPair()
                 }
                 let client = pair.client, server = pair.server
@@ -123,7 +123,7 @@ struct IODeadlineTests {
                     return (try? await client.read(into: &buffer)) ?? -1
                 }
                 try? await Runtime.sleep(for: .milliseconds(90))
-                try await Runtime.withIODeadline(.seconds(5)) { () async throws(IOError) in
+                try await Runtime.withIOTimeout(for: .seconds(5)) { () async throws(IOError) in
                     try await server.write(byte(1))
                 }
                 return await reader.value
@@ -142,7 +142,7 @@ struct IODeadlineTests {
             defer { _ = try? server.localAddress }
             let reader = rt.spawn(with: client) { client -> IOError? in
                 do throws(IOError) {
-                    try await Runtime.withIODeadline(.seconds(60)) { () async throws(IOError) in
+                    try await Runtime.withIOTimeout(for: .seconds(60)) { () async throws(IOError) in
                         var buffer = IOBuffer(capacity: 8)
                         _ = try await client.read(into: &buffer)
                     }
@@ -164,7 +164,7 @@ struct IODeadlineTests {
         defer { rt.shutdown() }
         let isBoom = rt.block { () async -> Bool in
             do throws(Boom) {
-                try await Runtime.withIODeadline(.seconds(10)) { () async throws(Boom) in throw Boom() }
+                try await Runtime.withIOTimeout(for: .seconds(10)) { () async throws(Boom) in throw Boom() }
                 return false
             } catch {
                 return true

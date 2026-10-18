@@ -79,7 +79,7 @@ struct IOHookTests {
             let box = Handoff(client)
             async let child = { () async -> String in
                 let client = box.take()
-                return await Runtime.withIODeadline(.milliseconds(20)) { await outcome(client) }
+                return await Runtime.withIOTimeout(for: .milliseconds(20)) { await outcome(client) }
             }()
             return await child
         }
@@ -115,8 +115,8 @@ struct IOHookTests {
             let pair = try await connectedPair()
             let client = pair.client, server = pair.server
             defer { _ = try? server.localAddress }
-            return await Runtime.withIODeadline(.milliseconds(60)) { () async -> (String, String) in
-                let inner = await Runtime.withIODeadline(.milliseconds(10)) { await outcome(client) }
+            return await Runtime.withIOTimeout(for: .milliseconds(60)) { () async -> (String, String) in
+                let inner = await Runtime.withIOTimeout(for: .milliseconds(10)) { await outcome(client) }
                 return (inner, await outcome(client))
             }
         }
@@ -137,7 +137,7 @@ struct IOHookTests {
             let client = pair.client, server = pair.server
             defer { _ = try? server.localAddress }
             let reader = rt.spawn(with: client) { client -> [String] in
-                let first = await Runtime.withIODeadline(.seconds(60)) { await outcome(client) }
+                let first = await Runtime.withIOTimeout(for: .seconds(60)) { await outcome(client) }
                 return [first, await outcome(client)]
             }
             try? await Runtime.sleep(for: .milliseconds(20))

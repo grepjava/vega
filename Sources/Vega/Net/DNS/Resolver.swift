@@ -284,7 +284,7 @@ public final class Resolver: Sendable {
         }
         let question = query
         do {
-            return try await Runtime.timeout(config.timeout) { () async throws -> Answer in
+            return try await Runtime.timeout(for: config.timeout) { () async throws -> Answer in
                 overTCP ? try await Self.askTCP(question, id, name, type, server)
                         : try await Self.askUDP(question, id, name, type, server)
             }

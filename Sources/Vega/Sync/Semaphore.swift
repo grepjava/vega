@@ -103,7 +103,7 @@ public final class Semaphore: @unchecked Sendable {
         }
         if isClosed { throw .closed }
         let target = Withdrawal(self, currentTaskID())
-        let code = await Runtime.withIODeadline(timeout) { () async -> UInt8 in
+        let code = await Runtime.withIOTimeout(for: timeout) { () async -> UInt8 in
             let code = await withIOInterrupt { arm in
                 await withUnsafeContinuation { (c: UnsafeContinuation<UInt8, Never>) in
                     let now = lock.withLock { () -> UInt8? in enqueue(target.id, n, c, cancellable: true) }

@@ -628,7 +628,7 @@ extension IORegistration {
             while start < data.endIndex {
                 let end = min(start + slice, data.endIndex)
                 let part = data[start..<end]
-                try await Runtime.withIODeadline(.nanoseconds(Int64(clamping: stall))) { () async throws(IOError) in
+                try await Runtime.withIOTimeout(for: .nanoseconds(Int64(clamping: stall))) { () async throws(IOError) in
                     try await stream.write(part)
                 }
                 start = end

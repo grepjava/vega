@@ -2,7 +2,7 @@ import Synchronization
 
 /// A wake-up for one waiter whose wait counts as I/O: a custom `AsyncReader`
 /// or `AsyncWriter` waits on it for its bytes, and the task's cancellation
-/// and its `Runtime.withIODeadline` deadline -- or that scope's trigger --
+/// and its `Runtime.withIOTimeout` deadline -- or that scope's trigger --
 /// interrupt the wait as they would a socket's.
 ///
 /// ```swift

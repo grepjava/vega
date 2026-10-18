@@ -7,7 +7,7 @@
 //
 // --plain runs the same rounds over plain TCP: the difference in CPU per
 // round is what TLS costs. --deadline runs each server round inside
-// `Runtime.withIODeadline`, as a server with a request timeout does.
+// `Runtime.withIOTimeout`, as a server with a request timeout does.
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
@@ -64,7 +64,7 @@ func serve<S: AsyncReader & AsyncWriter & ~Copyable>(_ s: borrowing S) async thr
     var buf = IOBuffer(capacity: max(messageSize, 16 * 1024))
     let answer = message()
     if withDeadline {
-        while try await Runtime.withIODeadline(.seconds(30), { () async throws(IOError) -> Bool in
+        while try await Runtime.withIOTimeout(for: .seconds(30), { () async throws(IOError) -> Bool in
             guard try await readMessage(s, &buf, messageSize) else { return false }
             try await s.write(answer)
             return true

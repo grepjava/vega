@@ -8,7 +8,7 @@ extension Runtime {
     /// it.
     ///
     /// ```swift
-    /// let reply = try await Runtime.withIODeadline(.seconds(5)) {
+    /// let reply = try await Runtime.withIOTimeout(for: .seconds(5)) {
     ///     try await stream.write(request)
     ///     return try await stream.read(into: &buffer)
     /// }
@@ -24,8 +24,8 @@ extension Runtime {
     /// a read may have lost nothing, but a protocol stream half read or half
     /// written is usually best closed.
     @inlinable
-    public static func withIODeadline<T: ~Copyable, E: Error>(
-        _ duration: Duration,
+    public static func withIOTimeout<T: ~Copyable, E: Error>(
+        for duration: Duration,
         _ body: () async throws(E) -> T
     ) async throws(E) -> T {
         // Inlined, so the body's generic work is specialized at the call;
@@ -36,9 +36,9 @@ extension Runtime {
     }
 
     /// Run `body` with a deadline on its I/O at `deadline`. See
-    /// `withIODeadline(_:_:)`.
+    /// `withIOTimeout(for:_:)`.
     @inlinable
-    public static func withIODeadline<T: ~Copyable, E: Error>(
+    public static func withIOTimeout<T: ~Copyable, E: Error>(
         until deadline: ContinuousClock.Instant,
         _ body: () async throws(E) -> T
     ) async throws(E) -> T {
@@ -51,10 +51,10 @@ extension Runtime {
     /// `trigger` can also bring forward to now from another task: a reader
     /// waiting on a socket that someone else has decided to stop waiting
     /// for. A trigger fired while no scope holds it fires the next one as
-    /// it starts. See `withIODeadline(_:_:)`.
+    /// it starts. See `withIOTimeout(for:_:)`.
     @inlinable
-    public static func withIODeadline<T: ~Copyable, E: Error>(
-        _ duration: Duration, trigger: IODeadlineTrigger,
+    public static func withIOTimeout<T: ~Copyable, E: Error>(
+        for duration: Duration, trigger: IOTimeoutTrigger,
         _ body: () async throws(E) -> T
     ) async throws(E) -> T {
         let scope = IODeadlineScope(after: duration)
@@ -67,10 +67,10 @@ extension Runtime {
     }
 }
 
-/// Ends the I/O wait of a `withIODeadline(_:trigger:_:)` scope early, from
+/// Ends the I/O wait of a `withIOTimeout(for:trigger:_:)` scope early, from
 /// any task: the wait throws `IOError.timedOut`, as if its deadline had
 /// passed. One scope at a time holds a trigger.
-public final class IODeadlineTrigger: @unchecked Sendable {
+public final class IOTimeoutTrigger: @unchecked Sendable {
     private let lock = Mutex<(scope: IODeadline?, pending: Bool)>((nil, false))
 
     public init() {}
@@ -102,7 +102,7 @@ public final class IODeadlineTrigger: @unchecked Sendable {
     }
 }
 
-/// One `withIODeadline` scope: its deadline, and the timer that fires it.
+/// One `withIOTimeout` scope: its deadline, and the timer that fires it.
 /// It owns one reference, the deadline's, and holds the rest unretained:
 /// the runtime outlives its tasks, the task-local holds the hook, and an
 /// outer scope its own deadline. A scope is set up and ended around every
@@ -226,7 +226,7 @@ struct IODeadlineScope: Sendable {
     }
 }
 
-/// The deadline of a `Runtime.withIODeadline` scope, and the I/O wait of
+/// The deadline of a `Runtime.withIOTimeout` scope, and the I/O wait of
 /// its task's that it interrupts when it fires: the task arms one wait at a
 /// time with that wait's `IOInterrupt`, and the timer, on another thread,
 /// fires it (see `IOInterruptSlot`).
@@ -235,7 +235,7 @@ final class IODeadline: IOInterruptSlot, @unchecked Sendable {
     /// Spelled out rather than `@TaskLocal`, so inlinable code can bind it.
     @usableFromInline static let current = TaskLocal<IODeadline?>(wrappedValue: nil)
 
-    /// An `IODeadlineTrigger` holds it too: it is never reused. Only the
+    /// An `IOTimeoutTrigger` holds it too: it is never reused. Only the
     /// task touches it; the atomic spares the exclusivity checks.
     private let lentFlag = Atomic<Bool>(false)
 

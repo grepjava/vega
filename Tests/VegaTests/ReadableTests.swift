@@ -15,7 +15,7 @@ import Testing
                 try? await Runtime.sleep(for: .milliseconds(20))
                 _ = consume client
             }
-            return try await Runtime.withIODeadline(.seconds(5)) { () async throws(IOError) -> Bool in
+            return try await Runtime.withIOTimeout(for: .seconds(5)) { () async throws(IOError) -> Bool in
                 try await conn.peerClosed()
             }
         }
@@ -61,7 +61,7 @@ import Testing
                 try? await Runtime.sleep(for: .seconds(1))
             }
             try await conn.readable()
-            return try await Runtime.withIODeadline(.seconds(2)) { () async throws(IOError) -> String in
+            return try await Runtime.withIOTimeout(for: .seconds(2)) { () async throws(IOError) -> String in
                 var second = IOBuffer(capacity: 16)
                 _ = try await conn.read(into: &second)
                 return first.string + second.string
@@ -79,7 +79,7 @@ import Testing
             let conn = try await listener.accept()
             var outcome: IOError?
             do throws(IOError) {
-                _ = try await Runtime.withIODeadline(.milliseconds(50)) { () async throws(IOError) -> Bool in
+                _ = try await Runtime.withIOTimeout(for: .milliseconds(50)) { () async throws(IOError) -> Bool in
                     try await conn.peerClosed()
                 }
             } catch {

@@ -11,7 +11,7 @@ extension Runtime {
     /// (Tokio's `time::timeout`):
     ///
     /// ```swift
-    /// let n = try await Runtime.timeout(.seconds(30)) {
+    /// let n = try await Runtime.timeout(for: .seconds(30)) {
     ///     try await stream.read(into: &buffer)   // an idle timeout
     /// }
     /// ```
@@ -26,7 +26,7 @@ extension Runtime {
     /// Finishing in time unlinks the timer in O(1). Off a Vega worker it
     /// falls back to racing a `Task.sleep`.
     public static func timeout<T: Sendable>(
-        _ duration: Duration, _ operation: sending @escaping () async throws -> T
+        for duration: Duration, _ operation: sending @escaping () async throws -> T
     ) async throws -> T {
         let now = nowNanos
         let ns = UInt64(clamping: Scheduler.nanoseconds(duration))
@@ -34,12 +34,12 @@ extension Runtime {
     }
 
     /// Run `operation`, cancelling it if it hasn't finished by `deadline`.
-    /// See `timeout(_:_:)`.
+    /// See `timeout(for:_:)`.
     public static func timeout<T: Sendable>(
         until deadline: ContinuousClock.Instant, _ operation: sending @escaping () async throws -> T
     ) async throws -> T {
         guard let s = Worker.currentScheduler else {
-            return try await timeout(ContinuousClock.now.duration(to: deadline), operation)
+            return try await timeout(for: ContinuousClock.now.duration(to: deadline), operation)
         }
         let now = s.clock.now
         return try await timeout(untilNanos: max(s.clock.nanos(deadline), now), now: now, operation)

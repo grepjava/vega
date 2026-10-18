@@ -257,7 +257,7 @@ private let trackersFreed = Atomic<Int>(0)
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
         let (v, left) = rt.block { () async -> (Int?, Int) in
-            let v = try? await Runtime.timeout(.seconds(10)) {
+            let v = try? await Runtime.timeout(for: .seconds(10)) {
                 try await Runtime.sleep(for: .milliseconds(5))
                 return 42
             }
@@ -274,7 +274,7 @@ private let trackersFreed = Atomic<Int>(0)
         let (outcome, callerCancelled) = rt.block { () async -> (String, Bool) in
             let outcome: String
             do {
-                _ = try await Runtime.timeout(.milliseconds(20)) { try await Runtime.sleep(for: .seconds(60)) }
+                _ = try await Runtime.timeout(for: .milliseconds(20)) { try await Runtime.sleep(for: .seconds(60)) }
                 outcome = "finished"
             } catch is TimeoutError {
                 outcome = "timeout"
@@ -294,7 +294,7 @@ private let trackersFreed = Atomic<Int>(0)
         let rt = Runtime(workers: 2)
         defer { rt.shutdown() }
         let v = rt.block { () async -> Int? in
-            try? await Runtime.timeout(.milliseconds(1)) {
+            try? await Runtime.timeout(for: .milliseconds(1)) {
                 spin(microseconds: 10_000)
                 return 7
             }
@@ -308,7 +308,7 @@ private let trackersFreed = Atomic<Int>(0)
         defer { rt.shutdown() }
         let isBoom = rt.block { () async -> Bool in
             do {
-                _ = try await Runtime.timeout(.seconds(10)) { () async throws -> Int in throw Boom() }
+                _ = try await Runtime.timeout(for: .seconds(10)) { () async throws -> Int in throw Boom() }
                 return false
             } catch {
                 return error is Boom
@@ -322,7 +322,7 @@ private let trackersFreed = Atomic<Int>(0)
         defer { rt.shutdown() }
         let timedOut = rt.block { () async -> Bool in
             do {
-                _ = try await Runtime.timeout(.zero) { try await Runtime.sleep(for: .seconds(60)) }
+                _ = try await Runtime.timeout(for: .zero) { try await Runtime.sleep(for: .seconds(60)) }
                 return false
             } catch {
                 return error is TimeoutError
@@ -338,7 +338,7 @@ private let trackersFreed = Atomic<Int>(0)
         let error = rt.block { () async -> String in
             let t = rt.spawn { () async -> String in
                 do {
-                    _ = try await Runtime.timeout(.seconds(60)) { try await Runtime.sleep(for: .seconds(60)) }
+                    _ = try await Runtime.timeout(for: .seconds(60)) { try await Runtime.sleep(for: .seconds(60)) }
                     return "finished"
                 } catch {
                     return "\(type(of: error))"
@@ -365,7 +365,7 @@ private let trackersFreed = Atomic<Int>(0)
                         // task retain would keep it alive.
                         let tracker = Tracker()
                         do {
-                            try await Runtime.timeout(.milliseconds(2)) {
+                            try await Runtime.timeout(for: .milliseconds(2)) {
                                 try await Runtime.sleep(for: .microseconds(1_000 + (i % 40) * 50))
                                 _ = tracker
                             }
@@ -390,11 +390,11 @@ private let trackersFreed = Atomic<Int>(0)
     }
 
     @Test func worksOffTheRuntime() async {
-        let late: Void? = try? await Runtime.timeout(.milliseconds(10)) {
+        let late: Void? = try? await Runtime.timeout(for: .milliseconds(10)) {
             try await Task.sleep(for: .seconds(60))
         }
         #expect(late == nil)
-        let v = try? await Runtime.timeout(.seconds(10)) { 5 }
+        let v = try? await Runtime.timeout(for: .seconds(10)) { 5 }
         #expect(v == 5)
     }
 }

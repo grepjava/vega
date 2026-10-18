@@ -20,7 +20,7 @@ private func deliver(_ signal: Int32) { #expect(cv_signal_raise(signal) == 0) }
 
 /// The next delivery, or nil if none comes within `ms`.
 private func next(_ stream: SignalStream, within ms: Int = 2_000) async -> Int32? {
-    let r = try? await Runtime.timeout(.milliseconds(ms)) { () async -> Int32? in
+    let r = try? await Runtime.timeout(for: .milliseconds(ms)) { () async -> Int32? in
         var it = stream.makeAsyncIterator()
         return await it.next()
     }

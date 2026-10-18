@@ -7,7 +7,7 @@ import Testing
 /// process-wide and tests run in parallel.
 @Suite struct WindowsSignalTests {
     private func next(_ stream: SignalStream) async -> Int32? {
-        let r = try? await Runtime.timeout(.seconds(2)) { () async -> Int32? in
+        let r = try? await Runtime.timeout(for: .seconds(2)) { () async -> Int32? in
             var it = stream.makeAsyncIterator()
             return await it.next()
         }

@@ -353,7 +353,7 @@ let sleepMany = Bench(name: "sleep_many", ops: 10_000) { ex in
 let timeoutOK = Bench(name: "timeout_ok", ops: 10_000) { ex in
     await withTaskGroup(of: Void.self) { g in
         for i in 0..<10_000 {
-            g.addTask(executorPreference: ex) { _ = try? await Runtime.timeout(.seconds(10)) { i } }
+            g.addTask(executorPreference: ex) { _ = try? await Runtime.timeout(for: .seconds(10)) { i } }
         }
         await g.waitForAll()
     }
@@ -367,15 +367,15 @@ let timeoutOK = Bench(name: "timeout_ok", ops: 10_000) { ex in
 /// task plus a timer.
 let timeoutSeq = Bench(name: "timeout_seq", ops: 10_000) { _ in
     var sum = 0
-    for i in 0..<10_000 { sum &+= (try? await Runtime.timeout(.seconds(10)) { i }) ?? 0 }
+    for i in 0..<10_000 { sum &+= (try? await Runtime.timeout(for: .seconds(10)) { i }) ?? 0 }
     blackHole(sum)
 }
 
-/// The same under `Runtime.withIODeadline`: no child task, just the timer
+/// The same under `Runtime.withIOTimeout`: no child task, just the timer
 /// and the task-local that the I/O waits read.
 let ioDeadlineSeq = Bench(name: "io_deadline_seq", ops: 10_000) { _ in
     var sum = 0
-    for i in 0..<10_000 { sum &+= await Runtime.withIODeadline(.seconds(10)) { i } }
+    for i in 0..<10_000 { sum &+= await Runtime.withIOTimeout(for: .seconds(10)) { i } }
     blackHole(sum)
 }
 

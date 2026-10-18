@@ -47,7 +47,7 @@ public struct IOError: Error, Hashable, CustomStringConvertible {
     /// data may have been cut short.
     public static let tlsTruncated = IOError(code: -5)
 
-    /// A `Runtime.withIODeadline` deadline passed while waiting (or a
+    /// A `Runtime.withIOTimeout` deadline passed while waiting (or a
     /// connect timed out). As with `cancelled`, that operation was abandoned.
     public static let timedOut = IOError(code: ETIMEDOUT)
     public static let connectionReset = IOError(code: ECONNRESET)

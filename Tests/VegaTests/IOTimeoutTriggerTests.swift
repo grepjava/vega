@@ -24,8 +24,8 @@ private func byte(_ value: UInt8) -> IOBuffer {
     return buffer
 }
 
-@Suite("IODeadlineTrigger")
-struct IODeadlineTriggerTests {
+@Suite("IOTimeoutTrigger")
+struct IOTimeoutTriggerTests {
     /// Fired from another task, the trigger ends a read long before its
     /// deadline, as the deadline would, and the stream still works.
     @Test func aTriggerEndsAReadEarly() throws {
@@ -35,7 +35,7 @@ struct IODeadlineTriggerTests {
         let (outcome, after) = try rt.block { () async throws(IOError) -> (String, Int) in
             let pair = try await connectedPair()
             let client = pair.client, server = pair.server
-            let trigger = IODeadlineTrigger()
+            let trigger = IOTimeoutTrigger()
             rt.spawn {
                 try? await Runtime.sleep(for: .milliseconds(20))
                 trigger.fire()
@@ -43,7 +43,7 @@ struct IODeadlineTriggerTests {
             var buffer = IOBuffer(capacity: 8)
             let outcome: String
             do throws(IOError) {
-                let n = try await Runtime.withIODeadline(.seconds(30), trigger: trigger) { () async throws(IOError) -> Int in
+                let n = try await Runtime.withIOTimeout(for: .seconds(30), trigger: trigger) { () async throws(IOError) -> Int in
                     try await client.read(into: &buffer)
                 }
                 outcome = "read \(n)"
@@ -51,7 +51,7 @@ struct IODeadlineTriggerTests {
                 outcome = error == .timedOut ? "timedOut" : "\(error)"
             }
             try await server.write(byte(7))
-            let after = try await Runtime.withIODeadline(.seconds(5), trigger: trigger) { () async throws(IOError) -> Int in
+            let after = try await Runtime.withIOTimeout(for: .seconds(5), trigger: trigger) { () async throws(IOError) -> Int in
                 try await client.read(into: &buffer)
             }
             return (outcome, after)
@@ -70,11 +70,11 @@ struct IODeadlineTriggerTests {
             let pair = try await connectedPair()
             let client = pair.client
             _ = pair.server
-            let trigger = IODeadlineTrigger()
+            let trigger = IOTimeoutTrigger()
             trigger.fire()
             var buffer = IOBuffer(capacity: 8)
             do throws(IOError) {
-                let n = try await Runtime.withIODeadline(.seconds(30), trigger: trigger) { () async throws(IOError) -> Int in
+                let n = try await Runtime.withIOTimeout(for: .seconds(30), trigger: trigger) { () async throws(IOError) -> Int in
                     try await client.read(into: &buffer)
                 }
                 return "read \(n)"

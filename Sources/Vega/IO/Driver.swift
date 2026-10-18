@@ -170,7 +170,7 @@ struct IORegistration: @unchecked Sendable {
     @inline(__always)
     func wait(_ direction: Int32) async throws(IOError) {
         if direction == CV_IO_WRITE, let stall = WriteStall.active, IODeadline.active == nil {
-            try await Runtime.withIODeadline(.nanoseconds(Int64(clamping: stall))) { () async throws(IOError) in
+            try await Runtime.withIOTimeout(for: .nanoseconds(Int64(clamping: stall))) { () async throws(IOError) in
                 try await waitReady(direction)
             }
             return

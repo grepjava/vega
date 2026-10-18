@@ -454,7 +454,7 @@ public struct WebSocket<Stream: AsyncReader & AsyncWriter & ~Copyable>: ~Copyabl
             let payload = [UInt8(code.rawValue >> 8), UInt8(truncatingIfNeeded: code.rawValue)] + text
             try await send(WebSocketFrame(opcode: .close, payload: payload))
         }
-        _ = try? await Runtime.withIODeadline(timeout) { () async throws(IOError) in
+        _ = try? await Runtime.withIOTimeout(for: timeout) { () async throws(IOError) in
             while !receivedClose {
                 guard let frame = try? await nextFrame() else { return }
                 if frame.opcode == .close {

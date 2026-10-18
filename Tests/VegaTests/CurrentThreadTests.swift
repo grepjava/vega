@@ -99,7 +99,7 @@ private func pthread_self_id() -> Int {
         let (n, timedOut) = try rt.block { () async throws -> (Int, Bool) in
             let n = await Runtime.blocking { 6 * 7 }
             do {
-                try await Runtime.timeout(.milliseconds(10)) { try await Runtime.sleep(for: .seconds(5)) }
+                try await Runtime.timeout(for: .milliseconds(10)) { try await Runtime.sleep(for: .seconds(5)) }
                 return (n, false)
             } catch is TimeoutError {
                 return (n, true)

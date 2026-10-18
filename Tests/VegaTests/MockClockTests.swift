@@ -88,7 +88,7 @@ private func realMillis(since t0: UInt64) -> UInt64 { (cv_now_ns() - t0) / 1_000
         let t0 = cv_now_ns()
         let timedOut = try rt.block { () async throws -> Bool in
             do {
-                try await Runtime.timeout(.seconds(30)) { try await Runtime.sleep(for: .seconds(60)) }
+                try await Runtime.timeout(for: .seconds(30)) { try await Runtime.sleep(for: .seconds(60)) }
                 return false
             } catch is TimeoutError {
                 return true

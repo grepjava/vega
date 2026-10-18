@@ -203,7 +203,7 @@ public final class TCPServer: Sendable {
     public func shutdown(gracePeriod: Duration) async {
         stopAccepting()
         if gracePeriod > .zero {
-            _ = try? await Runtime.timeout(gracePeriod) { [self] in
+            _ = try? await Runtime.timeout(for: gracePeriod) { [self] in
                 await waitUntil { $0.connections.isEmpty }
             }
         }
@@ -394,7 +394,7 @@ public struct TCPClient: Sendable {
         let stream: TCPStream
         if let connectTimeout {
             do {
-                stream = try await Runtime.timeout(connectTimeout) { Handoff(try await operation()) }.take()
+                stream = try await Runtime.timeout(for: connectTimeout) { Handoff(try await operation()) }.take()
             } catch let error as IOError {
                 throw error
             } catch is TimeoutError {

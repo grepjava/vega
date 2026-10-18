@@ -269,7 +269,7 @@ extension IORegistration {
             }
             let res: Int64
             if let stall {
-                res = try await Runtime.withIODeadline(.nanoseconds(Int64(clamping: stall))) {
+                res = try await Runtime.withIOTimeout(for: .nanoseconds(Int64(clamping: stall))) {
                     () async throws(IOError) -> Int64 in
                     await overlapped(CV_IO_WRITE) { waiter, res in cv_ovl_send(io, waiter, iov, k, res) }
                 }
@@ -940,7 +940,7 @@ public struct ReadHalf: ~Copyable, Sendable {
     /// since a close behind that input can't be seen until it is read. For a
     /// server that wants to stop work a client no longer waits for -- an
     /// HTTP/1 request whose client hung up -- while it reads nothing.
-    /// Cancellation and `Runtime.withIODeadline` end the wait as they end a
+    /// Cancellation and `Runtime.withIOTimeout` end the wait as they end a
     /// read.
     public func peerClosed() async throws(IOError) -> Bool {
         try await reg.waitReadable()

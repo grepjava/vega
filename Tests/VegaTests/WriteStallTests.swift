@@ -38,7 +38,7 @@ struct WriteStallTests {
             var sent = 0
             let outcome: String
             do throws(IOError) {
-                try await Runtime.withWriteStallTimeout(.milliseconds(100)) { () async throws(IOError) in
+                try await Runtime.withWriteStallTimeout(for: .milliseconds(100)) { () async throws(IOError) in
                     // Far more than the two sockets' buffers hold.
                     while sent < 256 << 20 {
                         try await server.write(chunk)
@@ -97,7 +97,7 @@ struct WriteStallTests {
             var sent = 0
             let outcome: String
             do throws(IOError) {
-                try await Runtime.withWriteStallTimeout(.milliseconds(limit)) { () async throws(IOError) in
+                try await Runtime.withWriteStallTimeout(for: .milliseconds(limit)) { () async throws(IOError) in
                     while (cv_now_ns() - started) / 1_000_000 < 2000 && sent < 1 << 30 {
                         try await server.write(chunk)
                         sent += chunk.count

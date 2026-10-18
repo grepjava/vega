@@ -101,7 +101,7 @@ import Testing
                     let conn = try await listener.accept()
                     var failure: IOError?
                     do throws(IOError) {
-                        _ = try await Runtime.withIODeadline(.milliseconds(200)) { () async throws(IOError) -> Int in
+                        _ = try await Runtime.withIOTimeout(for: .milliseconds(200)) { () async throws(IOError) -> Int in
                             try await conn.sendFile(fd, count: content.count)
                         }
                     } catch {

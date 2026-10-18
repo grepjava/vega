@@ -7,20 +7,20 @@ extension Runtime {
     /// reads, however slowly, keeps the write going.
     ///
     /// ```swift
-    /// try await Runtime.withWriteStallTimeout(.seconds(30)) {
+    /// try await Runtime.withWriteStallTimeout(for: .seconds(30)) {
     ///     try await stream.write(response)
     /// }
     /// ```
     ///
-    /// Where `withIODeadline` bounds the whole of an operation and costs a
+    /// Where `withIOTimeout` bounds the whole of an operation and costs a
     /// timer for every scope, this costs nothing until a write finds the
     /// socket full: only then does that one wait get a deadline. So it can
     /// go around every write, where nearly all of them go out at once. A
-    /// wait inside a `withIODeadline` scope keeps that deadline instead.
-    /// Only the calling task's writes are bounded, as with `withIODeadline`.
+    /// wait inside a `withIOTimeout` scope keeps that deadline instead.
+    /// Only the calling task's writes are bounded, as with `withIOTimeout`.
     @inlinable
     public static func withWriteStallTimeout<T: ~Copyable, E: Error>(
-        _ limit: Duration,
+        for limit: Duration,
         _ body: () async throws(E) -> T
     ) async throws(E) -> T {
         // Inlined, so the body is specialized at the call; a task Vega runs

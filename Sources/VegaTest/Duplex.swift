@@ -20,7 +20,7 @@ import VegaIO
 /// peer's reads once it has read what was buffered; writes to a dropped end
 /// throw `.brokenPipe`. Waiting reads and writes end as a socket's do: with
 /// `.cancelled` when their task is cancelled, and `.timedOut` when the
-/// task's `Runtime.withIODeadline` deadline passes or its trigger fires.
+/// task's `Runtime.withIOTimeout` deadline passes or its trigger fires.
 /// `split()` gives an end's read and write sides to two tasks.
 public func duplex(capacity: Int = 64 * 1024) -> DuplexStream.Pair {
     precondition(capacity > 0, "a duplex stream needs room for a byte")
@@ -278,7 +278,7 @@ fileprivate final class Pipe: @unchecked Sendable {
 
     /// Wait until `side` might make progress. A wait on an `IOEvent`, so it
     /// ends as a socket's does: `.cancelled` when the task is cancelled,
-    /// `.timedOut` when its `Runtime.withIODeadline` deadline passes or that
+    /// `.timedOut` when its `Runtime.withIOTimeout` deadline passes or that
     /// scope's trigger fires.
     private func park(_ side: Side) async throws(IOError) {
         let id = nextID.add(1, ordering: .relaxed).newValue

@@ -672,7 +672,7 @@ private let validRequest = [(":method", "GET"), (":scheme", "http"), (":path", "
         // Bounded, so a server that never sends GOAWAY fails the test
         // instead of hanging the run.
         let code = try rt.block { () async throws -> HTTP2ErrorCode? in
-            try await Runtime.timeout(.seconds(20)) { () async throws -> HTTP2ErrorCode? in
+            try await Runtime.timeout(for: .seconds(20)) { () async throws -> HTTP2ErrorCode? in
                 let pair = duplex()
                 rt.spawn(with: pair.second) { stream async in
                     let halves = stream.split()

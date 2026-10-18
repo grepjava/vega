@@ -145,20 +145,20 @@ import VegaTest
             var buf = IOBuffer(capacity: 8)
             var deadline: IOError?
             do throws(IOError) {
-                _ = try await Runtime.withIODeadline(.milliseconds(20)) { () async throws(IOError) -> Int in
+                _ = try await Runtime.withIOTimeout(for: .milliseconds(20)) { () async throws(IOError) -> Int in
                     try await b.read(into: &buf)
                 }
             } catch {
                 deadline = error
             }
-            let trigger = IODeadlineTrigger()
+            let trigger = IOTimeoutTrigger()
             rt.spawn {
                 try? await Runtime.sleep(for: .milliseconds(20))
                 trigger.fire()
             }
             var triggered: IOError?
             do throws(IOError) {
-                _ = try await Runtime.withIODeadline(.seconds(30), trigger: trigger) { () async throws(IOError) -> Int in
+                _ = try await Runtime.withIOTimeout(for: .seconds(30), trigger: trigger) { () async throws(IOError) -> Int in
                     try await b.read(into: &buf)
                 }
             } catch {

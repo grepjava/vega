@@ -126,7 +126,7 @@ public struct TCPStream: ~Copyable, Sendable {
     /// since a close behind that input can't be seen until it is read. For a
     /// server that wants to stop work a client no longer waits for -- an
     /// HTTP/1 request whose client hung up -- while it reads nothing.
-    /// Cancellation and `Runtime.withIODeadline` end the wait as they end a
+    /// Cancellation and `Runtime.withIOTimeout` end the wait as they end a
     /// read.
     public func peerClosed() async throws(IOError) -> Bool {
         try await reg.waitReadable()

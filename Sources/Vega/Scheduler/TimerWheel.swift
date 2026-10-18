@@ -10,7 +10,7 @@ enum TimerAction: @unchecked Sendable {
     /// Cancel a task (a `Runtime.timeout` child): a retained task object,
     /// consumed the same way.
     case cancel(UnsafeRawPointer)
-    /// A `Runtime.withIODeadline` deadline: retained, consumed the same way.
+    /// A `Runtime.withIOTimeout` deadline: retained, consumed the same way.
     case deadline(Unmanaged<IODeadline>)
 }
 

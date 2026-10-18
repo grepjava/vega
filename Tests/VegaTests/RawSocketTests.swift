@@ -55,7 +55,7 @@ private func icmpMessage(_ packet: [UInt8]) -> ArraySlice<UInt8> {
 private func ping(_ socket: borrowing RawSocket, payload: [UInt8]) async throws(IOError) -> [UInt8] {
     let to = SocketAddress(numericHost: "127.0.0.1", port: 0)!
     try await socket.send(echoRequest(id: 0x5645, sequence: 1, payload: payload), to: to)
-    return try await Runtime.withIODeadline(.seconds(10)) { () async throws(IOError) -> [UInt8] in
+    return try await Runtime.withIOTimeout(for: .seconds(10)) { () async throws(IOError) -> [UInt8] in
         var into = IOBuffer(capacity: 1500)
         while true {
             into.clear()

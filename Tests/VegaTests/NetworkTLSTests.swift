@@ -122,7 +122,7 @@ nonisolated(unsafe) private let certificate = SecCertificateCreateWithData(nil, 
             // when this stream goes, once it has the four bytes back.
             #expect(throws: IOError.unsupported) { try stream.shutdownWrite() }
             var back = IOBuffer(capacity: 16)
-            try await Runtime.withIODeadline(.seconds(10)) { () async throws(IOError) in
+            try await Runtime.withIOTimeout(for: .seconds(10)) { () async throws(IOError) in
                 while back.count < 4, try await stream.read(into: &back) > 0 {}
             }
             return (.success(session), back.string)

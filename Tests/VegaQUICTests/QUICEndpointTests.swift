@@ -37,7 +37,7 @@ final class Wire {
         for _ in 0..<200 where !done() {
             buffer.clear()
             do throws(IOError) {
-                _ = try await Runtime.withIODeadline(.milliseconds(10)) { () async throws(IOError) -> Int in
+                _ = try await Runtime.withIOTimeout(for: .milliseconds(10)) { () async throws(IOError) -> Int in
                     try await self.socket.receiveFrom(into: &buffer).count
                 }
             } catch {

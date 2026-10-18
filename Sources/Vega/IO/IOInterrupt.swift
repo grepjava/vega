@@ -52,7 +52,7 @@ class IOInterruptTarget: @unchecked Sendable {
 }
 
 /// Where an I/O wait parks its `IOInterrupt` for someone on another thread to
-/// fire: a task's cancellation hook, or a `Runtime.withIODeadline` deadline.
+/// fire: a task's cancellation hook, or a `Runtime.withIOTimeout` deadline.
 ///
 /// The waiting task arms one wait at a time; `fire` runs the armed action,
 /// or, with nothing armed, leaves the slot fired so the next `arm` refuses.
@@ -209,7 +209,7 @@ final class IOTaskHook: IOInterruptSlot, @unchecked Sendable {
         return ref.hook._withUnsafeGuaranteedRef { $0.owner == cv_task_current() } ? ref.hook : nil
     }
 
-    /// The task's innermost `withIODeadline` deadline, unretained (its scope
+    /// The task's innermost `withIOTimeout` deadline, unretained (its scope
     /// keeps it), so a wait finds it without a second task-local lookup.
     /// Only the task itself touches it; relaxed atomics just spare the
     /// exclusivity checks.
@@ -278,7 +278,7 @@ final class IOTaskHook: IOInterruptSlot, @unchecked Sendable {
 }
 
 /// One I/O wait, interruptible by the task's cancellation and its
-/// `Runtime.withIODeadline` deadline, whichever comes first. `wait` arms its
+/// `Runtime.withIOTimeout` deadline, whichever comes first. `wait` arms its
 /// wait (a submitted ring operation, an armed readiness slot) and then calls
 /// `arm` with the action that interrupts it; if `arm` returns false the task
 /// is cancelled or past its deadline already, and `wait` runs the action

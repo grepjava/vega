@@ -15,7 +15,7 @@ struct IOEventTests {
             try await event.wait()
             // Only one was kept.
             do throws(IOError) {
-                try await Runtime.withIODeadline(.milliseconds(20)) { () async throws(IOError) in
+                try await Runtime.withIOTimeout(for: .milliseconds(20)) { () async throws(IOError) in
                     try await event.wait()
                 }
                 return "woken twice"
@@ -36,7 +36,7 @@ struct IOEventTests {
                 try? await Runtime.sleep(for: .milliseconds(10))
                 event.signal()
             }
-            try await Runtime.withIODeadline(.seconds(10)) { () async throws(IOError) in
+            try await Runtime.withIOTimeout(for: .seconds(10)) { () async throws(IOError) in
                 try await event.wait()
             }
         }
@@ -51,20 +51,20 @@ struct IOEventTests {
             let event = IOEvent()
             var byDeadline = "woken"
             do throws(IOError) {
-                try await Runtime.withIODeadline(.milliseconds(20)) { () async throws(IOError) in
+                try await Runtime.withIOTimeout(for: .milliseconds(20)) { () async throws(IOError) in
                     try await event.wait()
                 }
             } catch {
                 byDeadline = "\(error)"
             }
-            let trigger = IODeadlineTrigger()
+            let trigger = IOTimeoutTrigger()
             rt.spawn {
                 try? await Runtime.sleep(for: .milliseconds(20))
                 trigger.fire()
             }
             var byTrigger = "woken"
             do throws(IOError) {
-                try await Runtime.withIODeadline(.seconds(30), trigger: trigger) { () async throws(IOError) in
+                try await Runtime.withIOTimeout(for: .seconds(30), trigger: trigger) { () async throws(IOError) in
                     try await event.wait()
                 }
             } catch {
