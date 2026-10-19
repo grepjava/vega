@@ -3787,8 +3787,9 @@ struct cv_uring_op {
     cv_uring_op *next_free;             // owner only
     cv_uring *ring;
     uintptr_t waiter;
-    int64_t res; // a completion that came while a cancel was queued
-    char pad[16];
+    int64_t res;         // a completion that came while a cancel was queued
+    struct cv_rx *rx;    // a multishot receive's: its completions go there
+    char pad[8];
 };
 _Static_assert(sizeof(cv_uring_op) == 64, "one slot per cache line");
 
@@ -3814,6 +3815,20 @@ struct cv_uring {
     cv_uring_op *free;
     struct slab_chunk *chunks;
     cv_driver_stats stats;
+    // Provided buffers (group 0): `nbufs` of `buf_size` bytes at `bufs`,
+    // offered to the kernel through `br`, whose tail only this thread moves.
+    // Buffers given back on other threads wait on `returns`, a stack linked
+    // through `ret_next` (bid + 1; 0 ends it), for this thread to offer.
+    struct io_uring_buf_ring *br;
+    char *bufs;
+    size_t br_len, bufs_len;
+    unsigned nbufs, buf_size;
+    uint16_t br_tail;
+    unsigned bufs_out; // taken by completions and not yet offered again
+    pthread_t thread;
+    _Atomic uint32_t returns;
+    _Atomic int starved; // the pool ran low: a return from elsewhere wakes us
+    _Atomic uint32_t *ret_next;
     int nwakes;
     cv_uring_wake wakes[2 * CV_URING_BATCH];
 };
@@ -3954,6 +3969,13 @@ void cv_uring_close(cv_uring *r) {
     r->cq_map = r->sq_map = NULL;
     if (r->fd >= 0) close(r->fd);
     r->fd = -1;
+    // After the fd: the kernel has let go of the buffer ring with it.
+    if (r->br) munmap(r->br, r->br_len);
+    if (r->bufs) munmap(r->bufs, r->bufs_len);
+    free((void *)r->ret_next);
+    r->br = NULL;
+    r->bufs = NULL;
+    r->ret_next = NULL;
 }
 
 void cv_uring_free(cv_uring *r) {
@@ -4117,7 +4139,9 @@ cv_uring_op *cv_uring_openat(cv_uring *r, uintptr_t waiter, const char *path, in
     return op;
 }
 
-void cv_uring_cancel(cv_uring_op *op, uint64_t gen) {
+/// Queue `op`'s cancel for drain_cancels; with `wake`, unpark the ring's
+/// thread to run it (not needed from that thread, inside reap).
+static void cancel_op(cv_uring_op *op, uint64_t gen, int wake) {
     uint64_t expected = gen << 3 | OP_PENDING;
     if (!atomic_compare_exchange_strong_explicit(&op->state, &expected, gen << 3 | OP_CANCEL_REQ,
                                                  memory_order_acq_rel, memory_order_relaxed))
@@ -4128,8 +4152,10 @@ void cv_uring_cancel(cv_uring_op *op, uint64_t gen) {
         atomic_store_explicit(&op->next_cancel, head, memory_order_relaxed);
     } while (!atomic_compare_exchange_weak_explicit(&r->cancels, &head, op, memory_order_release,
                                                     memory_order_relaxed));
-    cv_unpark(r->parker);
+    if (wake) cv_unpark(r->parker);
 }
+
+void cv_uring_cancel(cv_uring_op *op, uint64_t gen) { cancel_op(op, gen, 1); }
 
 static inline void add_wake(cv_uring *r, uintptr_t waiter, int64_t res) {
     r->wakes[r->nwakes].waiter = waiter;
@@ -4137,7 +4163,29 @@ static inline void add_wake(cv_uring *r, uintptr_t waiter, int64_t res) {
     r->nwakes++;
 }
 
-static void complete(cv_uring *r, cv_uring_op *op, int64_t res) {
+static void rx_complete(cv_uring *r, cv_uring_op *op, int64_t res, unsigned flags);
+static void bufs_offer(cv_uring *r, unsigned bid);
+
+/// A completion's result with the buffer it came in, encoded (see cvega.h).
+static inline int64_t take_buffer(cv_uring *r, int64_t res, unsigned flags) {
+    if (!(flags & IORING_CQE_F_BUFFER)) return res;
+    unsigned bid = flags >> IORING_CQE_BUFFER_SHIFT;
+    r->bufs_out++;
+    if (res <= 0) { // the end of the stream (or an error): nothing in it
+        bufs_offer(r, bid);
+        return res;
+    }
+    if (r->nbufs - r->bufs_out <= r->nbufs / 16)
+        atomic_store_explicit(&r->starved, 1, memory_order_relaxed);
+    return res | (int64_t)(bid + 1) << 32;
+}
+
+static void complete(cv_uring *r, cv_uring_op *op, int64_t res, unsigned flags) {
+    if (op->rx) {
+        rx_complete(r, op, res, flags);
+        return;
+    }
+    res = take_buffer(r, res, flags);
     uint64_t s = atomic_load_explicit(&op->state, memory_order_acquire);
     for (;;) {
         if ((s & 7) == OP_CANCEL_REQ) {
@@ -4178,6 +4226,11 @@ static void drain_cancels(cv_uring *r) {
                 } while (!atomic_compare_exchange_weak_explicit(&r->cancels, &head, op,
                                                                 memory_order_release,
                                                                 memory_order_relaxed));
+            } else if (op->rx) {
+                // A multishot receive's last completion: it woke its reader
+                // already, and only the slot was left.
+                op->rx = NULL;
+                op_free(r, op, s);
             } else {
                 add_wake(r, op->waiter, op->res);
                 op_free(r, op, s);
@@ -4199,6 +4252,8 @@ static void drain_cancels(cv_uring *r) {
     if (submitted) enter(r, 0, 0);
 }
 
+static void bufs_take_returns(cv_uring *r);
+
 static int reap(cv_uring *r) {
     r->nwakes = 0;
     unsigned head = atomic_load_explicit(r->cq_khead, memory_order_relaxed);
@@ -4208,15 +4263,17 @@ static int reap(cv_uring *r) {
         struct io_uring_cqe *cqe = &r->cqes[head & r->cq_mask];
         uint64_t ud = cqe->user_data;
         int64_t res = cqe->res;
+        unsigned flags = cqe->flags;
         head++;
         seen++;
         if (ud == TAG_FUTEX) {
             r->futex_armed = 0;
         } else if (ud != TAG_CANCEL) {
-            complete(r, (cv_uring_op *)(uintptr_t)ud, res);
+            complete(r, (cv_uring_op *)(uintptr_t)ud, res, flags);
         }
     }
     atomic_store_explicit(r->cq_khead, head, memory_order_release);
+    if (atomic_load_explicit(&r->returns, memory_order_relaxed)) bufs_take_returns(r);
     r->stats.events += seen;
     if (seen == CV_URING_BATCH) r->stats.full_batches++;
     drain_cancels(r);
@@ -4306,6 +4363,335 @@ cv_uring_wake *cv_uring_wakes(cv_uring *r) { return r->wakes; }
 
 cv_driver_stats cv_uring_get_stats(cv_uring *r) { return r->stats; }
 
+// ---- provided buffers ------------------------------------------------------
+
+int cv_uring_bufs_setup(cv_uring *r, unsigned count, unsigned size) {
+    if (count == 0 || count > 32768 || (count & (count - 1)) || size == 0) return EINVAL;
+    long page = sysconf(_SC_PAGESIZE);
+    size_t br_len = ((size_t)count * sizeof(struct io_uring_buf) + (size_t)page - 1) & ~((size_t)page - 1);
+    size_t bufs_len = (size_t)count * size;
+    void *br = mmap(NULL, br_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (br == MAP_FAILED) return errno;
+    // Not populated: a page costs memory once the kernel first writes it.
+    void *bufs = mmap(NULL, bufs_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (bufs == MAP_FAILED) {
+        int e = errno;
+        munmap(br, br_len);
+        return e;
+    }
+    _Atomic uint32_t *next = calloc(count, sizeof *next);
+    if (!next) {
+        munmap(br, br_len);
+        munmap(bufs, bufs_len);
+        return ENOMEM;
+    }
+    struct io_uring_buf_reg reg = {0};
+    reg.ring_addr = (uint64_t)(uintptr_t)br;
+    reg.ring_entries = count;
+    reg.bgid = 0;
+    if (uring_register(r->fd, IORING_REGISTER_PBUF_RING, &reg, 1) < 0) {
+        int e = errno;
+        munmap(br, br_len);
+        munmap(bufs, bufs_len);
+        free(next);
+        return e;
+    }
+    r->br = br;
+    r->br_len = br_len;
+    r->bufs = bufs;
+    r->bufs_len = bufs_len;
+    r->nbufs = count;
+    r->buf_size = size;
+    r->ret_next = next;
+    r->thread = pthread_self();
+    struct io_uring_buf *bufs_ring = (struct io_uring_buf *)br;
+    for (unsigned i = 0; i < count; i++) {
+        bufs_ring[i].addr = (uint64_t)(uintptr_t)(r->bufs + (size_t)i * size);
+        bufs_ring[i].len = size;
+        bufs_ring[i].bid = (uint16_t)i;
+    }
+    r->br_tail = (uint16_t)count;
+    atomic_store_explicit((_Atomic uint16_t *)&r->br->tail, r->br_tail, memory_order_release);
+    return 0;
+}
+
+int cv_uring_bufs_ready(cv_uring *r) {
+    // Room to spare: a pool nearly used up sends receives the other way
+    // rather than into ENOBUFS.
+    return r->br && r->nbufs - r->bufs_out > r->nbufs / 16;
+}
+
+void *cv_uring_buf_addr(cv_uring *r, int bid) { return r->bufs + (size_t)bid * r->buf_size; }
+
+/// Offer buffer `bid` to the kernel again. The ring's thread only.
+static void bufs_offer(cv_uring *r, unsigned bid) {
+    struct io_uring_buf *b = &((struct io_uring_buf *)r->br)[r->br_tail & (r->nbufs - 1)];
+    b->addr = (uint64_t)(uintptr_t)(r->bufs + (size_t)bid * r->buf_size);
+    b->len = r->buf_size;
+    b->bid = (uint16_t)bid;
+    r->br_tail++;
+    r->bufs_out--;
+    atomic_store_explicit((_Atomic uint16_t *)&r->br->tail, r->br_tail, memory_order_release);
+}
+
+/// Offer the buffers other threads gave back, all at once.
+static void bufs_take_returns(cv_uring *r) {
+    uint32_t top = atomic_exchange_explicit(&r->returns, 0, memory_order_acquire);
+    while (top) {
+        uint32_t bid = top - 1;
+        top = atomic_load_explicit(&r->ret_next[bid], memory_order_relaxed);
+        bufs_offer(r, bid);
+    }
+}
+
+void cv_uring_buf_return(cv_uring *r, int bid) {
+    if (pthread_equal(pthread_self(), r->thread)) {
+        bufs_offer(r, (unsigned)bid);
+        return;
+    }
+    // Another thread: onto the ring's stack, which its thread takes whole
+    // when it next reaps. Only pushed to, so no ABA.
+    uint32_t top = atomic_load_explicit(&r->returns, memory_order_relaxed);
+    do {
+        atomic_store_explicit(&r->ret_next[bid], top, memory_order_relaxed);
+    } while (!atomic_compare_exchange_weak_explicit(&r->returns, &top, (uint32_t)bid + 1,
+                                                    memory_order_release, memory_order_relaxed));
+    // The kernel sees the buffer only once the ring's thread offers it: if
+    // the pool ran low, that thread may be parked with receives waiting.
+    if (atomic_load_explicit(&r->starved, memory_order_relaxed) &&
+        atomic_exchange_explicit(&r->starved, 0, memory_order_relaxed))
+        cv_unpark(r->parker);
+}
+
+cv_uring_op *cv_uring_recv_select(cv_uring *r, uintptr_t waiter, int fd, uint64_t *gen) {
+    cv_uring_op *op = submit_op(r, waiter, gen, IORING_OP_RECV, fd, 0, 0);
+    struct io_uring_sqe *sqe = &r->sqes[r->sq_tail & r->sq_mask];
+    sqe->flags = IOSQE_BUFFER_SELECT;
+    sqe->buf_group = 0;
+    sqe->ioprio = IORING_RECVSEND_POLL_FIRST;
+    push_sqe(r);
+    return op;
+}
+
+// ---- multishot receives ----------------------------------------------------
+// The request lives on the ring of the worker that armed it, and so do its
+// completions, while the task reading the socket runs wherever the
+// scheduler puts it: completions wait in the cv_rx's queue, under a
+// spinlock held only to move an entry or the waiter. The cv_rx is freed when
+// both the socket (cv_rx_close) and the request (its last completion) are
+// done with it.
+
+typedef struct rx_entry {
+    cv_uring *ring; // whose buffer
+    int64_t res;    // encoded
+    uint32_t off;   // bytes of it used
+} rx_entry;
+
+#define CV_RX_HIGH 8 // queued results that pause the receive
+
+struct cv_rx {
+    _Atomic int lock;
+    int refs;    // the socket's, and the armed request's
+    int closed;
+    int pausing; // a cancel to pause is on its way
+    cv_uring *ring; // armed on; NULL: not armed
+    cv_uring_op *op;
+    uint64_t gen;
+    uintptr_t waiter;
+    rx_entry *q;
+    unsigned head, count, cap;
+};
+
+static inline void rx_lock(cv_rx *rx) {
+    for (;;) {
+        if (!atomic_exchange_explicit(&rx->lock, 1, memory_order_acquire)) return;
+        while (atomic_load_explicit(&rx->lock, memory_order_relaxed)) cpu_relax();
+    }
+}
+
+static inline void rx_unlock(cv_rx *rx) { atomic_store_explicit(&rx->lock, 0, memory_order_release); }
+
+static void rx_free(cv_rx *rx) {
+    free(rx->q);
+    free(rx);
+}
+
+static void rx_entry_release(const rx_entry *e) {
+    if (e->res > 0 && (e->res >> 32) != 0) cv_uring_buf_return(e->ring, (int)((e->res >> 32) & 0xffff) - 1);
+}
+
+cv_rx *cv_rx_new(void) {
+    cv_rx *rx = calloc(1, sizeof *rx);
+    if (rx) rx->refs = 1;
+    return rx;
+}
+
+/// Queue `e`, at the back or (put back) the front. Under the lock.
+static void rx_push(cv_rx *rx, rx_entry e, int front) {
+    if (rx->count == rx->cap) {
+        unsigned cap = rx->cap ? rx->cap * 2 : 4;
+        rx_entry *q = malloc(cap * sizeof *q);
+        if (!q) abort();
+        for (unsigned i = 0; i < rx->count; i++) q[i] = rx->q[(rx->head + i) % rx->cap];
+        free(rx->q);
+        rx->q = q;
+        rx->cap = cap;
+        rx->head = 0;
+    }
+    if (front) {
+        rx->head = (rx->head + rx->cap - 1) % rx->cap;
+        rx->q[rx->head] = e;
+    } else {
+        rx->q[(rx->head + rx->count) % rx->cap] = e;
+    }
+    rx->count++;
+}
+
+int cv_rx_arm(cv_rx *rx, cv_uring *r, int fd) {
+    if (!r->br) return EOPNOTSUPP;
+    rx_lock(rx);
+    if (rx->ring || rx->closed) {
+        rx_unlock(rx);
+        return EBUSY;
+    }
+    uint64_t gen;
+    cv_uring_op *op = submit_op(r, 0, &gen, IORING_OP_RECV, fd, 0, 0);
+    struct io_uring_sqe *sqe = &r->sqes[r->sq_tail & r->sq_mask];
+    sqe->flags = IOSQE_BUFFER_SELECT;
+    sqe->buf_group = 0;
+    // Most connections are idle when armed: poll first, not a recv that fails.
+    sqe->ioprio = IORING_RECV_MULTISHOT | IORING_RECVSEND_POLL_FIRST;
+    op->rx = rx;
+    rx->ring = r;
+    rx->op = op;
+    rx->gen = gen;
+    rx->refs++;
+    push_sqe(r);
+    rx_unlock(rx);
+    return 0;
+}
+
+int64_t cv_rx_take(cv_rx *rx, uintptr_t waiter, cv_uring **ring, uint32_t *off) {
+    rx_lock(rx);
+    int64_t res;
+    if (rx->count) {
+        rx_entry e = rx->q[rx->head];
+        rx->head = (rx->head + 1) % rx->cap;
+        rx->count--;
+        *ring = e.ring;
+        *off = e.off;
+        res = e.res;
+    } else if (rx->ring) {
+        if (waiter) rx->waiter = waiter;
+        res = CV_RX_WAIT;
+    } else {
+        res = CV_RX_IDLE;
+    }
+    rx_unlock(rx);
+    return res;
+}
+
+void cv_rx_untake(cv_rx *rx, cv_uring *ring, int64_t res, uint32_t off) {
+    rx_lock(rx);
+    rx_entry e = {ring, res, off};
+    rx_push(rx, e, 1);
+    rx_unlock(rx);
+}
+
+int cv_rx_pending(cv_rx *rx, int *eof) {
+    rx_lock(rx);
+    int n = rx->count != 0;
+    if (n) *eof = rx->q[rx->head].res <= 0;
+    rx_unlock(rx);
+    return n;
+}
+
+int cv_rx_wait(cv_rx *rx, uintptr_t waiter) {
+    rx_lock(rx);
+    int waits = rx->count == 0 && rx->ring != NULL;
+    if (waits) rx->waiter = waiter;
+    rx_unlock(rx);
+    return waits;
+}
+
+int cv_rx_unwait(cv_rx *rx, uintptr_t waiter) {
+    rx_lock(rx);
+    int taken = rx->waiter == waiter && waiter != 0;
+    if (taken) rx->waiter = 0;
+    rx_unlock(rx);
+    return taken;
+}
+
+void cv_rx_close(cv_rx *rx) {
+    rx_lock(rx);
+    rx->closed = 1;
+    for (unsigned i = 0; i < rx->count; i++) rx_entry_release(&rx->q[(rx->head + i) % rx->cap]);
+    rx->count = 0;
+    if (rx->ring && !rx->pausing) cv_uring_cancel(rx->op, rx->gen);
+    int last = --rx->refs == 0;
+    rx_unlock(rx);
+    if (last) rx_free(rx);
+}
+
+/// A multishot receive's completion, on its ring's thread: queue it for the
+/// reader, wake the reader if it waits, and on the last one (no F_MORE) let
+/// the slot go.
+static void rx_complete(cv_uring *r, cv_uring_op *op, int64_t res, unsigned flags) {
+    cv_rx *rx = op->rx;
+    int more = (flags & IORING_CQE_F_MORE) != 0;
+    rx_entry e = {r, take_buffer(r, res, flags), 0};
+    rx_lock(rx);
+    if (rx->closed) {
+        rx_entry_release(&e);
+    } else if (res >= 0 || (res != -ENOBUFS && res != -ECANCELED)) {
+        // Bytes, the end of the stream, or an error for the reader. ENOBUFS
+        // (the pool ran dry) and ECANCELED (paused) just end the request:
+        // the reader arms it again, or reads another way.
+        rx_push(rx, e, 0);
+        if (more && rx->count >= CV_RX_HIGH && !rx->pausing) {
+            // The reader is behind: stop taking buffers for it until it
+            // has caught up, and arms the receive again.
+            rx->pausing = 1;
+            cancel_op(op, rx->gen, 0); // reap drains the cancels next
+        }
+    }
+    uintptr_t waiter = 0;
+    if (rx->waiter && (rx->count || !more)) {
+        waiter = rx->waiter;
+        rx->waiter = 0;
+    }
+    int last = 0;
+    if (!more) {
+        rx->ring = NULL;
+        rx->op = NULL;
+        rx->pausing = 0;
+        last = --rx->refs == 0;
+    }
+    rx_unlock(rx);
+    if (waiter) add_wake(r, waiter, 0);
+    if (!more) {
+        uint64_t s = atomic_load_explicit(&op->state, memory_order_acquire);
+        for (;;) {
+            if ((s & 7) == OP_CANCEL_REQ) {
+                // On the cancel list: drain_cancels frees the slot.
+                atomic_store_explicit(&op->state, (s & ~(uint64_t)7) | OP_DONE_DEFERRED,
+                                      memory_order_release);
+                break;
+            }
+            uint64_t freed = ((s >> 3) + 1) << 3 | OP_FREE;
+            if (atomic_compare_exchange_weak_explicit(&op->state, &s, freed, memory_order_acq_rel,
+                                                      memory_order_acquire)) {
+                op->rx = NULL;
+                op->next_free = r->free;
+                r->free = op;
+                break;
+            }
+        }
+        if (last) rx_free(rx);
+    }
+}
+
+
 #else
 
 int cv_uring_probe(void) { return ENOSYS; }
@@ -4328,6 +4714,10 @@ cv_io *cv_uring_io_new(int fd, int *count) {
 void cv_uring_io_release(cv_io *io) {
     if (__atomic_sub_fetch(&io->refs, 1, __ATOMIC_ACQ_REL) != 0) return; // the other half has it
     int *count = io->count;
+#ifdef __linux__
+    // Before the close: the fd must not be reused while the cancel is out.
+    if (io->rx) cv_rx_close(io->rx);
+#endif
     close(io->fd);
     free(io);
     __atomic_sub_fetch(count, 1, __ATOMIC_RELEASE);

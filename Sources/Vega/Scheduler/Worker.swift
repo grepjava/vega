@@ -94,6 +94,10 @@ final class Worker: @unchecked Sendable {
     private var injectCount = 0
     /// Two per I/O event (read and write), for a full driver batch.
     static let injectBufferCapacity = 2048
+    /// Spare receive blocks (`ReceiveBlocks`), a list linked through their
+    /// first word, and how many.
+    var blockHead: UnsafeMutableRawPointer? = nil
+    var blockCount = 0
     /// Cooperative budget left for the running task (`Runtime.consumeBudget`).
     var budget: Int32 = 0
     /// Tokio's per-poll budget.
@@ -139,6 +143,7 @@ final class Worker: @unchecked Sendable {
     }
 
     deinit {
+        freeBlocks()
         pinned.pointer.pointee.destroy()
         pinned.destroy()
         pinnedLock.destroy()
@@ -355,6 +360,10 @@ final class Worker: @unchecked Sendable {
         if let ring {
             let e = cv_uring_enable(ring)
             precondition(e == 0, "vega: cannot enable io_uring (errno \(e))")
+            // Without them (an error here), `receive()` waits for readiness.
+            if s.receiveMode != .readiness {
+                _ = cv_uring_bufs_setup(ring, s.receiveBuffers, UInt32(ReceiveBlocks.size))
+            }
         }
         #endif
         activeSince.store(cv_now_coarse_ns(), ordering: .relaxed)

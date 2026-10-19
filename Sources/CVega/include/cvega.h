@@ -103,6 +103,9 @@ typedef struct cv_io {
     int refs;
     struct cv_io *next; // deferred-release list
     int *count;         // uring driver: the runtime's open sockets
+    /// uring driver: the socket's multishot receive (cv_rx), once
+    /// `receive()` has armed one; closed with the socket.
+    void *rx;
 } cv_io;
 
 /// Drop one owner of an io that no driver frees (Network.framework
@@ -772,6 +775,63 @@ typedef struct cv_uring_wake {
 } cv_uring_wake;
 cv_uring_wake *cv_uring_wakes(cv_uring *r);
 cv_driver_stats cv_uring_get_stats(cv_uring *r);
+
+// ---- Receiving into the ring's own buffers (Linux) -------------------------
+// Each ring has a pool of buffers registered with the kernel (a provided-
+// buffer ring, group 0): a receive names no buffer, and the kernel picks one
+// only when bytes arrive, so a socket waiting for input holds none. A buffer
+// goes back to its ring's pool when the bytes in it are dealt with, from
+// whichever thread is done with them.
+//
+// A result that came in a pool buffer is encoded: bits 0-31 the length,
+// bits 32-47 the buffer id plus one (0: no buffer). Errors are -errno.
+
+/// Register `count` (a power of two, at most 32768) buffers of `size`
+/// bytes with the ring. On the ring's own thread, after cv_uring_enable.
+/// Returns 0 or an errno value; without them, receives take another path.
+int cv_uring_bufs_setup(cv_uring *r, unsigned count, unsigned size);
+/// Whether the ring has its buffers, with some to spare.
+int cv_uring_bufs_ready(cv_uring *r);
+/// Buffer `bid`'s storage.
+void *cv_uring_buf_addr(cv_uring *r, int bid);
+/// Give buffer `bid` back to the ring's pool, from any thread.
+void cv_uring_buf_return(cv_uring *r, int bid);
+/// A recv into a buffer the kernel picks: its result is encoded (above).
+cv_uring_op *cv_uring_recv_select(cv_uring *r, uintptr_t waiter, int fd, uint64_t *gen);
+
+/// One socket's multishot receive: a single request that keeps receiving
+/// into the ring's buffers, each completion queued here for the task that
+/// reads the socket, which may be on any worker. Paused (cancelled) when
+/// the queue backs up, and armed again by the task once it has drained it.
+typedef struct cv_rx cv_rx;
+/// What cv_rx_take says when there is nothing to take: the task's waiter
+/// is stored and a completion will resume it (CV_RX_WAIT), or no receive is
+/// armed and none is coming (CV_RX_IDLE: arm one, or read another way).
+#define CV_RX_WAIT INT64_MIN
+#define CV_RX_IDLE (INT64_MIN + 1)
+cv_rx *cv_rx_new(void);
+/// Arm a multishot receive on `fd` on ring `r` (the caller's, its thread).
+/// Returns 0, or EBUSY if one is armed already (on any ring).
+int cv_rx_arm(cv_rx *rx, cv_uring *r, int fd);
+/// Take the oldest queued result: an encoded result whose buffer belongs to
+/// *ring (stored there), 0 for the end of the stream, -errno; or with
+/// nothing queued, store `waiter` (if not 0) and say CV_RX_WAIT, or say
+/// CV_RX_IDLE. `off` gets how far into the buffer the bytes start.
+int64_t cv_rx_take(cv_rx *rx, uintptr_t waiter, cv_uring **ring, uint32_t *off);
+/// Store `waiter` for the next completion to resume (with 0), if a receive
+/// is armed and nothing is queued: 1. Else 0: take or arm instead.
+int cv_rx_wait(cv_rx *rx, uintptr_t waiter);
+/// Put back the rest of a taken result: `off` bytes into it were used.
+void cv_rx_untake(cv_rx *rx, cv_uring *ring, int64_t res, uint32_t off);
+/// Whether a result is queued; *eof says whether the first is the end
+/// of the stream or an error.
+int cv_rx_pending(cv_rx *rx, int *eof);
+/// Take back `waiter` if no completion has: 1 if taken (the caller
+/// resumes it), 0 if a completion has it already.
+int cv_rx_unwait(cv_rx *rx, uintptr_t waiter);
+/// The socket is going: cancel the receive, give back what is queued, and
+/// free the cv_rx once the ring is done with it.
+void cv_rx_close(cv_rx *rx);
 
 /// A cv_io for an fd of a uring runtime (no registration), counted in
 /// *count until freed. NULL on ENOMEM.

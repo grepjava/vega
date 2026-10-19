@@ -1,5 +1,8 @@
 import CVega
 import Synchronization
+#if canImport(Glibc)
+import Glibc
+#endif
 
 /// How to interrupt one armed I/O wait from another thread: what a
 /// cancellation or an I/O deadline does to it. Every action is idempotent
@@ -10,6 +13,9 @@ enum IOInterrupt {
     /// A ring operation: cancel it (`cv_uring_cancel`); it completes with
     /// -ECANCELED unless it completed first.
     case uring(OpaquePointer, UInt64)
+    /// A wait for a multishot receive's next completion: take the waiter
+    /// back and resume it with -ECANCELED, unless a completion took it.
+    case rx(OpaquePointer, UInt)
     #endif
     #if os(Windows)
     /// An overlapped request: cancel it (CancelIoEx); it completes with
@@ -30,6 +36,10 @@ enum IOInterrupt {
         #if os(Linux)
         case let .uring(op, gen):
             cv_uring_cancel(op, gen)
+        case let .rx(rx, waiter):
+            if cv_rx_unwait(rx, waiter) != 0 {
+                unsafeBitCast(waiter, to: UnsafeContinuation<Int64, Never>.self).resume(returning: -Int64(ECANCELED))
+            }
         #endif
         #if os(Windows)
         case let .overlapped(io, direction):
@@ -63,7 +73,7 @@ class IOInterruptTarget: @unchecked Sendable {
 @usableFromInline
 class IOInterruptSlot: @unchecked Sendable {
     private static let idle: UInt8 = 0, armed: UInt8 = 1, firing: UInt8 = 2, fired: UInt8 = 3
-    private static let uring: UInt8 = 0, readiness: UInt8 = 1, object: UInt8 = 2, overlapped: UInt8 = 3, file: UInt8 = 4
+    private static let uring: UInt8 = 0, readiness: UInt8 = 1, object: UInt8 = 2, overlapped: UInt8 = 3, file: UInt8 = 4, rx: UInt8 = 5
 
     private let state = Atomic<UInt8>(IOInterruptSlot.idle)
     private let kind = Atomic<UInt8>(0)
@@ -92,6 +102,10 @@ class IOInterruptSlot: @unchecked Sendable {
             kind.store(Self.uring, ordering: .relaxed)
             a.store(UInt(bitPattern: op), ordering: .relaxed)
             b.store(gen, ordering: .relaxed)
+        case let .rx(rx, waiter):
+            kind.store(Self.rx, ordering: .relaxed)
+            a.store(UInt(bitPattern: rx), ordering: .relaxed)
+            b.store(UInt64(waiter), ordering: .relaxed)
         #endif
         #if os(Windows)
         case let .overlapped(io, direction):
@@ -151,6 +165,8 @@ class IOInterruptSlot: @unchecked Sendable {
         #if os(Linux)
         case Self.uring:
             return .uring(OpaquePointer(bitPattern: a).unsafelyUnwrapped, b.load(ordering: .relaxed))
+        case Self.rx:
+            return .rx(OpaquePointer(bitPattern: a).unsafelyUnwrapped, UInt(b.load(ordering: .relaxed)))
         #endif
         #if os(Windows)
         case Self.overlapped:

@@ -144,6 +144,23 @@ public struct VsockStream: ~Copyable, Sendable {
         _ = try await reg.waitReadable()
     }
 
+    /// Read what has arrived into `buffer`'s spare capacity, without
+    /// waiting: the bytes read, 0 at end of stream, or nil when nothing has
+    /// arrived yet. Tokio's `try_read`: wait for input with `readable()`.
+    public func tryRead(into buffer: inout IOBuffer) throws(IOError) -> Int? {
+        try reg.tryRead(into: &buffer)
+    }
+
+    /// Wait for bytes and return them in storage lent from the runtime,
+    /// holding no buffer while nothing arrives: an idle connection that
+    /// waits here costs no read buffer. Empty at the end of the stream.
+    /// Under the io_uring driver the kernel picks the buffer from the
+    /// worker's pool as the bytes arrive; elsewhere they are read into a
+    /// receive block once the socket has them. See `ReceivedBytes`.
+    public func receive() async throws(IOError) -> ReceivedBytes {
+        try await reg.receive()
+    }
+
     /// Wait until the peer closes its side and return true, or return
     /// false as soon as input arrives (see `TCPStream.peerClosed()`).
     public func peerClosed() async throws(IOError) -> Bool {

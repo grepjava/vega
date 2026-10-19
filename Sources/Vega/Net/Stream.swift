@@ -35,7 +35,8 @@ extension IORegistration {
     @usableFromInline
     func ringRead(_ buffer: inout IOBuffer) -> RingRead? {
         #if os(Linux)
-        guard buffer.spareCapacity > 0, let ring = URing.current, let hook = IOTaskHook.activeUnmanaged else {
+        guard buffer.spareCapacity > 0, io.pointee.rx == nil, let ring = URing.current,
+              let hook = IOTaskHook.activeUnmanaged else {
             return nil
         }
         return RingRead(ring: ring, hook: hook, deadline: hook._withUnsafeGuaranteedRef { $0.deadlineUnmanaged },
@@ -102,6 +103,9 @@ extension IORegistration {
         guard buffer.spareCapacity > 0 else { throw IOError.readIntoFullBuffer }
         #if canImport(Network)
         if let nw { return try await nwRead(into: &buffer, nw) }
+        #endif
+        #if os(Linux)
+        if io.pointee.rx != nil, let n = try await readReceived(into: &buffer) { return n }
         #endif
         while let res = await URing.perform(.recv(fd, buffer.base + buffer.count, buffer.spareCapacity),
                                             owner: owner) {
@@ -838,6 +842,9 @@ extension IORegistration {
         #if canImport(Network)
         if let nw { return try await nwWaitReadable(nw) }
         #endif
+        #if os(Linux)
+        if io.pointee.rx != nil, let eof = try await waitReceivedReadable() { return eof }
+        #endif
         // This wait may take the readiness edge a drained read would wait
         // for: the next read must ask the socket first.
         defer { io.pointee.read_drained = 0 }
@@ -855,10 +862,113 @@ extension IORegistration {
         }
     }
 
+    /// Read what has arrived into `buffer`'s spare capacity, without
+    /// waiting: the bytes read, 0 at end of stream, or nil when nothing has
+    /// arrived (wait with `waitReadable`, or read with `read(into:)`).
+    func tryRead(into buffer: inout IOBuffer) throws(IOError) -> Int? {
+        guard buffer.spareCapacity > 0 else { throw IOError.readIntoFullBuffer }
+        #if canImport(Network)
+        if let nw { return try nwTryRead(into: &buffer, nw) }
+        #endif
+        #if os(Linux)
+        if let n = try takeReceived(into: &buffer) { return n < 0 ? nil : n }
+        #endif
+        while true {
+            let want = buffer.spareCapacity
+            let n = cv_recv(fd, buffer.base + buffer.count, want)
+            if n >= 0 {
+                buffer.readable += n
+                if n > 0 && n < want { io.pointee.read_drained = 1 }
+                return n
+            }
+            switch Int32(-n) {
+            case EAGAIN, EWOULDBLOCK: return nil
+            case EINTR: continue
+            case let err: throw IOError(code: err)
+            }
+        }
+    }
+
+    /// Wait for bytes and return them in storage lent from the runtime
+    /// (`ReceivedBytes`), holding none while nothing arrives. Empty at the
+    /// end of the stream.
+    func receive() async throws(IOError) -> ReceivedBytes {
+        #if canImport(Network)
+        if nw != nil { return try await receiveWaitingFirst() }
+        #endif
+        #if os(Linux)
+        if let bytes = try await receiveOnRing() { return bytes }
+        #endif
+        while true {
+            if io.pointee.read_drained != 0 {
+                // As `read(into:)`: the last read came up short, so the
+                // socket was empty. Wait for the next event, with no block.
+                io.pointee.read_drained = 0
+                if cv_io_read_closed(io) == 0, cv_io_take_ready(io, CV_IO_READ) == 0 {
+                    try await waitForInput()
+                }
+            }
+            let block = ReceiveBlocks.take()
+            let n = cv_recv(fd, block, ReceiveBlocks.size)
+            if n > 0 {
+                if n < ReceiveBlocks.size { io.pointee.read_drained = 1 }
+                await Runtime.consumeBudget()
+                return ReceivedBytes(storage: block, capacity: ReceiveBlocks.size, count: n)
+            }
+            ReceiveBlocks.give(block)
+            if n == 0 { return ReceivedBytes() }
+            switch Int32(-n) {
+            case EAGAIN, EWOULDBLOCK: try await waitForInput()
+            case EINTR: continue
+            case let err: throw IOError(code: err)
+            }
+        }
+    }
+
+    /// `receive()` as `waitReadable` and then `tryRead`: for streams whose
+    /// wait holds no buffer of ours already (Network.framework's), and as
+    /// the fallback anywhere.
+    func receiveWaitingFirst() async throws(IOError) -> ReceivedBytes {
+        while true {
+            _ = try await waitReadable()
+            var buffer = IOBuffer(capacity: ReceiveBlocks.size)
+            if let n = try tryRead(into: &buffer) {
+                if n > 0 { await Runtime.consumeBudget() }
+                return ReceivedBytes(buffer)
+            }
+        }
+    }
+
+    /// Wait for input to arrive, holding no buffer: a readiness wait, or
+    /// under the iocp backend a zero-byte WSARecv (see `readOverlapped`).
+    private func waitForInput() async throws(IOError) {
+        #if os(Windows)
+        if overlapped(CV_OVL_RECV) {
+            let io = self.io
+            while true {
+                let res = await overlapped(CV_IO_READ) { waiter, res in
+                    cv_ovl_recv(io, waiter, IOBuffer.noStorage, 0, res)
+                }
+                if res >= 0 { return }
+                switch Int32(-res) {
+                case EINTR, EAGAIN: continue
+                case ECANCELED: throw .cancelled
+                case ETIMEDOUT: throw .timedOut
+                default: throw IOError(code: Int32(-res))
+                }
+            }
+        }
+        #endif
+        try await wait(CV_IO_READ)
+    }
+
     /// Whether a read would return at once, without reading or waiting.
     var hasPendingInput: Bool {
         #if canImport(Network)
         if let nw { return nwHasPendingInput(nw) }
+        #endif
+        #if os(Linux)
+        if hasReceived { return true }
         #endif
         return cv_input_waiting(fd) != 0
     }
@@ -942,6 +1052,23 @@ public struct ReadHalf: ~Copyable, Sendable {
     /// to arrive, or for the peer to close its side.
     public func readable() async throws(IOError) {
         _ = try await reg.waitReadable()
+    }
+
+    /// Read what has arrived into `buffer`'s spare capacity, without
+    /// waiting: the bytes read, 0 at end of stream, or nil when nothing has
+    /// arrived yet. Tokio's `try_read`: wait for input with `readable()`.
+    public func tryRead(into buffer: inout IOBuffer) throws(IOError) -> Int? {
+        try reg.tryRead(into: &buffer)
+    }
+
+    /// Wait for bytes and return them in storage lent from the runtime,
+    /// holding no buffer while nothing arrives: an idle connection that
+    /// waits here costs no read buffer. Empty at the end of the stream.
+    /// Under the io_uring driver the kernel picks the buffer from the
+    /// worker's pool as the bytes arrive; elsewhere they are read into a
+    /// receive block once the socket has them. See `ReceivedBytes`.
+    public func receive() async throws(IOError) -> ReceivedBytes {
+        try await reg.receive()
     }
 
     /// Wait until the peer closes its side of the connection, or resets it,

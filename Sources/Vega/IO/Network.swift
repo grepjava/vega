@@ -374,7 +374,7 @@ final class NetworkStream: NetworkHandle, @unchecked Sendable {
                 }
                 stashStart += n
                 if stashStart == stash.count {
-                    stash.removeAll(keepingCapacity: true)
+                    stash = [] // nothing kept while the connection idles
                     stashStart = 0
                 }
                 lock.unlock()
@@ -403,6 +403,42 @@ final class NetworkStream: NetworkHandle, @unchecked Sendable {
                 throw .interrupted
             }
         }
+    }
+
+    /// What `read(into:)` would return now, without waiting: nil when
+    /// nothing has arrived (a receive is started for it, so `waitReadable`
+    /// sees it come). The stash gives its storage back once emptied: an idle
+    /// connection keeps none.
+    func tryRead(into buffer: inout IOBuffer) throws(IOError) -> Int? {
+        guard buffer.spareCapacity > 0 else { throw IOError.readIntoFullBuffer }
+        lock.lock()
+        if stashStart < stash.count {
+            let n = min(buffer.spareCapacity, stash.count - stashStart)
+            stash.withUnsafeBytes { all in
+                (buffer.base + buffer.count).copyMemory(from: all.baseAddress! + stashStart, byteCount: n)
+            }
+            stashStart += n
+            if stashStart == stash.count {
+                stash = []
+                stashStart = 0
+            }
+            lock.unlock()
+            buffer.readable += n
+            return n
+        }
+        if let failure {
+            lock.unlock()
+            throw failure
+        }
+        if ended {
+            lock.unlock()
+            return 0
+        }
+        let start = !receiving
+        receiving = true
+        lock.unlock()
+        if start { receive() }
+        return nil
     }
 
     /// Wait until a read would return at once: false for data, true for the
@@ -640,6 +676,10 @@ extension IORegistration {
 
     func nwAccept(_ nw: UnsafeRawPointer) async throws(IOError) -> IORegistration {
         try await (NetworkIO.handle(nw) as! NetworkAcceptor).accept()
+    }
+
+    func nwTryRead(into buffer: inout IOBuffer, _ nw: UnsafeRawPointer) throws(IOError) -> Int? {
+        try (NetworkIO.handle(nw) as! NetworkStream).tryRead(into: &buffer)
     }
 
     func nwWaitReadable(_ nw: UnsafeRawPointer) async throws(IOError) -> Bool {

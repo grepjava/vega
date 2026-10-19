@@ -34,6 +34,10 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     #endif
     /// Whether each worker has an io_uring (the uring driver).
     let usesRings: Bool
+    /// How `receive()` gets its buffer under the uring driver.
+    let receiveMode: ReceiveMode
+    /// Buffers in each ring's pool for it (a power of two).
+    let receiveBuffers: UInt32
     /// Whether TCP goes through Network.framework (`IOBackend.network`).
     let usesNetwork: Bool
     /// Whether sockets and files make overlapped requests where they would
@@ -106,7 +110,10 @@ final class Scheduler: TaskExecutor, @unchecked Sendable {
     /// the i-th CPU the process may run on).
     init(workers count: Int, name: String, pin: Bool, cpus cpuList: [Int]? = nil, io: IOBackend = .automatic,
          currentThread: Bool = false, seed: UInt64? = nil, global: Bool = false, idleSpin: Duration? = nil,
-         blockingThreads: Int = 512, blockingQueue: Int? = nil, blockingKeepAlive: Duration = .seconds(10)) {
+         blockingThreads: Int = 512, blockingQueue: Int? = nil, blockingKeepAlive: Duration = .seconds(10),
+         receive: ReceiveMode? = nil, receiveBuffers: UInt32? = nil) {
+        receiveMode = receive ?? .environment
+        self.receiveBuffers = ReceiveMode.poolSize(receiveBuffers)
         precondition(count >= 1, "a runtime needs at least one worker")
         precondition(!currentThread || count == 1, "a current-thread runtime has one worker")
         precondition(seed == nil || currentThread, "only a current-thread runtime is seeded")

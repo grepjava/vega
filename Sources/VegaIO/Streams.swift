@@ -15,9 +15,22 @@ public protocol AsyncReader: ~Copyable {
     /// `ReadArrival`). Any other stream reads as `read(into:)` does and
     /// clears `arrival`.
     func read(into buffer: inout IOBuffer, arrival: UnsafeMutablePointer<ReadArrival>) async throws(IOError) -> Int
+
+    /// Wait for bytes and return them in storage lent from the runtime
+    /// (`ReceivedBytes`): empty at the end of the stream. Vega's sockets and
+    /// TLS streams hold no buffer while they wait here, so an idle
+    /// connection that waits with `receive()` costs no read buffer. Any
+    /// other stream reads into a receive block (`read(into:)`).
+    func receive() async throws(IOError) -> ReceivedBytes
 }
 
 extension AsyncReader where Self: ~Copyable {
+    public func receive() async throws(IOError) -> ReceivedBytes {
+        var buffer = IOBuffer(capacity: ReceivedBytes.blockSize)
+        _ = try await read(into: &buffer)
+        return ReceivedBytes(buffer)
+    }
+
     public func read(into buffer: inout IOBuffer,
                      arrival: UnsafeMutablePointer<ReadArrival>) async throws(IOError) -> Int {
         arrival.pointee.clear()

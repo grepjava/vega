@@ -1,6 +1,8 @@
 /// A byte buffer with one owner: no reference counting, no copy-on-write.
 /// Bytes `0..<count` are readable; reads append after them. The capacity is
-/// fixed unless you call `reserveCapacity(_:)`.
+/// fixed unless you call `reserveCapacity(_:)`. An empty buffer can give its
+/// storage back while it waits (`releaseStorage()`), and take some again
+/// with `reserveCapacity(_:)`.
 ///
 /// ```swift
 /// var buf = IOBuffer(capacity: 4096)
@@ -21,22 +23,59 @@ public struct IOBuffer: ~Copyable, @unchecked Sendable {
 
     public init(capacity: Int) {
         precondition(capacity > 0, "IOBuffer capacity must be positive")
-        base = .allocate(byteCount: capacity, alignment: 16)
+        base = Self.allocateStorage(capacity)
         self.capacity = capacity
         readable = 0
     }
 
-    deinit { base.deallocate() }
+    deinit { Self.freeStorage(base, capacity: capacity) }
 
     /// Make room for at least `capacity` bytes in all, keeping the readable
     /// ones. Moves the storage, so pointers into it from before are invalid.
     public mutating func reserveCapacity(_ capacity: Int) {
         guard capacity > self.capacity else { return }
-        let bigger = UnsafeMutableRawPointer.allocate(byteCount: capacity, alignment: 16)
+        let bigger = Self.allocateStorage(capacity)
         if count > 0 { bigger.copyMemory(from: base, byteCount: count) }
-        base.deallocate()
+        Self.freeStorage(base, capacity: self.capacity)
         base = bigger
         self.capacity = capacity
+    }
+
+    /// Give the storage back while the buffer is empty, so it holds no
+    /// memory while it waits: a connection between requests, say. The
+    /// capacity is then 0; `reserveCapacity(_:)` takes storage again.
+    /// Storage of `ReceiveBlocks.size` (16 KiB) goes back to the worker's
+    /// receive blocks, for the next buffer of that size to take.
+    public mutating func releaseStorage() {
+        precondition(count == 0, "releaseStorage on a buffer with readable bytes")
+        guard capacity > 0 else { return }
+        Self.freeStorage(base, capacity: capacity)
+        base = Self.noStorage
+        capacity = 0
+    }
+
+    /// The storage, readable bytes and all, for `ReceivedBytes` to own.
+    consuming func takeStorage() -> (UnsafeMutableRawPointer, capacity: Int, count: Int) {
+        let taken = (base, capacity: capacity, count: count)
+        discard self
+        return taken
+    }
+
+    /// Where a buffer with no storage points: never written, never freed.
+    nonisolated(unsafe) static let noStorage = UnsafeMutableRawPointer.allocate(byteCount: 16, alignment: 16)
+
+    /// Storage of `capacity` bytes: a receive block at that size.
+    static func allocateStorage(_ capacity: Int) -> UnsafeMutableRawPointer {
+        capacity == ReceiveBlocks.size ? ReceiveBlocks.take() : .allocate(byteCount: capacity, alignment: 16)
+    }
+
+    /// Give back storage from `allocateStorage`.
+    static func freeStorage(_ storage: UnsafeMutableRawPointer, capacity: Int) {
+        if capacity == ReceiveBlocks.size {
+            ReceiveBlocks.give(storage)
+        } else if capacity > 0 {
+            storage.deallocate()
+        }
     }
 
     /// Where the spare capacity starts, for I/O that fills it across a
