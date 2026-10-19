@@ -206,12 +206,13 @@ iOS simulator and Windows; ThreadSanitizer runs on Linux. `VegaTest` provides
 in-memory `duplex()` streams and `FaultyStream` (short reads, split writes,
 delays, resets). CI is local rather than hosted: `ci/run.ps1` sends the
 working tree to a Linux box, where `ci/linux.sh` runs io_uring, epoll,
-BoringSSL, ThreadSanitizer and VegaNIO in Docker; `ci/macos.sh` runs macOS
+BoringSSL and ThreadSanitizer in Docker; `ci/macos.sh` runs macOS
 and the iOS simulator, and `ci/windows.ps1` Windows.
 
 ## Packages around Vega
 
-Vega itself has no dependencies. `Benchmarks/`, `Adapters/` (swift-metrics
-and swift-log) and `VegaNIO/` (SwiftNIO's `EventLoopGroup`, `Channel` and
-bootstraps on Vega, which Hummingbird and Vapor run on) are packages of their
-own.
+Vega itself has no dependencies. `Benchmarks/` is a package of its own.
+[vega-nio](https://github.com/grepjava/vega-nio) is a repository of its own: VegaNIO (SwiftNIO's
+`EventLoopGroup`, `Channel` and bootstraps on Vega, which Hummingbird and
+Vapor run on), and VegaSwiftMetrics and VegaLogging, which report
+`Runtime.metrics` and slow polls through swift-metrics and swift-log.

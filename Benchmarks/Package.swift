@@ -28,7 +28,7 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v6), .unsafeFlags(["-enforce-exclusivity=unchecked"])]
         ),
         // the-benchmarker's HTTP contract on VegaHTTP1, against Hummingbird
-        // and Vapor (VegaNIO/Examples).
+        // and Vapor (vega-nio's Examples).
         .executableTarget(
             name: "vega-http",
             dependencies: [.product(name: "Vega", package: "vega"),

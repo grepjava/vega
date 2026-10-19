@@ -10,7 +10,7 @@ scheduler, completion-based I/O on io_uring and IOCP, and readiness-based I/O on
 epoll and kqueue. It targets Swift 6.2 and newer, and is tuned for Swift 6.3.
 
 [Garuda 2](https://github.com/grepjava/garuda) is built on it, and Hummingbird
-and Vapor can run on it through [VegaNIO](VegaNIO/README.md), which keeps
+and Vapor can run on it through [VegaNIO](https://github.com/grepjava/vega-nio), which keeps
 their SwiftNIO code as it is and hands Vega the scheduling and the socket I/O.
 
 **Status:** 1.0. The API is frozen: from here Vega follows semantic
@@ -117,8 +117,6 @@ Measure your own.
 | `Sources/CVega` | C shim: parking, threads, the epoll/kqueue/io_uring/IOCP drivers, sockets |
 | `Sources/CVegaTLS`, `Sources/CVegaCompress` | C shims for the TLS library and for compression |
 | `Sources/CVegaBoringSSL` | vendored BoringSSL, used only with the `BoringSSL` trait (see its `VENDORING.md`) |
-| `VegaNIO` | separate package: SwiftNIO's `EventLoopGroup` and bootstraps on Vega |
-| `Adapters` | separate package: `Runtime.metrics` through swift-metrics, slow polls through swift-log |
 | `Tests/VegaTests`, `Tests/VegaWireTests`, `Tests/VegaQUICTests` | swift-testing suites; `Tests/QUICTestPeer` is the QUIC tests' own client |
 | `Benchmarks/` | separate package, so Vega itself keeps zero dependencies |
 | `Spikes/` | the Phase 0 probes: which Swift 6.3 executor hooks reach a custom executor, and which io_uring features a host has |
@@ -193,3 +191,7 @@ error: `tls.kernelOffload` says what the kernel has. With receive offload,
 TLS 1.3 session tickets that come after the switch are dropped. A client
 reads one record itself first, so it keeps the first ticket. A peer's
 KeyUpdate needs Linux 6.14 or later.
+
+## License
+
+MIT; see [LICENSE](LICENSE).

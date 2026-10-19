@@ -393,11 +393,34 @@ So on macOS, kqueue stays the default for servers. `.network` is for iOS, tvOS, 
 - **mpsc_ping_pong and semaphore.** Both park on most operations, so skipping the status record pays off.
 - **mpsc_fan_in.** The receiver rarely parks, so the status record costs little there. It got slower in both modes, and the cause isn't known yet.
 
+## Hummingbird and Vapor on VegaNIO, on Vega 1.0 (2026-10-19)
+
+Hummingbird 2 and Vapor 4 from [vega-nio](https://github.com/grepjava/vega-nio)'s examples, each one binary
+on NIOPosix and, with `VEGANIO=1`, on VegaNIO. the-benchmarker's load through
+Garuda's `frameworks.sh`, clock capped at 2.4 GHz, server and load unpinned,
+the four arms rotating over four rounds; medians, req/s; no errors.
+
+| | 64 conns | 256 conns | 512 conns |
+|---|---:|---:|---:|
+| Hummingbird, NIOPosix, ramp | 51,100 | 52,644 | 51,573 |
+| Hummingbird, VegaNIO, ramp | 49,479 (0.97×) | 52,868 (1.00×) | 51,880 (1.01×) |
+| Vapor, NIOPosix, ramp | 40,807 | 40,814 | 40,436 |
+| Vapor, VegaNIO, ramp | 40,400 (0.99×) | 40,758 (1.00×) | 40,323 (1.00×) |
+| Hummingbird, NIOPosix, closed | 46,174 | 49,712 | 49,153 |
+| Hummingbird, VegaNIO, closed | 43,982 (0.95×) | 48,493 (0.98×) | 48,406 (0.98×) |
+| Vapor, NIOPosix, closed | 35,450 | 35,578 | 35,342 |
+| Vapor, VegaNIO, closed | 35,180 (0.99×) | 35,210 (0.99×) | 34,921 (0.99×) |
+
+Parity, as in the sweeps below. Closed-loop p99 at 256 and 512 connections
+is higher on VegaNIO for Hummingbird (17.5 / 42.4 ms against 11.8 / 22.0) and
+lower for Vapor (11.7 / 21.5 against 15.0 / 28.5). The raw output and driver
+are in [vega-nio's benchmarks/2026-10-19](https://github.com/grepjava/vega-nio/tree/main/benchmarks/2026-10-19).
+
 ## Hummingbird and Vapor on VegaNIO, and native VegaHTTP1 (2026-10-13/14)
 
 Requests per second against [the-benchmarker/web-frameworks](https://github.com/the-benchmarker/web-frameworks)' HTTP contract, run with `~/wl/benchmarks/frameworks.sh` on the box. The servers:
 
-- **Hummingbird 2 and Vapor 4,** built from `VegaNIO/Examples`, each on NIOPosix (`MultiThreadedEventLoopGroup`) and on VegaNIO (`VegaEventLoopGroup`), with the same binary for both. See [HUMMINGBIRD2.md](HUMMINGBIRD2.md) and [VAPOR.md](VAPOR.md).
+- **Hummingbird 2 and Vapor 4,** built from the examples now in [vega-nio](https://github.com/grepjava/vega-nio/tree/main/Examples), each on NIOPosix (`MultiThreadedEventLoopGroup`) and on VegaNIO (`VegaEventLoopGroup`), with the same binary for both. See [HUMMINGBIRD2.md](https://github.com/grepjava/vega-nio/blob/main/docs/HUMMINGBIRD2.md) and [VAPOR.md](https://github.com/grepjava/vega-nio/blob/main/docs/VAPOR.md).
 - **Native Vega:** `Benchmarks/Sources/vega-http`, `HTTP1Server` from VegaHTTP1 with one task per connection. It has no NIO, no framework and no router, and it adds no `date` or `server` header.
 - **Native NIO:** `Benchmarks/nio-http`, the same contract on NIOPosix and NIOHTTP1 with no framework (sweep 4 only).
 

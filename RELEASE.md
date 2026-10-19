@@ -77,5 +77,5 @@ stay that way. Most of the work is renames, and a few behaviours change.
 - A TLS client that verifies needs a server name. `Decompressor` needs an
   explicit limit.
 
-`Adapters` and `VegaNIO` are packages of their own, which build against this
-release.
+VegaNIO and the swift-metrics and swift-log adapters are in a repository of
+their own, [vega-nio](https://github.com/grepjava/vega-nio), which builds against this release.

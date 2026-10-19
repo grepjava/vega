@@ -181,8 +181,8 @@ Not on Windows: `Runtime.sharded` (it needs `fork`); brotli and zstd (gzip and d
   - `VegaHTTP` (the shared HTTP types); `VegaHTTP1`, `VegaHTTP2`, `VegaHTTP3`, `VegaWebSocket` and `VegaQUIC`, each over its `Core` module; `VegaWire` (varints and frames).
   - `VegaCompression`, `VegaProxy`, `VegaTest`.
 - **Access tiers.** The public API is the vocabulary. What Garuda alone needs is `@_spi(Garuda)`; what the modules share is `package`.
-- **Separate packages:** `Benchmarks/`; `Adapters/` (swift-log and swift-metrics); `VegaNIO/` (SwiftNIO's API over Vega). Adapters and VegaNIO move to repositories of their own for 1.0.
-- **Docs:** `docs/MIGRATING-FROM-NIO.md`, `docs/SHARDING.md`, `docs/BENCHMARKS.md`, and the Hummingbird and Vapor notes.
+- **Separate packages:** `Benchmarks/`; [vega-nio](https://github.com/grepjava/vega-nio), a repository of its own, holds VegaNIO (SwiftNIO's API over Vega) and the swift-log and swift-metrics adapters.
+- **Docs:** `docs/MIGRATING-FROM-NIO.md`, `docs/SHARDING.md`, `docs/BENCHMARKS.md`, and the Hummingbird and Vapor notes (in [vega-nio](https://github.com/grepjava/vega-nio/tree/main/docs)).
 
 ## Phase 0 findings (2026-10-12, Swift 6.3.3)
 Spike: `scratchpad/spike` (built in WSL, run on the bench box 192.168.100.100: i5-8250U, 8 CPUs, kernel 7.0).

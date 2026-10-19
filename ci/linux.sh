@@ -5,14 +5,13 @@
 #   epoll     epoll, OpenSSL
 #   boringssl io_uring, BoringSSL
 #   tsan      ThreadSanitizer, io_uring
-#   nio       VegaNIO's own tests (VegaNIO/), io_uring, limited to 10 minutes
 # Docker's default seccomp profile blocks io_uring, so containers run
 # unconfined. Each job builds in its own .build-ci/<job>, kept between runs.
 # Logs go to .build-ci/<job>.log; exits non-zero if a required job fails.
 set -u
 cd "$(dirname "$0")/.."
 JOBS=("$@")
-[ ${#JOBS[@]} -eq 0 ] && JOBS=(uring epoll boringssl tsan nio)
+[ ${#JOBS[@]} -eq 0 ] && JOBS=(uring epoll boringssl tsan)
 IMAGE=vega-ci:2
 JOBS_ARG=${CI_JOBS:-$(( $(nproc) > 2 ? $(nproc) - 2 : 1 ))}
 
@@ -30,11 +29,9 @@ for job in "${JOBS[@]}"; do
     boringssl) traits=BoringSSL ;;
     # Tests/tsan.supp: a Swift runtime gap (swiftlang/swift#93179), not Vega's.
     tsan) extra=--sanitize=thread env="-e TSAN_OPTIONS=suppressions=/src/Tests/tsan.supp" ;;
-    # VegaNIO names its parent package "vega", the directory's name.
-    nio) where="--package-path VegaNIO --scratch-path .build-ci/nio" run="timeout 600" mount=/vega ;;
     *) echo "unknown job $job"; exit 2 ;;
   esac
-  [ $job != nio ] && extra="--traits $traits $extra"
+  extra="--traits $traits $extra"
   log=.build-ci/$job.log
   start=$(date +%s)
   docker run --rm --name vega-ci-$job --security-opt seccomp=unconfined \
