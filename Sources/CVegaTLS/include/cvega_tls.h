@@ -87,6 +87,9 @@ void cv_tls_feed_eof(cv_tls *t);
 const uint8_t *cv_tls_take_output(cv_tls *t, intptr_t *len);
 /// Sent (or given up on): the buffer is the engine's again.
 void cv_tls_return_output(cv_tls *t);
+/// Free the output buffer if it holds nothing: for a connection about to
+/// wait for its peer. The next write makes a new one.
+void cv_tls_release_idle(cv_tls *t);
 /// One handshake step over the peer's ciphertext in (in_len bytes; NULL,
 /// 0 for none): 1 done, CV_TLS_WANT_READ, or CV_TLS_ERROR. Send what's
 /// pending after every step, an alert after an error too.

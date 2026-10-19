@@ -308,16 +308,25 @@ extension TLSWriter: Sendable where Transport: Sendable & ~Copyable {}
 /// halves. I/O never holds the lock; once the stream is split, every call
 /// into the engine does. Until then one task at a time uses it all, and
 /// there is nothing to lock against. The reading side alone uses
-/// `inbound`; the engine's output is taken by one sender at a time.
+/// `received` and `inbound`; the engine's output is taken by one sender at
+/// a time.
+///
+/// An idle connection holds no buffer here: ciphertext comes from the
+/// transport's `receive()`, in storage the runtime lends until the engine
+/// has taken it, and `inbound` gives its storage back whenever it empties.
 final class TLSState: @unchecked Sendable {
     /// Plaintext per record write: four full records.
     static let chunk = 64 * 1024
 
     let tls: OpaquePointer
     let context: TLSContext // keeps OpenSSL's context alive
-    /// The peer's ciphertext as read; the engine has taken the first
-    /// `taken` bytes, and takes the rest in place on later calls.
-    var inbound = IOBuffer(capacity: 32 * 1024)
+    /// The peer's ciphertext as received, for the engine to take in place;
+    /// what it hasn't taken when it wants more moves to `inbound`.
+    var received: ReceivedBytes?
+    /// Ciphertext that came in pieces (a record split across receives):
+    /// the engine has taken the first `taken` bytes, and takes the rest in
+    /// place on later calls. Holds no storage while empty.
+    var inbound = IOBuffer(capacity: ReceivedBytes.blockSize)
     var taken = 0
     /// The last read left the engine drained: it can't return anything
     /// before more ciphertext comes, so the next read reads the transport
@@ -377,7 +386,7 @@ final class TLSState: @unchecked Sendable {
     /// Input the engine holds: plaintext not yet read, or ciphertext read
     /// and not yet taken.
     var hasBufferedInput: Bool {
-        taken < inbound.count || engine { cv_tls_buffered(tls) != 0 }
+        received != nil || taken < inbound.count || engine { cv_tls_buffered(tls) != 0 }
     }
 
     func error() -> IOError {
@@ -387,23 +396,42 @@ final class TLSState: @unchecked Sendable {
     /// One handshake step: 1, or a `CV_TLS_` result; and whether there is
     /// ciphertext to send.
     func handshakeStep() -> (Int32, pending: Bool) {
+        var st = cv_tls_status()
+        let r = withInput { at, left in
+            let r = engine { cv_tls_handshake(tls, at, left, &st) }
+            return (r, st.used)
+        }
+        return (r, st.pending > 0)
+    }
+
+    /// Run `body` on the ciphertext the engine hasn't taken (`received`, or
+    /// else `inbound`), and count what it took: `body` returns its result
+    /// and that.
+    @inline(__always)
+    private func withInput<R>(_ body: (UnsafeRawPointer?, Int) -> (R, used: Int)) -> R {
+        if var bytes = received.take() {
+            let (r, used) = bytes.withUnsafeBytes { body($0.baseAddress, $0.count) }
+            bytes.removeFirst(used)
+            // All taken: the storage goes back to the runtime.
+            if !bytes.isEmpty { received = consume bytes }
+            return r
+        }
         let input = inbound.withUnsafeBytes { $0 }
         let at = input.baseAddress.map { $0 + taken }, left = input.count - taken
-        var st = cv_tls_status()
-        let r = engine { cv_tls_handshake(tls, at, left, &st) }
-        taken += st.used
-        return (r, st.pending > 0)
+        let (r, used) = body(at, left)
+        taken += used
+        return r
     }
 
     /// Plaintext into `buffer`'s spare capacity: a byte count or a
     /// `CV_TLS_` result; and whether there is ciphertext to send.
     func decrypt(into buffer: inout IOBuffer) -> (Int, pending: Bool) {
         let to = buffer.spareBytes, room = buffer.spareCapacity
-        let input = inbound.withUnsafeBytes { $0 }
-        let at = input.baseAddress.map { $0 + taken }, left = input.count - taken
         var st = cv_tls_status()
-        let n = engine { cv_tls_read(tls, at, left, to, room, &st) }
-        taken += st.used
+        let n = withInput { at, left in
+            let n = engine { cv_tls_read(tls, at, left, to, room, &st) }
+            return (n, st.used)
+        }
         drained = st.drained != 0
         return (n, st.pending > 0)
     }
@@ -485,6 +513,9 @@ final class TLSState: @unchecked Sendable {
             inbound.consume(taken)
         }
         taken = 0
+        // The start of a record the rest of which is still to come: keep it
+        // with what comes next.
+        if let rest = received.take() { append(rest) }
         #if os(Linux)
         // Receive offload waits for a record boundary: read no further
         // than the end of the record the engine is inside.
@@ -501,14 +532,49 @@ final class TLSState: @unchecked Sendable {
             return true
         }
         #endif
-        if inbound.spareCapacity == 0 { inbound.reserveCapacity(inbound.capacity * 2) }
-        let n = try await transport.read(into: &inbound)
-        guard n > 0 else {
+        #if os(Linux)
+        if context.configuration.kernelOffload == .transmitAndReceive {
+            // Receive offload takes over the socket's input at a record
+            // boundary: read only into `inbound`, which the handover
+            // checks. A receive that keeps receiving (multishot) would
+            // take records meant for the kernel.
+            if inbound.spareCapacity == 0 { inbound.reserveCapacity(max(inbound.capacity * 2, 32 * 1024)) }
+            let n = try await transport.read(into: &inbound)
+            guard n > 0 else {
+                engine { cv_tls_feed_eof(tls) }
+                return false
+            }
+            drained = false
+            return true
+        }
+        #endif
+        // Wait holding nothing: no buffer of ours while the peer is quiet.
+        if inbound.count == 0 {
+            inbound.releaseStorage()
+            engine { cv_tls_release_idle(tls) }
+        }
+        let bytes = try await transport.receive()
+        guard !bytes.isEmpty else {
             engine { cv_tls_feed_eof(tls) }
             return false
         }
+        if inbound.count == 0 {
+            received = consume bytes // the engine takes it in place
+        } else {
+            append(bytes)
+        }
         drained = false
         return true
+    }
+
+    /// Add `bytes` to `inbound`, which grows in receive blocks.
+    private func append(_ bytes: consuming ReceivedBytes) {
+        let need = inbound.count + bytes.count
+        if inbound.capacity < need {
+            let block = ReceivedBytes.blockSize
+            inbound.reserveCapacity(need <= block ? block : (need + block - 1) / block * block)
+        }
+        inbound.append(bytes)
     }
 
     /// Send close_notify.
@@ -664,7 +730,7 @@ extension TLSState {
     /// Give the kernel the peer's direction if the engine has nothing left
     /// of it: no ciphertext unread, no plaintext unread, no part-record.
     func startKernelReceive() {
-        guard taken == inbound.count else { return }
+        guard taken == inbound.count, received == nil else { return }
         switch engine({ cv_tls_ktls_enable_rx(tls, kernelSocket) }) {
         case 1:
             kernelReceives = true

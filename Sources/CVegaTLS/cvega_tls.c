@@ -1336,6 +1336,9 @@ cv_tls *cv_tls_new(cv_tls_ctx *c, const char *host, char *err, int errlen) {
     BIO_set_init(bio, 1);
     SSL_set_bio(t->ssl, bio, bio); // one reference, for both directions
     SSL_set_app_data(t->ssl, t);
+    // The engine's record buffers go while it holds nothing in them: an
+    // idle connection keeps none.
+    SSL_set_mode(t->ssl, SSL_MODE_RELEASE_BUFFERS);
     if (c->server) {
         SSL_set_accept_state(t->ssl);
         return t;
@@ -1403,6 +1406,12 @@ void cv_tls_return_output(cv_tls *t) {
         free(t->taken.p);
     }
     t->taken = (struct cv_out){0};
+}
+
+void cv_tls_release_idle(cv_tls *t) {
+    if (t->out.len || t->taken.p || !t->out.p) return;
+    free(t->out.p);
+    t->out = (struct cv_out){0};
 }
 
 /// A call's start: the peer's ciphertext it may take from, and an error
