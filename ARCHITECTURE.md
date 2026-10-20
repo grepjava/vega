@@ -142,6 +142,18 @@ what was written. VegaWire's `ByteBuffer` is the protocol layer's buffer:
 three words and a pointer, freed by hand at one place, so a connection table
 can hold thousands without ARC.
 
+An idle connection needs no read buffer, so it needn't hold one. A stream's
+`receive()` waits with no buffer and returns `ReceivedBytes` in storage the
+runtime lends; dropping it gives the storage back. Under io_uring the kernel
+picks the buffer from the worker's provided-buffer ring (`PBUF_RING`) when
+the bytes arrive, with one buffer-select `RECV` per call (`VEGA_RECV=multishot`
+arms one `RECV_MULTISHOT` per connection instead). The other backends wait
+for readiness and read into a 16 KiB receive block from a short per-worker
+list, which `IOBuffer`s of that size share: `releaseStorage()` gives a
+buffer's block back while its owner waits. `tryRead(into:)` reads what has
+arrived without waiting. Garuda holds about 21 KiB per idle connection this
+way, where it held 27, and 25 over TLS where it held 41.
+
 ### Sockets and streams
 
 TCP, UDP (with batched sends and receives, GSO and GRO), Unix stream and

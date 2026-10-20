@@ -113,7 +113,7 @@ public struct Framed<C: Codec>: ~Copyable { /* AsyncSequence of C.Item + send(_:
 
 | Driver | Platform | Key features |
 |---|---|---|
-| `uring` | Linux 6.7 or later (picked by a start-up probe) | one ring per worker (`SINGLE_ISSUER`, `DEFER_TASKRUN`); `ASYNC_CANCEL`. No liburing: `CVega` makes the system calls itself. Not yet, after 1.0: registered files, multishot accept and recv with provided-buffer rings, `SEND_ZC`, linked timeouts, `MSG_RING` |
+| `uring` | Linux 6.7 or later (picked by a start-up probe) | one ring per worker (`SINGLE_ISSUER`, `DEFER_TASKRUN`); `ASYNC_CANCEL`. No liburing: `CVega` makes the system calls itself. Since 1.1, `receive()` reads into a provided-buffer ring (`PBUF_RING`): one buffer-select `RECV` per call, or with `VEGA_RECV=multishot` one `RECV_MULTISHOT` per connection. Not yet: registered files, multishot accept, `SEND_ZC`, linked timeouts, `MSG_RING` |
 | `epoll` | Linux fallback (seccomp, old kernels, `VEGA_DRIVER=epoll`) | `EPOLLET`; `ScheduledIO` per fd (atomic readiness + tick + intrusive waiters) |
 | `kqueue` | macOS and BSD servers | `EV_CLEAR`, `EVFILT_USER` |
 | `iocp` | Windows | one completion port per runtime; every socket and file operation that would wait is an overlapped request (`AcceptEx`, `ConnectEx`, zero-byte `WSARecv`, `WSASend`, `WSARecvFrom`, `WSASendTo`, `TransmitFile`, `ReadFile`/`WriteFile`), the default (`IOBackend.iocp`); AFD readiness polls, as Tokio's mio does, for the waits with no request (`readable()`, pipes' and batches') and as the whole of `IOBackend.readiness` (`VEGA_DRIVER=afd`); overlapped pipe reads and writes for processes |

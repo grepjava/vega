@@ -269,6 +269,66 @@ import Testing
         }
     }
 
+    @Test(arguments: [UInt32(4), 256])
+    func underPressure(buffers: UInt32) throws {
+        // Many connections at once on a small pool, the server's receives
+        // timing out and starting again as they go: cancels race
+        // completions, the pool runs dry and fills again, and buffers go
+        // back across workers.
+        let conns = 32, messages = 100
+        for (name, rt) in Self.runtimes(workers: 3, buffers: buffers) {
+            defer { rt.shutdown() }
+            let ok = try rt.block { () async throws(IOError) -> Int in
+                let listener = try TCPListener.bind(host: "127.0.0.1", port: 0)
+                let port = listener.localPort
+                let server = rt.spawn(with: listener) { listener async in
+                    for _ in 0..<conns {
+                        guard let conn = try? await listener.accept() else { return }
+                        rt.spawn(with: conn) { conn async in
+                            while true {
+                                let bytes: ReceivedBytes
+                                do throws(IOError) {
+                                    bytes = try await Runtime.withIOTimeout(for: .milliseconds(1)) {
+                                        () async throws(IOError) -> ReceivedBytes in
+                                        try await conn.receive()
+                                    }
+                                } catch {
+                                    if error == .timedOut { continue }
+                                    return
+                                }
+                                if bytes.isEmpty { return }
+                                var out = IOBuffer(capacity: bytes.count)
+                                out.append(bytes)
+                                guard (try? await conn.write(out)) != nil else { return }
+                            }
+                        }
+                    }
+                }
+                let ok = Locked(0)
+                await withTaskGroup(of: Void.self) { group in
+                    for c in 0..<conns {
+                        group.addTask {
+                            guard let client = try? await TCPStream.connect(host: "127.0.0.1", port: port) else { return }
+                            for m in 0..<messages {
+                                if m % 10 == 0 { try? await Runtime.sleep(for: .milliseconds(2)) }
+                                let text = String(repeating: "c\(c)m\(m);", count: 1 + (c * 7 + m) % 50)
+                                guard (try? await client.write(IOBuffer(copying: Array(text.utf8)))) != nil else { return }
+                                var back = IOBuffer(capacity: text.utf8.count)
+                                guard (try? await Runtime.withIOTimeout(for: .seconds(10)) { () async throws(IOError) in
+                                    try await readExactly(client, text.utf8.count, into: &back)
+                                }) != nil, back.string == text else { return }
+                            }
+                            ok.withLock { $0 += 1 }
+                        }
+                    }
+                }
+                await server.value
+                return ok.withLock { $0 }
+            }
+            #expect(ok == conns, "\(name)")
+        }
+    }
+
     #if os(Linux)
     @Test func aPoolRunDryFallsBackToReadiness() throws {
         // Two buffers per ring: hold received bytes until it runs out, and

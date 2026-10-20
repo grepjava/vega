@@ -139,6 +139,16 @@ public struct TLSStream<Transport: AsyncReader & AsyncWriter & ~Copyable>: ~Copy
         }
     }
 
+    /// Wait for plaintext holding no buffer while the peer is quiet, and
+    /// return it in a receive block: empty after the peer's close_notify.
+    /// The block is taken only once ciphertext has come.
+    public func receive() async throws(IOError) -> ReceivedBytes {
+        try await state.awaitCiphertext(from: transport)
+        var buffer = IOBuffer(capacity: ReceivedBytes.blockSize)
+        _ = try await read(into: &buffer)
+        return ReceivedBytes(buffer)
+    }
+
     /// Encrypt and send all of `bytes`.
     public func write(_ bytes: UnsafeRawBufferPointer) async throws(IOError) {
         try await state.write(bytes, to: transport)
@@ -260,6 +270,16 @@ public struct TLSReader<Transport: AsyncReader & ~Copyable>: ~Copyable, AsyncRea
             if let n = try state.result(n, buffer: &buffer) { return n }
             fill = true // CV_TLS_WANT_READ
         }
+    }
+
+    /// Wait for plaintext holding no buffer while the peer is quiet, and
+    /// return it in a receive block: empty after the peer's close_notify.
+    /// The block is taken only once ciphertext has come.
+    public func receive() async throws(IOError) -> ReceivedBytes {
+        try await state.awaitCiphertext(from: transport)
+        var buffer = IOBuffer(capacity: ReceivedBytes.blockSize)
+        _ = try await read(into: &buffer)
+        return ReceivedBytes(buffer)
     }
 }
 
@@ -499,6 +519,18 @@ final class TLSState: @unchecked Sendable {
             // Only the other half of a split stream can have added more.
             if !isSplit { return }
         }
+    }
+
+    /// For `receive()`: when the engine has no plaintext to give, wait for
+    /// ciphertext before any plaintext buffer is taken. Receive offload
+    /// reads into the caller's buffer, so it is left to `read`.
+    func awaitCiphertext<R: AsyncReader & ~Copyable>(from transport: borrowing R) async throws(IOError) {
+        #if os(Linux)
+        if kernelReceivePending || kernelReceives { return }
+        #endif
+        guard drained else { return }
+        try await fill(from: transport)
+        drained = false // decrypt what came, or the end the engine was told of
     }
 
     /// Read ciphertext from the transport for the engine, or tell it the

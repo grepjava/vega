@@ -1,5 +1,44 @@
 # Releases
 
+## 1.1.0 — unreleased
+
+Idle connections hold no read buffer. All of it is additions; nothing that
+built against 1.0 changes.
+
+- **`receive()`** on TCP, Unix and vsock streams waits holding no buffer
+  and returns `ReceivedBytes`, the bytes in storage the runtime lends until
+  it is dropped. Empty means end of stream. `AsyncReader` gains it too, with
+  a default that reads into a receive block taken when the read needs it.
+  - Under io_uring the kernel picks the buffer from the worker's
+    provided-buffer ring (`PBUF_RING`, 256 buffers of 16 KiB by default,
+    `VEGA_RECV_BUFS`) as the bytes arrive: one buffer-select `RECV` per
+    call. `VEGA_RECV=multishot` arms one `RECV_MULTISHOT` per connection
+    instead. It is not the default: the receive stays on the ring of the
+    worker that armed it, and a busy worker reaps that ring only every 61
+    jobs, which put a slow request's p99 at 210 ms where single-shot has
+    21 ms. `VEGA_RECV=readiness` waits for readiness and reads.
+  - epoll, kqueue, IOCP and AFD wait for readiness (IOCP with its zero-byte
+    `WSARecv`) and read into a 16 KiB receive block, from a short
+    per-worker list.
+- **`tryRead(into:)`** reads what has arrived without waiting, and returns
+  nil when nothing has: Tokio's `try_read`.
+- **`IOBuffer.releaseStorage()`** gives a buffer's storage back while its
+  owner waits; a 16 KiB buffer's goes to the receive-block list, and the
+  next write or read takes storage again.
+- **TLS holds nothing while idle.** `TLSStream` and its read half have
+  their own `receive()`: when the engine has no plaintext to give it waits
+  on the transport's `receive()` and takes a receive block only once
+  ciphertext has come. Ciphertext is decrypted in place, the inbound buffer
+  gives its storage back when empty, OpenSSL runs with
+  `SSL_MODE_RELEASE_BUFFERS`, and the engine's output buffer is freed
+  before a wait. Receive offload (kTLS) keeps its bounded read.
+
+Garuda 2.2 waits in `receive()` once a connection has been quiet for 100 ms:
+27.0 KiB per idle connection becomes 21.5 KiB, and 41.2 becomes 24.5 over
+TLS, the same under every receive mode.
+
+---
+
 ## 1.0.0 — 2026-10-19
 
 Vega's API is frozen: from 1.0, Vega follows semantic versioning. A minor

@@ -11,19 +11,23 @@ import ucrt
 /// RingReceive.swift); the other drivers always read into a receive block.
 enum ReceiveMode: Sendable {
     /// One RECV_MULTISHOT per connection, into the worker's buffer pool.
+    /// It stays armed on the ring of the worker that armed it, and only that
+    /// worker reaps it: a connection whose task is stolen away waits on a
+    /// busy worker's every-61-ticks poll for its bytes.
     case multishot
-    /// One RECV with buffer select per `receive()`.
+    /// One RECV with buffer select per `receive()`, on the ring of the
+    /// worker running the reader.
     case single
     /// No pool: wait for readiness, then read into a receive block.
     case readiness
 
-    /// `VEGA_RECV=multishot|single|readiness`; multishot by default.
+    /// `VEGA_RECV=single|multishot|readiness`; single by default.
     static let environment: ReceiveMode = {
-        guard let v = getenv("VEGA_RECV") else { return .multishot }
+        guard let v = getenv("VEGA_RECV") else { return .single }
         switch String(cString: v) {
-        case "single": return .single
+        case "multishot": return .multishot
         case "readiness", "poll": return .readiness
-        default: return .multishot
+        default: return .single
         }
     }()
 
