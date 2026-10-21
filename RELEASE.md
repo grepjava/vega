@@ -1,6 +1,6 @@
 # Releases
 
-## 1.1.0 — unreleased
+## 1.1.0 — 2026-10-21
 
 Idle connections hold no read buffer. All of it is additions; nothing that
 built against 1.0 changes.

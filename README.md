@@ -13,7 +13,7 @@ epoll and kqueue. It targets Swift 6.2 and newer, and is tuned for Swift 6.3.
 and Vapor can run on it through [VegaNIO](https://github.com/grepjava/vega-nio), which keeps
 their SwiftNIO code as it is and hands Vega the scheduling and the socket I/O.
 
-**Status:** 1.0. The API is frozen: from here Vega follows semantic
+**Status:** 1.1. The API has been frozen since 1.0: Vega follows semantic
 versioning, and [RELEASE.md](RELEASE.md) lists what 1.0 renamed from 0.5. Used
 in production by one framework so far, and measured more than it has been
 battle-tested. See [ARCHITECTURE.md](ARCHITECTURE.md) for how it is built,
@@ -156,7 +156,7 @@ TSAN_OPTIONS=suppressions=$PWD/Tests/tsan.supp VEGA_MODEL_N=50000 \
 VegaTLS runs on the system's OpenSSL 3 by default (`libssl-dev` on Linux, Homebrew's `openssl@3` on macOS). The `BoringSSL` package trait builds it on a vendored BoringSSL instead, with no system OpenSSL needed:
 
 ```swift
-.package(url: "https://github.com/grepjava/vega.git", from: "1.0.0", traits: ["BoringSSL"])
+.package(url: "https://github.com/grepjava/vega.git", from: "1.1.0", traits: ["BoringSSL"])
 ```
 
 or, building Vega itself, `swift build --traits BoringSSL`.
