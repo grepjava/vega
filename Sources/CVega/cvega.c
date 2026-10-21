@@ -4281,6 +4281,10 @@ static int reap(cv_uring *r) {
     return r->nwakes;
 }
 
+_Static_assert(IORING_SQ_TASKRUN == (1U << 2), "cv_uring_completions_waiting tests this bit");
+
+const unsigned *cv_uring_kflags(cv_uring *r) { return (const unsigned *)r->sq_kflags; }
+
 int cv_uring_poll(cv_uring *r) {
     int work = sq_pending(r) != 0 || taskrun_pending(r);
     if (!work && !cq_ready(r) && !atomic_load_explicit(&r->cancels, memory_order_relaxed)) return 0;

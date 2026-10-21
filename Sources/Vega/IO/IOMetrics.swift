@@ -2,7 +2,8 @@
 public struct IOMetrics: Sendable, Equatable {
     /// Polls by a parked worker, blocking until an event or a wake.
     public var parkedPolls: UInt64 = 0
-    /// Zero-timeout polls by busy workers (every 61 scheduler ticks).
+    /// Zero-timeout polls by busy workers (every 61 scheduler ticks, and
+    /// under io_uring when completions have waited a millisecond).
     public var busyPolls: UInt64 = 0
     /// Readiness events the kernel returned.
     public var events: UInt64 = 0

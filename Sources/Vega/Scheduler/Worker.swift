@@ -20,6 +20,11 @@ final class Worker: @unchecked Sendable {
     static let injectInterval: UInt32 = 31
     /// Check timers every this many ticks while busy.
     static let timerInterval: UInt32 = 61
+    /// A busy worker whose ring has completions waiting collects them once
+    /// this long has passed since it last did, without waiting for the
+    /// timer tick: 61 slow jobs could keep a reply that has arrived waiting
+    /// for hundreds of milliseconds. Fast jobs reach the tick first.
+    static let ringPollGap: UInt64 = 1_000_000
     /// How long a worker with nothing to do spins before sleeping in the
     /// kernel, by default. Work that arrives meanwhile wakes it with a plain
     /// store instead of a futex syscall on both sides. A runtime may be
@@ -58,6 +63,10 @@ final class Worker: @unchecked Sendable {
     /// Created with the runtime, enabled in `run` (its single issuer is this
     /// thread), freed by the scheduler.
     var ring: OpaquePointer? = nil
+    /// The ring's SQ flags (cv_uring_kflags), and when it was last polled
+    /// while busy (cv_now_coarse_ns).
+    private var ringFlags: UnsafePointer<UInt32>? = nil
+    private var ringPolledAt: UInt64 = 0
     #endif
     /// The key of the `IOTaskHook` task-local, kept here so an I/O wait on
     /// this worker finds it without the static's lazy-initialization check.
@@ -360,6 +369,7 @@ final class Worker: @unchecked Sendable {
         if let ring {
             let e = cv_uring_enable(ring)
             precondition(e == 0, "vega: cannot enable io_uring (errno \(e))")
+            ringFlags = cv_uring_kflags(ring)
             // Without them (an error here), `receive()` waits for readiness.
             if s.receiveMode != .readiness {
                 _ = cv_uring_bufs_setup(ring, s.receiveBuffers, UInt32(ReceiveBlocks.size))
@@ -555,6 +565,19 @@ final class Worker: @unchecked Sendable {
         if tick % Self.timerInterval == 0 {
             _ = s.fireDueTimers(on: self)
             _ = s.pollIO(on: self)
+            #if os(Linux)
+            if ringFlags != nil { ringPolledAt = cv_now_coarse_ns() }
+            #endif
+        } else {
+            #if os(Linux)
+            if let ringFlags, cv_uring_completions_waiting(ringFlags) != 0 {
+                let now = cv_now_coarse_ns()
+                if now &- ringPolledAt >= Self.ringPollGap {
+                    ringPolledAt = now
+                    _ = s.pollIO(on: self)
+                }
+            }
+            #endif
         }
 
         if let job = lifo {

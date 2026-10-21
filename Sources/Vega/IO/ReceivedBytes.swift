@@ -12,8 +12,8 @@ import ucrt
 enum ReceiveMode: Sendable {
     /// One RECV_MULTISHOT per connection, into the worker's buffer pool.
     /// It stays armed on the ring of the worker that armed it, and only that
-    /// worker reaps it: a connection whose task is stolen away waits on a
-    /// busy worker's every-61-ticks poll for its bytes.
+    /// worker reaps it: a connection whose task is stolen away waits for
+    /// that worker, when busy, to poll its ring between jobs.
     case multishot
     /// One RECV with buffer select per `receive()`, on the ring of the
     /// worker running the reader.

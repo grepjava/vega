@@ -14,9 +14,12 @@ built against 1.0 changes.
     `VEGA_RECV_BUFS`) as the bytes arrive: one buffer-select `RECV` per
     call. `VEGA_RECV=multishot` arms one `RECV_MULTISHOT` per connection
     instead. It is not the default: the receive stays on the ring of the
-    worker that armed it, and a busy worker reaps that ring only every 61
-    jobs, which put a slow request's p99 at 210 ms where single-shot has
-    21 ms. `VEGA_RECV=readiness` waits for readiness and reads.
+    worker that armed it, so its bytes wait for that worker to poll.
+    `VEGA_RECV=readiness` waits for readiness and reads.
+  - A busy worker polls its ring between jobs once the kernel has flagged
+    completions (`IORING_SQ_TASKRUN`) and a millisecond has passed since it
+    last did, not only every 61 jobs: a slow request's p99 behind a busy
+    worker went from 21 ms to 19 ms, and from 21 to 18 under multishot.
   - epoll, kqueue, IOCP and AFD wait for readiness (IOCP with its zero-byte
     `WSARecv`) and read into a 16 KiB receive block, from a short
     per-worker list.

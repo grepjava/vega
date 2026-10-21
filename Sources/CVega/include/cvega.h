@@ -765,6 +765,14 @@ void cv_uring_cancel(cv_uring_op *op, uint64_t gen);
 /// Owner thread, busy: submit what is queued and reap without waiting.
 /// Returns how many waiters to resume (cv_uring_wakes(r)[0..<n]).
 int cv_uring_poll(cv_uring *r);
+/// The ring's SQ flags word, which the kernel writes: a busy owner checks
+/// it between jobs with cv_uring_completions_waiting.
+const unsigned *cv_uring_kflags(cv_uring *r);
+/// The kernel has completions for the ring's owner to collect
+/// (IORING_SQ_TASKRUN, set under DEFER_TASKRUN with TASKRUN_FLAG): one load.
+static inline int cv_uring_completions_waiting(const unsigned *kflags) {
+    return (__atomic_load_n(kflags, __ATOMIC_RELAXED) & (1U << 2)) != 0;
+}
 /// Owner thread, nothing to run: submit, spin up to spin_ns, then block in
 /// the ring until a completion, an unpark or timeout_ns (< 0: forever).
 /// Consumes a pending unpark, as cv_park does. Returns waiters to resume.

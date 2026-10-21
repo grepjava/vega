@@ -202,7 +202,7 @@ io_uring matches epoll at 64 connections, is 2% behind at 256, and is 9% ahead a
 
 **How it works.**
 - A task submits on the ring of the worker running it. That worker reaps the completion and resumes the task, so the task's next step runs where its data is hot.
-- Submissions are flushed, and completions reaped, when the worker runs out of local work, every 61 ticks while busy, and when it parks.
+- Submissions are flushed, and completions reaped, when the worker runs out of local work, every 61 ticks while busy, and when it parks. Since 1.1 a busy worker also checks between jobs for the kernel's `IORING_SQ_TASKRUN` flag, and polls when it is set and a millisecond has passed since its last poll.
 - A parked worker blocks in its own ring with an `IORING_OP_FUTEX_WAIT` armed on its parker word. The existing `cv_unpark` futex wake therefore wakes the ring, and no wake path changed.
 - **Operations.** Reads and accepts are native. Everything else (connect, datagram batches, writes that found the socket full) waits on a one-shot `POLL_ADD`, then retries the syscall.
 - **Cancellation.**

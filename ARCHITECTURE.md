@@ -71,7 +71,9 @@ Each worker runs jobs in this order, as Tokio's do:
 - **Parking.** A worker that finds nothing spins briefly (50 µs on Linux by
   default: `idleSpin`, `VEGA_SPIN_NS`), then sleeps. The worker that owns the
   timers sleeps in the I/O driver with the next deadline as its timeout. Busy
-  workers poll the driver and timers every 61 ticks.
+  workers poll the driver and timers every 61 ticks; under io_uring they
+  also collect completions the kernel has flagged, once a millisecond has
+  passed since they last did.
 
 ### The cooperative budget
 
